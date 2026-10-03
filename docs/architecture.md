@@ -162,3 +162,20 @@ sequenceDiagram
    - 當瀏覽器載入時，自動向 `GET /api/map` 請求最新儲存的路網；若離線則以 `localStorage` 雙層容災載入。
    - 點擊頂部導航列「💾 儲存路網」即可一鍵寫入硬碟並透過 WebSocket 廣播更新至所有連線用戶端。
 
+---
+
+## 六、前後端分離開發工作流 (Decoupled Development Workflow)
+
+為了提供最流暢的開發體驗，系統支援前後端獨立運作的模式：
+
+1. **後端服務 (Backend Service)**：
+   - 運行於 Docker 容器內，提供 FastAPI REST API 與 WebSocket 車隊資料串流 (`http://localhost:8000`)。
+2. **前端服務 (Frontend Vite Dev Server)**：
+   - 運行於本機 Node.js 環境 (`http://localhost:5173`)，具備秒級熱模組替換 (HMR)。
+   - 任何在 VS Code 中的程式碼修改（UI、樣式、狀態邏輯）存檔後瞬間在瀏覽器呈現，**完全不需執行 `npm run build`**。
+3. **透明反向代理 (Reverse Proxy)**：
+   - 透過 `frontend/vite.config.ts` 中的 `proxy` 配置，前端送往 `/api` 與 `/ws` 的所有請求會自動無縫轉發至後端 Port `8000`，解決 CORS 跨來源問題。
+4. **一鍵啟動腳本**：
+   - 專案根目錄已建立 `./start_dev.sh`，執行即可同時確保後端 Docker 運行並啟動前端熱重載環境。
+
+
