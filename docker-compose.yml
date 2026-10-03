@@ -1,0 +1,55 @@
+services:
+  # 1. Open-RMF 核心與 Gazebo 模擬節點容器
+  rmf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: open-rmf:jazzy
+    container_name: open_rmf_jazzy
+    restart: unless-stopped
+    network_mode: host
+    ipc: host
+    privileged: true
+
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - ROS_DOMAIN_ID=0
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    volumes:
+      # X11 顯示傳發 (讓容器內的 Gazebo / RViz2 可以在本機螢幕顯示)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:rw
+      # 本機程式碼與前後端掛載 (主機修改，容器內即時生效)
+      - ./workspace:/root/rmf_ws/src/custom_ws:rw
+      - ./backend:/root/rmf_ws/backend:rw
+      - ./frontend:/root/rmf_ws/frontend:rw
+
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # 2. RMF Web Studio 前後端整合服務 (FastAPI + WebSocket + React Web)
+  web:
+    image: open-rmf:jazzy
+    container_name: open_rmf_web
+    restart: unless-stopped
+    network_mode: host
+    ipc: host
+    environment:
+      - ROS_DOMAIN_ID=0
+    volumes:
+      - ./backend:/root/rmf_ws/backend:rw
+      - ./frontend:/root/rmf_ws/frontend:rw
+    working_dir: /root/rmf_ws/backend
+    command: python3 server.py

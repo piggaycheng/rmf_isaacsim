@@ -1,0 +1,53 @@
+building_name: office_map
+levels:
+  L1:
+    lanes:
+    - - 3
+      - 2
+      - {}
+    - - 2
+      - 3
+      - {}
+    - - 1
+      - 2
+      - {}
+    - - 2
+      - 1
+      - {}
+    - - 0
+      - 1
+      - {}
+    - - 1
+      - 0
+      - {}
+    vertices:
+    - - 0.62
+      - 2.63
+      - is_charger: false
+        is_parking_spot: false
+        is_holding_point: false
+        is_workcell: false
+        name: wp_1
+    - - -0.87
+      - 5.21
+      - is_charger: false
+        is_parking_spot: false
+        is_holding_point: false
+        is_workcell: false
+        name: wp_2
+    - - -4.42
+      - 6.31
+      - is_charger: false
+        is_parking_spot: false
+        is_holding_point: false
+        is_workcell: false
+        name: wp_3
+    - - -6.65
+      - 6.53
+      - is_charger: false
+        is_parking_spot: false
+        is_holding_point: false
+        is_workcell: false
+        name: wp_4
+doors: {}
+lifts: {}

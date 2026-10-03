@@ -1,0 +1,95 @@
+# ==============================================================================
+# Open-RMF Web Studio - .gitignore
+# ==============================================================================
+
+# Node.js & Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+dist-ssr/
+frontend/dist-ssr/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.eslintcache
+
+# Python
+__pycache__/
+backend/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+eggs/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# ROS 2 & Colcon Build Outputs
+install/
+log/
+workspace/build/
+workspace/install/
+workspace/log/
+COLCON_IGNORE
+*.autosave
+*.bag
+
+# External / Upstream Cloned Repositories
+# (rmf is an upstream repository with its own .git history)
+rmf/
+
+# Testing & Agent Artifacts
+.agent/
+.agents/
+.playwright/
+.playwright-cli/
+test-results/
+playwright-report/
+blob-report/
+
+# Backend Uploads (Keep default sample SLAM map and .gitkeep)
+backend/uploads/*
+!backend/uploads/current_slam_map.png
+!backend/uploads/.gitkeep
+
+# Environment variables & Sensitive data
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Operating System & IDE Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~

@@ -1,0 +1,1138 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { MapCanvas, EditorTool } from '@/components/MapCanvas';
+import { DispatchModal } from '@/components/DispatchModal';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Waypoint, Lane, Robot, Task, WaypointType, SlamMap } from '@/types/rmf';
+import { ImportMapModal } from '@/components/ImportMapModal';
+import {
+  MousePointer,
+  MapPin,
+  GitCommit,
+  BatteryCharging,
+  SquareParking,
+  Boxes,
+  Send,
+  Download,
+  Trash2,
+  Play,
+  RotateCcw,
+  Layers,
+  Radio,
+  Wifi,
+  WifiOff,
+  Cpu,
+  FileUp,
+  Map as MapIcon,
+  X,
+  BoxSelect,
+  Save,
+  Check,
+} from 'lucide-react';
+
+// Initial Demo Map Data (Office like)
+const INITIAL_WAYPOINTS: Waypoint[] = [
+  { id: 'wp_1', name: 'pantry', x: 2.0, y: 5.0, type: 'workcell' },
+  { id: 'wp_2', name: 'lounge', x: 8.0, y: 5.0, type: 'normal' },
+  { id: 'wp_3', name: 'junction_1', x: 5.0, y: 5.0, type: 'normal' },
+  { id: 'wp_4', name: 'junction_2', x: 5.0, y: 1.0, type: 'normal' },
+  { id: 'wp_5', name: 'coe', x: 10.0, y: 1.0, type: 'normal' },
+  { id: 'wp_6', name: 'charger_1', x: 2.0, y: 1.0, type: 'charger' },
+  { id: 'wp_7', name: 'parking_1', x: 8.0, y: -2.0, type: 'parking' },
+];
+
+const INITIAL_LANES: Lane[] = [
+  { id: 'lane_1', start_id: 'wp_1', end_id: 'wp_3', bidirectional: true },
+  { id: 'lane_2', start_id: 'wp_3', end_id: 'wp_2', bidirectional: true },
+  { id: 'lane_3', start_id: 'wp_3', end_id: 'wp_4', bidirectional: true },
+  { id: 'lane_4', start_id: 'wp_4', end_id: 'wp_6', bidirectional: true },
+  { id: 'lane_5', start_id: 'wp_4', end_id: 'wp_5', bidirectional: true },
+  { id: 'lane_6', start_id: 'wp_5', end_id: 'wp_7', bidirectional: true },
+];
+
+const INITIAL_ROBOTS: Robot[] = [
+  {
+    id: 'tinyRobot1',
+    name: 'tinyRobot1',
+    fleet: 'tinyRobot',
+    x: 2.0,
+    y: 1.0,
+    yaw: 0,
+    battery: 94,
+    status: 'idle',
+    current_task: '等待派發任務',
+  },
+  {
+    id: 'deliveryRobot1',
+    name: 'deliveryRobot1',
+    fleet: 'deliveryFleet',
+    x: 8.0,
+    y: 5.0,
+    yaw: 1.57,
+    battery: 78,
+    status: 'moving',
+    current_task: '前往 coe 巡邏中',
+  },
+];
+
+export function App() {
+  // 1. Mode state (Persisted in localStorage so F5 keeps current mode)
+  const [mode, setMode] = useState<'edit' | 'monitor'>(() => {
+    try {
+      return (localStorage.getItem('rmf_active_mode') as 'edit' | 'monitor') || 'edit';
+    } catch (e) {
+      return 'edit';
+    }
+  });
+  const [tool, setTool] = useState<EditorTool>('select');
+
+  // 2. Navigation Graph state (Lazy initialized from localStorage for 0ms restoration)
+  const [waypoints, setWaypoints] = useState<Waypoint[]>(() => {
+    try {
+      const cached = localStorage.getItem('rmf_active_nav_graph');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.waypoints && Array.isArray(parsed.waypoints) && parsed.waypoints.length > 0) {
+          return parsed.waypoints;
+        }
+      }
+    } catch (e) {}
+    return INITIAL_WAYPOINTS;
+  });
+
+  const [lanes, setLanes] = useState<Lane[]>(() => {
+    try {
+      const cached = localStorage.getItem('rmf_active_nav_graph');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.lanes && Array.isArray(parsed.lanes)) {
+          return parsed.lanes;
+        }
+      }
+    } catch (e) {}
+    return INITIAL_LANES;
+  });
+
+  const [robots, setRobots] = useState<Robot[]>(INITIAL_ROBOTS);
+  const [tasks, setTasks] = useState<Task[]>([
+    {
+      id: 'task_001',
+      type: 'patrol',
+      target_waypoint: 'coe',
+      robot_id: 'deliveryRobot1',
+      status: 'active',
+      progress: 45,
+      created_at: '13:20:10',
+    },
+  ]);
+
+  const [selectedWaypointIds, setSelectedWaypointIds] = useState<string[]>([]);
+  const [selectedLaneIds, setSelectedLaneIds] = useState<string[]>([]);
+  const [dispatchModalOpen, setDispatchModalOpen] = useState<boolean>(false);
+  const [dispatchPresetWp, setDispatchPresetWp] = useState<Waypoint | null>(null);
+
+  // SLAM Map state
+  const [slamMap, setSlamMap] = useState<SlamMap | null>(null);
+  const [importModalOpen, setImportModalOpen] = useState<boolean>(false);
+
+  // Backend / Simulation state
+  const [isMockSimulation, setIsMockSimulation] = useState<boolean>(true);
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const isInitialMount = useRef(true);
+
+  // Update mode and persist to localStorage
+  const handleSetMode = (newMode: 'edit' | 'monitor') => {
+    setMode(newMode);
+    try {
+      localStorage.setItem('rmf_active_mode', newMode);
+    } catch (e) {}
+  };
+
+  // 1. Fetch initial SLAM map from backend if exists
+  useEffect(() => {
+    fetch('/api/map/slam')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.image_url) {
+          setSlamMap(data);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 2. Fetch initial Saved Navigation Graph from backend on startup
+  useEffect(() => {
+    fetch('/api/map')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && Array.isArray(data.waypoints) && data.waypoints.length > 0) {
+          const cached = localStorage.getItem('rmf_active_nav_graph');
+          if (!cached) {
+            setWaypoints(data.waypoints);
+            if (Array.isArray(data.lanes)) setLanes(data.lanes);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 3. Auto-Save Effect: Automatically syncs to localStorage (0ms) and backend (debounced 800ms) on any change
+  useEffect(() => {
+    const payload = {
+      name: 'office_map',
+      waypoints,
+      lanes,
+    };
+
+    // Immediate local save
+    try {
+      localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
+    } catch (e) {}
+
+    // Skip network POST on initial component load
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+
+    // Debounced server auto-save
+    const timer = setTimeout(async () => {
+      try {
+        await fetch('/api/map', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        setSaveToast('已自動存檔');
+        setTimeout(() => setSaveToast(null), 2000);
+      } catch (err) {
+        // Fallback: local storage is already updated
+      }
+    }, 800);
+
+    return () => clearTimeout(timer);
+  }, [waypoints, lanes]);
+
+  // WebSocket Connection to Backend
+  useEffect(() => {
+    const connectWs = () => {
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host || 'localhost:8000';
+        const ws = new WebSocket(`${protocol}//${host}/ws/fleet`);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          setIsConnected(true);
+          setIsMockSimulation(false);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'fleet_states' && data.robots) {
+              setRobots(data.robots);
+            }
+            if (data.type === 'tasks' && data.tasks) {
+              setTasks(data.tasks);
+            }
+            if (data.type === 'slam_map' && data.map) {
+              setSlamMap(data.map);
+            }
+          } catch (e) {
+            console.error('Failed to parse WS msg', e);
+          }
+        };
+
+        ws.onclose = () => {
+          setIsConnected(false);
+        };
+      } catch (err) {
+        setIsConnected(false);
+      }
+    };
+
+    connectWs();
+    const interval = setInterval(() => {
+      if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
+        connectWs();
+      }
+    }, 5000);
+
+    return () => {
+      clearInterval(interval);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []);
+
+  // Mock Simulation Loop (Runs when ROS 2 is not active or mock is enabled)
+  useEffect(() => {
+    if (!isMockSimulation) return;
+
+    const timer = setInterval(() => {
+      setRobots((prevRobots) =>
+        prevRobots.map((robot) => {
+          if (robot.status === 'moving') {
+            // Move gently towards a target or patrol
+            const targetX = robot.id === 'tinyRobot1' ? 8.0 : 2.0;
+            const targetY = robot.id === 'tinyRobot1' ? 5.0 : 1.0;
+            const dx = targetX - robot.x;
+            const dy = targetY - robot.y;
+            const dist = Math.hypot(dx, dy);
+
+            if (dist < 0.1) {
+              return {
+                ...robot,
+                status: 'idle',
+                current_task: '已到達目的地',
+                battery: Math.max(10, robot.battery - 0.2),
+              };
+            }
+
+            const step = 0.05;
+            const newX = robot.x + (dx / dist) * step;
+            const newY = robot.y + (dy / dist) * step;
+            const yaw = Math.atan2(dy, dx);
+
+            return {
+              ...robot,
+              x: newX,
+              y: newY,
+              yaw,
+              battery: Math.max(10, robot.battery - 0.05),
+            };
+          }
+          return robot;
+        })
+      );
+
+      // Advance task progress
+      setTasks((prevTasks) =>
+        prevTasks.map((t) => {
+          if (t.status === 'active') {
+            const nextProgress = t.progress + 2;
+            if (nextProgress >= 100) {
+              return { ...t, progress: 100, status: 'completed' };
+            }
+            return { ...t, progress: nextProgress };
+          }
+          return t;
+        })
+      );
+    }, 100);
+
+    return () => clearInterval(timer);
+  }, [isMockSimulation]);
+
+  // Editor Actions
+  const handleAddWaypoint = (x: number, y: number, type: WaypointType) => {
+    const id = `wp_${Date.now()}`;
+    const name = `${type === 'normal' ? 'wp' : type}_${waypoints.length + 1}`;
+    const newWp: Waypoint = { id, name, x, y, type };
+    setWaypoints((prev) => [...prev, newWp]);
+    setSelectedWaypointIds([id]);
+    setSelectedLaneIds([]);
+  };
+
+  const handleMoveWaypoint = (id: string, x: number, y: number) => {
+    setWaypoints((prev) =>
+      prev.map((w) => (w.id === id ? { ...w, x, y } : w))
+    );
+  };
+
+  const handleAddLane = (startId: string, endId: string) => {
+    const exists = lanes.some(
+      (l) =>
+        (l.start_id === startId && l.end_id === endId) ||
+        (l.start_id === endId && l.end_id === startId)
+    );
+    if (exists) return;
+
+    const newLane: Lane = {
+      id: `lane_${Date.now()}`,
+      start_id: startId,
+      end_id: endId,
+      bidirectional: true,
+    };
+    setLanes((prev) => [...prev, newLane]);
+  };
+
+  const handleSelectWaypoint = (id: string | null) => {
+    if (id === null) {
+      setSelectedWaypointIds([]);
+      setSelectedLaneIds([]);
+    } else {
+      setSelectedWaypointIds([id]);
+      setSelectedLaneIds([]);
+    }
+  };
+
+  const handleSelectMultiple = (wpIds: string[], laneIds: string[]) => {
+    setSelectedWaypointIds(wpIds);
+    setSelectedLaneIds(laneIds);
+  };
+
+  const handleDeleteSelected = () => {
+    if (selectedWaypointIds.length === 0 && selectedLaneIds.length === 0) return;
+
+    // Delete selected waypoints
+    setWaypoints((prev) => prev.filter((w) => !selectedWaypointIds.includes(w.id)));
+
+    // Delete selected lanes OR lanes connected to deleted waypoints
+    setLanes((prev) =>
+      prev.filter(
+        (l) =>
+          !selectedLaneIds.includes(l.id) &&
+          !selectedWaypointIds.includes(l.start_id) &&
+          !selectedWaypointIds.includes(l.end_id)
+      )
+    );
+
+    setSelectedWaypointIds([]);
+    setSelectedLaneIds([]);
+  };
+
+  // Keyboard Shortcut: Delete / Backspace to batch delete selected items
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      const isInput =
+        activeEl?.tagName === 'INPUT' ||
+        activeEl?.tagName === 'TEXTAREA' ||
+        activeEl?.tagName === 'SELECT';
+      if (isInput) return;
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedWaypointIds.length > 0 || selectedLaneIds.length > 0) {
+          handleDeleteSelected();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedWaypointIds, selectedLaneIds]);
+
+  // Dispatch Action
+  const handleDispatchTask = (taskReq: {
+    type: 'patrol' | 'delivery' | 'goto';
+    target_waypoint: string;
+    destination_waypoint?: string;
+    robot_id?: string;
+  }) => {
+    const newTask: Task = {
+      id: `task_${Date.now().toString().slice(-4)}`,
+      type: taskReq.type,
+      target_waypoint: taskReq.target_waypoint,
+      destination_waypoint: taskReq.destination_waypoint,
+      robot_id: taskReq.robot_id || 'tinyRobot1',
+      status: 'active',
+      progress: 5,
+      created_at: new Date().toLocaleTimeString(),
+    };
+
+    setTasks((prev) => [newTask, ...prev]);
+
+    // Update robot state in mock simulation
+    const assignedRobotId = taskReq.robot_id || 'tinyRobot1';
+    setRobots((prev) =>
+      prev.map((r) =>
+        r.id === assignedRobotId
+          ? {
+              ...r,
+              status: 'moving',
+              current_task: `執行 ${taskReq.type} 前往 ${taskReq.target_waypoint}`,
+            }
+          : r
+      )
+    );
+
+    // If connected to real backend, send over WebSocket / REST
+    if (isConnected && wsRef.current) {
+      wsRef.current.send(
+        JSON.stringify({
+          action: 'dispatch_task',
+          payload: taskReq,
+        })
+      );
+    }
+  };
+
+  // Save Map to Backend & LocalStorage
+  const handleSaveMap = async () => {
+    setIsSaving(true);
+    const payload = {
+      name: 'office_map',
+      waypoints,
+      lanes,
+    };
+    try {
+      // 1. Immediately cache in localStorage
+      localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
+
+      // 2. Persist to Backend server disk (JSON + Open-RMF standard building.yaml)
+      const res = await fetch('/api/map', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSaveToast(`已儲存 (${waypoints.length} 點, ${lanes.length} 線)`);
+      } else {
+        setSaveToast('儲存失敗');
+      }
+    } catch (e) {
+      setSaveToast('已儲存至瀏覽器快取 (伺服器離線)');
+    } finally {
+      setIsSaving(false);
+      setTimeout(() => setSaveToast(null), 3000);
+    }
+  };
+
+  // Export JSON Map
+  const handleExportJson = () => {
+    const data = {
+      name: 'rmf_navigation_graph',
+      waypoints,
+      lanes,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'rmf_navigation_graph.json';
+    a.click();
+  };
+
+  // Export Building YAML (Open-RMF Building Map standard)
+  const handleExportBuildingYaml = () => {
+    window.open('/api/map/download/yaml', '_blank');
+  };
+
+  // Export Nav Graph 0 YAML (Open-RMF nav_graphs/0.yaml for fleet adapters)
+  const handleExportNav0Yaml = () => {
+    window.open('/api/map/download/nav_graph_0', '_blank');
+  };
+
+  const selectedWaypoint =
+    selectedWaypointIds.length === 1
+      ? waypoints.find((w) => w.id === selectedWaypointIds[0]) || null
+      : null;
+
+  const selectedLane =
+    selectedLaneIds.length === 1
+      ? lanes.find((l) => l.id === selectedLaneIds[0]) || null
+      : null;
+
+  return (
+    <div className="flex flex-col h-screen w-screen bg-[#070a13] text-slate-100 overflow-hidden select-none font-sans">
+      {/* 1. Top Navbar */}
+      <header className="h-14 border-b border-slate-800 bg-[#0d1322]/90 backdrop-blur px-4 flex items-center justify-between z-20">
+        <div className="flex items-center space-x-3">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-primary to-cyan-400 flex items-center justify-center font-bold text-white shadow-lg shadow-primary/20">
+            <Cpu className="w-5 h-5" />
+          </div>
+          <div>
+            <h1 className="font-bold text-sm tracking-wide flex items-center space-x-2">
+              <span>RMF Web Studio</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/20 text-primary border border-primary/30">
+                Jazzy
+              </span>
+            </h1>
+            <p className="text-[11px] text-slate-400">Open-RMF 路網編輯與即時車隊監控系統</p>
+          </div>
+        </div>
+
+        {/* Mode Selector */}
+        <div className="flex items-center bg-slate-900 border border-slate-800 p-1 rounded-lg">
+          <button
+            onClick={() => handleSetMode('edit')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              mode === 'edit'
+                ? 'bg-primary text-primary-foreground shadow'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <GitCommit className="w-3.5 h-3.5" />
+            <span>✏️ 編輯路網 (Edit Mode)</span>
+          </button>
+          <button
+            onClick={() => handleSetMode('monitor')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              mode === 'monitor'
+                ? 'bg-primary text-primary-foreground shadow'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>📡 即時監控 (Monitor Mode)</span>
+          </button>
+        </div>
+
+        {/* Right Info & Actions */}
+        <div className="flex items-center space-x-3">
+          {/* Status Indicator */}
+          <div className="flex items-center space-x-1.5 text-xs px-2.5 py-1 rounded-full border border-slate-800 bg-slate-900/60">
+            {isConnected ? (
+              <>
+                <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-emerald-400 font-medium">RMF Core 連線中</span>
+              </>
+            ) : isMockSimulation ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span className="text-cyan-400 font-medium">模擬展示模式 (Mock)</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="w-3.5 h-3.5 text-rose-400" />
+                <span className="text-rose-400 font-medium">未連線</span>
+              </>
+            )}
+          </div>
+
+          {/* Save Status / Feedback */}
+          {saveToast && (
+            <span className="text-xs px-2.5 py-1 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center transition-all shadow-sm">
+              <Check className="w-3.5 h-3.5 mr-1 text-emerald-400" />
+              {saveToast}
+            </span>
+          )}
+
+          <Button
+            size="sm"
+            className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50"
+            onClick={handleSaveMap}
+            disabled={isSaving}
+            title="儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)"
+          >
+            <Save className="w-3.5 h-3.5 mr-1" />
+            {isSaving ? '儲存中...' : '儲存路網'}
+          </Button>
+
+          <Button
+            size="sm"
+            variant={slamMap ? 'secondary' : 'outline'}
+            onClick={() => setImportModalOpen(true)}
+            title="上傳並顯示 ROS SLAM 雷達地圖 (.pgm + map.yaml)"
+          >
+            <FileUp className="w-3.5 h-3.5 mr-1 text-primary" />
+            {slamMap ? '已載入 SLAM 地圖' : '載入 SLAM 地圖'}
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setWaypoints(INITIAL_WAYPOINTS);
+              setLanes(INITIAL_LANES);
+              setRobots(INITIAL_ROBOTS);
+            }}
+            title="重設為範例路網"
+          >
+            <RotateCcw className="w-3.5 h-3.5 mr-1" />
+            範例路網
+          </Button>
+
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleExportBuildingYaml}
+            title="下載 Open-RMF 建築總圖 (building.yaml)"
+          >
+            <Download className="w-3.5 h-3.5 mr-1" />
+            building.yaml
+          </Button>
+
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleExportNav0Yaml}
+            title="下載 Open-RMF 車隊專用導航路網 (nav_graphs/0.yaml)"
+          >
+            <Download className="w-3.5 h-3.5 mr-1" />
+            0.yaml
+          </Button>
+        </div>
+      </header>
+
+      {/* 2. Main Workspace */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Left Toolbar (Edit Mode Only) */}
+        {mode === 'edit' && (
+          <aside className="w-14 border-r border-slate-800 bg-[#0d1322] flex flex-col items-center py-3 space-y-2 z-10">
+            <button
+              onClick={() => setTool('select')}
+              title="選取工具（單選點位、拖曳移動、空白處拖曳矩形框選）"
+              className={`p-2.5 rounded-lg transition-colors ${
+                tool === 'select' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <MousePointer className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => setTool('waypoint')}
+              title="新增一般導航點 (Waypoint)"
+              className={`p-2.5 rounded-lg transition-colors ${
+                tool === 'waypoint' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <MapPin className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => setTool('lane')}
+              title="連接兩點建立路徑 (Lane)"
+              className={`p-2.5 rounded-lg transition-colors ${
+                tool === 'lane' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <GitCommit className="w-5 h-5" />
+            </button>
+            <div className="w-8 h-px bg-slate-800 my-1" />
+            <button
+              onClick={() => setTool('charger')}
+              title="新增充電樁點位 (Charger)"
+              className={`p-2.5 rounded-lg transition-colors ${
+                tool === 'charger' ? 'bg-amber-500 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <BatteryCharging className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => setTool('parking')}
+              title="新增停車/等候點 (Parking)"
+              className={`p-2.5 rounded-lg transition-colors ${
+                tool === 'parking' ? 'bg-purple-500 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <SquareParking className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => setTool('workcell')}
+              title="新增工作/取放料點 (Workcell)"
+              className={`p-2.5 rounded-lg transition-colors ${
+                tool === 'workcell' ? 'bg-emerald-500 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <Boxes className="w-5 h-5" />
+            </button>
+          </aside>
+        )}
+
+        {/* Center: Interactive Map Canvas */}
+        <main className="flex-1 h-full relative">
+          <MapCanvas
+            mode={mode}
+            tool={tool}
+            waypoints={waypoints}
+            lanes={lanes}
+            robots={robots}
+            slamMap={slamMap}
+            selectedWaypointIds={selectedWaypointIds}
+            selectedLaneIds={selectedLaneIds}
+            onSelectWaypoint={handleSelectWaypoint}
+            onSelectMultiple={handleSelectMultiple}
+            onAddWaypoint={handleAddWaypoint}
+            onMoveWaypoint={handleMoveWaypoint}
+            onAddLane={handleAddLane}
+            onWaypointClickInMonitor={(wp) => {
+              setDispatchPresetWp(wp);
+              setDispatchModalOpen(true);
+            }}
+          />
+
+          {/* Monitor Mode: Floating Quick Dispatch Prompt */}
+          {mode === 'monitor' && (
+            <div className="absolute top-4 left-4 bg-slate-900/90 backdrop-blur border border-slate-800 p-3 rounded-xl shadow-xl flex items-center space-x-3 pointer-events-auto">
+              <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary">
+                <Play className="w-4 h-4 fill-primary" />
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate-200">地圖互動派單</p>
+                <p className="text-[11px] text-slate-400">點擊地圖上的任意站點即可快速派遣任務</p>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setDispatchPresetWp(waypoints[0] || null);
+                  setDispatchModalOpen(true);
+                }}
+              >
+                <Send className="w-3.5 h-3.5 mr-1" />
+                立即派單
+              </Button>
+            </div>
+          )}
+        </main>
+
+        {/* Right Sidebar: Contextual Info & Inspector */}
+        <aside className="w-80 border-l border-slate-800 bg-[#0d1322] flex flex-col p-4 space-y-4 overflow-y-auto z-10">
+          {mode === 'edit' ? (
+            /* Edit Mode: Waypoint / Lane Inspector */
+            <div className="space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <h2 className="text-sm font-bold text-slate-200 flex items-center space-x-1.5">
+                  <Layers className="w-4 h-4 text-primary" />
+                  <span>路網屬性檢視器</span>
+                </h2>
+                <Badge variant="outline" className="text-[10px]">
+                  {waypoints.length} 站點 / {lanes.length} 路線
+                </Badge>
+              </div>
+
+              {/* SLAM Map Info Card (if loaded) */}
+              {slamMap && (
+                <div className="bg-slate-900/80 border border-cyan-800/40 p-3 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-cyan-400 flex items-center">
+                      <MapIcon className="w-3.5 h-3.5 mr-1" />
+                      SLAM 雷達底圖
+                    </span>
+                    <button
+                      onClick={() => setSlamMap(null)}
+                      className="text-slate-400 hover:text-rose-400 p-0.5 rounded transition-colors"
+                      title="卸載底圖"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="text-[11px] text-slate-300 space-y-0.5">
+                    <p className="truncate text-slate-400">檔案: {slamMap.name}</p>
+                    <p>真實尺寸: {slamMap.real_width_m.toFixed(1)}m × {slamMap.real_height_m.toFixed(1)}m</p>
+                    <p>解析度: {slamMap.resolution} m/px</p>
+                    <p>原點: [{slamMap.origin[0]}, {slamMap.origin[1]}]</p>
+                  </div>
+                  <div className="pt-1">
+                    <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                      <span>底圖不透明度</span>
+                      <span>{Math.round((slamMap.opacity ?? 0.85) * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1.0"
+                      step="0.05"
+                      value={slamMap.opacity ?? 0.85}
+                      onChange={(e) =>
+                        setSlamMap({ ...slamMap, opacity: parseFloat(e.target.value) })
+                      }
+                      className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Multi-selection Batch Inspector */}
+              {selectedWaypointIds.length > 1 || (selectedWaypointIds.length > 0 && selectedLaneIds.length > 0) || selectedLaneIds.length > 1 ? (
+                <div className="space-y-3 bg-slate-900/60 border border-amber-900/40 p-3.5 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-amber-400 flex items-center">
+                      <BoxSelect className="w-3.5 h-3.5 mr-1" />
+                      批次選取項目
+                    </span>
+                    <Badge variant="warning" className="text-[10px]">
+                      {selectedWaypointIds.length} 站點 / {selectedLaneIds.length} 路線
+                    </Badge>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400">已透過矩形框選或 Shift 選取以下多個項目：</p>
+                  
+                  {selectedWaypointIds.length > 0 && (
+                    <div className="flex flex-wrap gap-1 max-h-32 overflow-y-auto p-1.5 bg-slate-950/60 rounded-lg border border-slate-800">
+                      {waypoints
+                        .filter((w) => selectedWaypointIds.includes(w.id))
+                        .map((w) => (
+                          <span
+                            key={w.id}
+                            className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-700 truncate max-w-[120px]"
+                          >
+                            {w.name}
+                          </span>
+                        ))}
+                    </div>
+                  )}
+
+                  <div className="pt-2 space-y-1.5">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={handleDeleteSelected}
+                      className="w-full h-8 text-xs font-semibold"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 mr-1" />
+                      批次刪除選取的 {selectedWaypointIds.length + selectedLaneIds.length} 個項目 (Del)
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setSelectedWaypointIds([]);
+                        setSelectedLaneIds([]);
+                      }}
+                      className="w-full h-7 text-xs text-slate-400"
+                    >
+                      取消選取
+                    </Button>
+                  </div>
+                </div>
+              ) : selectedLane ? (
+                /* Single Lane Inspector */
+                <div className="space-y-3 bg-slate-900/60 border border-slate-800 p-3.5 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-sky-400 flex items-center">
+                      <GitCommit className="w-3.5 h-3.5 mr-1" />
+                      路線屬性 (Lane)
+                    </span>
+                    <Badge variant="secondary" className="text-[10px]">
+                      {selectedLane.bidirectional ? '雙向通行' : '單向通行'}
+                    </Badge>
+                  </div>
+
+                  <div className="text-xs text-slate-300 space-y-1 bg-slate-950 p-2 rounded-md border border-slate-800">
+                    <p className="text-[11px] text-slate-400">連接點：</p>
+                    <p className="font-mono text-[11px]">
+                      {waypoints.find((w) => w.id === selectedLane.start_id)?.name || selectedLane.start_id}
+                      {' ⇄ '}
+                      {waypoints.find((w) => w.id === selectedLane.end_id)?.name || selectedLane.end_id}
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">通行方向</label>
+                    <select
+                      value={selectedLane.bidirectional ? 'bi' : 'uni'}
+                      onChange={(e) => {
+                        const isBi = e.target.value === 'bi';
+                        setLanes((prev) =>
+                          prev.map((l) => (l.id === selectedLane.id ? { ...l, bidirectional: isBi } : l))
+                        );
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200"
+                    >
+                      <option value="bi">雙向通行 (Bidirectional)</option>
+                      <option value="uni">單向通行 (Unidirectional)</option>
+                    </select>
+                  </div>
+
+                  <div className="pt-2">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={handleDeleteSelected}
+                      className="w-full h-8 text-xs"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 mr-1" />
+                      刪除此條路線 (Del)
+                    </Button>
+                  </div>
+                </div>
+              ) : selectedWaypoint ? (
+                /* Single Waypoint Inspector */
+                <div className="space-y-3 bg-slate-900/60 border border-slate-800 p-3.5 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-primary">{selectedWaypoint.name}</span>
+                    <Badge variant="secondary" className="capitalize text-[10px]">
+                      {selectedWaypoint.type}
+                    </Badge>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">站點名稱</label>
+                    <Input
+                      value={selectedWaypoint.name}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setWaypoints((prev) =>
+                          prev.map((w) => (w.id === selectedWaypoint.id ? { ...w, name: val } : w))
+                        );
+                      }}
+                      className="h-8 text-xs bg-slate-950 border-slate-800"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">X 座標 (m)</label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={selectedWaypoint.x}
+                        onChange={(e) =>
+                          handleMoveWaypoint(selectedWaypoint.id, parseFloat(e.target.value) || 0, selectedWaypoint.y)
+                        }
+                        className="h-8 text-xs bg-slate-950 border-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Y 座標 (m)</label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={selectedWaypoint.y}
+                        onChange={(e) =>
+                          handleMoveWaypoint(selectedWaypoint.id, selectedWaypoint.x, parseFloat(e.target.value) || 0)
+                        }
+                        className="h-8 text-xs bg-slate-950 border-slate-800"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">站點類型</label>
+                    <select
+                      value={selectedWaypoint.type}
+                      onChange={(e) => {
+                        const newType = e.target.value as WaypointType;
+                        setWaypoints((prev) =>
+                          prev.map((w) => (w.id === selectedWaypoint.id ? { ...w, type: newType } : w))
+                        );
+                      }}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200"
+                    >
+                      <option value="normal">一般導航點 (Normal)</option>
+                      <option value="charger">⚡ 充電樁 (Charger)</option>
+                      <option value="parking">🅿️ 停車等候點 (Parking)</option>
+                      <option value="workcell">📦 物料取放站 (Workcell)</option>
+                    </select>
+                  </div>
+
+                  <div className="pt-2">
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={handleDeleteSelected}
+                      className="w-full h-8 text-xs"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 mr-1" />
+                      刪除選取站點 (Del)
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-6 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl space-y-1.5">
+                  <p className="font-medium text-slate-400">尚未選取任何物件</p>
+                  <p>點選單一站點編輯屬性，或在空白處拖曳矩形批次框選刪除多個點位。</p>
+                  <p className="text-[10px] text-slate-600">快捷鍵：選取後按 Delete 鍵可直接刪除</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            /* Monitor Mode: Fleet & Task Status */
+            <div className="space-y-4">
+              {/* Fleet Summary */}
+              <div>
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-3">
+                  <h2 className="text-sm font-bold text-slate-200 flex items-center space-x-1.5">
+                    <Radio className="w-4 h-4 text-emerald-400" />
+                    <span>車隊即時狀態 ({robots.length})</span>
+                  </h2>
+                </div>
+
+                <div className="space-y-2.5">
+                  {robots.map((robot) => (
+                    <Card key={robot.id} className="bg-slate-900/60 border-slate-800 shadow-none">
+                      <CardContent className="p-3">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="font-semibold text-xs text-slate-200">{robot.name}</span>
+                          <Badge
+                            variant={
+                              robot.status === 'moving'
+                                ? 'success'
+                                : robot.status === 'charging'
+                                ? 'warning'
+                                : 'secondary'
+                            }
+                            className="text-[10px] uppercase"
+                          >
+                            {robot.status}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">
+                          <span>車隊: {robot.fleet}</span>
+                          <span className={robot.battery < 30 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
+                            ⚡ {Math.round(robot.battery)}%
+                          </span>
+                        </div>
+                        <div className="text-[10px] bg-slate-950 px-2 py-1 rounded text-slate-400 truncate">
+                          {robot.current_task || '無運行任務'}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tasks Queue */}
+              <div className="pt-2">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-3">
+                  <h2 className="text-sm font-bold text-slate-200 flex items-center space-x-1.5">
+                    <Send className="w-4 h-4 text-primary" />
+                    <span>調度任務佇列 ({tasks.length})</span>
+                  </h2>
+                </div>
+
+                <div className="space-y-2">
+                  {tasks.map((task) => (
+                    <div
+                      key={task.id}
+                      className="bg-slate-900/40 border border-slate-800/80 p-2.5 rounded-lg text-xs space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-slate-300 capitalize">
+                          {task.type}: {task.target_waypoint}
+                        </span>
+                        <Badge
+                          variant={task.status === 'active' ? 'success' : 'outline'}
+                          className="text-[10px]"
+                        >
+                          {task.status}
+                        </Badge>
+                      </div>
+                      {/* Progress bar */}
+                      <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className="bg-primary h-full transition-all duration-300"
+                          style={{ width: `${task.progress}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[10px] text-slate-500">
+                        <span>車輛: {task.robot_id || '自動'}</span>
+                        <span>{task.progress}%</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </aside>
+      </div>
+
+      {/* Task Dispatch Modal */}
+      <DispatchModal
+        open={dispatchModalOpen}
+        onOpenChange={setDispatchModalOpen}
+        selectedWaypoint={dispatchPresetWp}
+        waypoints={waypoints}
+        robots={robots}
+        onDispatchTask={handleDispatchTask}
+      />
+
+      {/* Import SLAM Map Modal */}
+      <ImportMapModal
+        open={importModalOpen}
+        onOpenChange={setImportModalOpen}
+        onMapLoaded={(newMap) => {
+          setSlamMap(newMap);
+        }}
+      />
+    </div>
+  );
+}
+
+export default App;

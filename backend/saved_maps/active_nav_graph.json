@@ -1,0 +1,53 @@
+{
+  "name": "office_map",
+  "waypoints": [
+    {
+      "id": "wp_1791035666181",
+      "name": "wp_1",
+      "x": 0.62,
+      "y": 2.63,
+      "type": "normal"
+    },
+    {
+      "id": "wp_1791035666595",
+      "name": "wp_2",
+      "x": -0.87,
+      "y": 5.21,
+      "type": "normal"
+    },
+    {
+      "id": "wp_1791035666933",
+      "name": "wp_3",
+      "x": -4.42,
+      "y": 6.31,
+      "type": "normal"
+    },
+    {
+      "id": "wp_1791035674352",
+      "name": "wp_4",
+      "x": -6.65,
+      "y": 6.53,
+      "type": "normal"
+    }
+  ],
+  "lanes": [
+    {
+      "id": "lane_1791035683019",
+      "start_id": "wp_1791035674352",
+      "end_id": "wp_1791035666933",
+      "bidirectional": true
+    },
+    {
+      "id": "lane_1791035684609",
+      "start_id": "wp_1791035666595",
+      "end_id": "wp_1791035666933",
+      "bidirectional": true
+    },
+    {
+      "id": "lane_1791035686297",
+      "start_id": "wp_1791035666181",
+      "end_id": "wp_1791035666595",
+      "bidirectional": true
+    }
+  ]
+}
