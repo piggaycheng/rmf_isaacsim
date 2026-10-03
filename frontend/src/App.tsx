@@ -5,8 +5,11 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, WaypointType, SlamMap } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, WaypointType, SlamMap, PlantSite } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
+import { WorldMap } from '@/components/WorldMap';
+import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
+import { loadPlantSites, savePlantSites } from '@/data/plantSites';
 import {
   MousePointer,
   MapPin,
@@ -30,6 +33,9 @@ import {
   BoxSelect,
   Save,
   Check,
+  Globe,
+  Video,
+  Building2,
 } from 'lucide-react';
 
 // Initial Demo Map Data (Office like)
@@ -77,16 +83,29 @@ const INITIAL_ROBOTS: Robot[] = [
   },
 ];
 
+export type AppMode = 'world' | 'monitor' | 'edit';
+
 export function App() {
   // 1. Mode state (Persisted in localStorage so F5 keeps current mode)
-  const [mode, setMode] = useState<'edit' | 'monitor'>(() => {
+  const [mode, setMode] = useState<AppMode>(() => {
     try {
-      return (localStorage.getItem('rmf_active_mode') as 'edit' | 'monitor') || 'edit';
-    } catch (e) {
-      return 'edit';
-    }
+      const cached = localStorage.getItem('rmf_active_mode') as AppMode;
+      if (cached === 'world' || cached === 'monitor' || cached === 'edit') {
+        return cached;
+      }
+    } catch (e) {}
+    return 'world';
   });
   const [tool, setTool] = useState<EditorTool>('select');
+
+  // Plant Sites & Isaac Sim Modal State
+  const [plantSites, setPlantSites] = useState<PlantSite[]>(loadPlantSites);
+  const [selectedPlant, setSelectedPlant] = useState<PlantSite | null>(() => {
+    const sites = loadPlantSites();
+    return sites[0] || null;
+  });
+  const [isaacModalOpen, setIsIsaacModalOpen] = useState<boolean>(false);
+  const [isaacModalPlant, setIsIsaacModalPlant] = useState<PlantSite | null>(null);
 
   // 2. Navigation Graph state (Lazy initialized from localStorage for 0ms restoration)
   const [waypoints, setWaypoints] = useState<Waypoint[]>(() => {
@@ -146,7 +165,7 @@ export function App() {
   const isInitialMount = useRef(true);
 
   // Update mode and persist to localStorage
-  const handleSetMode = (newMode: 'edit' | 'monitor') => {
+  const handleSetMode = (newMode: AppMode) => {
     setMode(newMode);
     try {
       localStorage.setItem('rmf_active_mode', newMode);
@@ -550,17 +569,20 @@ export function App() {
 
         {/* Mode Selector */}
         <div className="flex items-center bg-slate-900 border border-slate-800 p-1 rounded-lg">
+          {/* 1. World Map Tab (on the far left) */}
           <button
-            onClick={() => handleSetMode('edit')}
+            onClick={() => handleSetMode('world')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-              mode === 'edit'
+              mode === 'world'
                 ? 'bg-primary text-primary-foreground shadow'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <GitCommit className="w-3.5 h-3.5" />
-            <span>✏️ 編輯路網 (Edit Mode)</span>
+            <Globe className="w-3.5 h-3.5" />
+            <span>🌐 全球廠區 (World Map)</span>
           </button>
+
+          {/* 2. Monitor Mode (swapped to left of Edit) */}
           <button
             onClick={() => handleSetMode('monitor')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
@@ -571,6 +593,19 @@ export function App() {
           >
             <Radio className="w-3.5 h-3.5" />
             <span>📡 即時監控 (Monitor Mode)</span>
+          </button>
+
+          {/* 3. Edit Mode (swapped to right of Monitor) */}
+          <button
+            onClick={() => handleSetMode('edit')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              mode === 'edit'
+                ? 'bg-primary text-primary-foreground shadow'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <GitCommit className="w-3.5 h-3.5" />
+            <span>✏️ 編輯路網 (Edit Mode)</span>
           </button>
         </div>
 
@@ -604,65 +639,95 @@ export function App() {
             </span>
           )}
 
-          <Button
-            size="sm"
-            className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50"
-            onClick={handleSaveMap}
-            disabled={isSaving}
-            title="儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)"
-          >
-            <Save className="w-3.5 h-3.5 mr-1" />
-            {isSaving ? '儲存中...' : '儲存路網'}
-          </Button>
+          {/* Traffic Network Controls (Shown in Edit & Monitor Mode) */}
+          {mode !== 'world' && (
+            <>
+              <Button
+                size="sm"
+                className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50"
+                onClick={handleSaveMap}
+                disabled={isSaving}
+                title="儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)"
+              >
+                <Save className="w-3.5 h-3.5 mr-1" />
+                {isSaving ? '儲存中...' : '儲存路網'}
+              </Button>
 
-          <Button
-            size="sm"
-            variant={slamMap ? 'secondary' : 'outline'}
-            onClick={() => setImportModalOpen(true)}
-            title="上傳並顯示 ROS SLAM 雷達地圖 (.pgm + map.yaml)"
-          >
-            <FileUp className="w-3.5 h-3.5 mr-1 text-primary" />
-            {slamMap ? '已載入 SLAM 地圖' : '載入 SLAM 地圖'}
-          </Button>
+              <Button
+                size="sm"
+                variant={slamMap ? 'secondary' : 'outline'}
+                onClick={() => setImportModalOpen(true)}
+                title="上傳並顯示 ROS SLAM 雷達地圖 (.pgm + map.yaml)"
+              >
+                <FileUp className="w-3.5 h-3.5 mr-1 text-primary" />
+                {slamMap ? '已載入 SLAM 地圖' : '載入 SLAM 地圖'}
+              </Button>
 
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              setWaypoints(INITIAL_WAYPOINTS);
-              setLanes(INITIAL_LANES);
-              setRobots(INITIAL_ROBOTS);
-            }}
-            title="重設為範例路網"
-          >
-            <RotateCcw className="w-3.5 h-3.5 mr-1" />
-            範例路網
-          </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setWaypoints(INITIAL_WAYPOINTS);
+                  setLanes(INITIAL_LANES);
+                  setRobots(INITIAL_ROBOTS);
+                }}
+                title="重設為範例路網"
+              >
+                <RotateCcw className="w-3.5 h-3.5 mr-1" />
+                範例路網
+              </Button>
 
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handleExportBuildingYaml}
-            title="下載 Open-RMF 建築總圖 (building.yaml)"
-          >
-            <Download className="w-3.5 h-3.5 mr-1" />
-            building.yaml
-          </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleExportBuildingYaml}
+                title="下載 Open-RMF 建築總圖 (building.yaml)"
+              >
+                <Download className="w-3.5 h-3.5 mr-1" />
+                building.yaml
+              </Button>
 
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handleExportNav0Yaml}
-            title="下載 Open-RMF 車隊專用導航路網 (nav_graphs/0.yaml)"
-          >
-            <Download className="w-3.5 h-3.5 mr-1" />
-            0.yaml
-          </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleExportNav0Yaml}
+                title="下載 Open-RMF 車隊專用導航路網 (nav_graphs/0.yaml)"
+              >
+                <Download className="w-3.5 h-3.5 mr-1" />
+                0.yaml
+              </Button>
+            </>
+          )}
         </div>
       </header>
 
       {/* 2. Main Workspace */}
-      <div className="flex-1 flex overflow-hidden relative">
+      {mode === 'world' ? (
+        <WorldMap
+          plants={plantSites}
+          selectedPlant={selectedPlant}
+          onSelectPlant={(plant) => setSelectedPlant(plant)}
+          onOpenIsaacSim={(plant) => {
+            setIsIsaacModalPlant(plant);
+            setIsIsaacModalOpen(true);
+          }}
+          onNavigateToMonitor={(plant) => {
+            setSelectedPlant(plant);
+            handleSetMode('monitor');
+          }}
+          onNavigateToEdit={(plant) => {
+            setSelectedPlant(plant);
+            handleSetMode('edit');
+          }}
+          onAddPlant={(newPlant) => {
+            const updated = [...plantSites, newPlant];
+            setPlantSites(updated);
+            savePlantSites(updated);
+            setSelectedPlant(newPlant);
+          }}
+        />
+      ) : (
+        <div className="flex-1 flex overflow-hidden relative">
         {/* Left Toolbar (Edit Mode Only) */}
         {mode === 'edit' && (
           <aside className="w-14 border-r border-slate-800 bg-[#0d1322] flex flex-col items-center py-3 space-y-2 z-10">
@@ -1112,6 +1177,7 @@ export function App() {
           )}
         </aside>
       </div>
+      )}
 
       {/* Task Dispatch Modal */}
       <DispatchModal
@@ -1129,6 +1195,21 @@ export function App() {
         onOpenChange={setImportModalOpen}
         onMapLoaded={(newMap) => {
           setSlamMap(newMap);
+        }}
+      />
+
+      {/* Isaac Sim WebRTC Digital Twin Modal */}
+      <IsaacSimStreamModal
+        open={isaacModalOpen}
+        onOpenChange={setIsIsaacModalOpen}
+        plant={isaacModalPlant || selectedPlant}
+        onNavigateToMonitor={(plant) => {
+          setSelectedPlant(plant);
+          handleSetMode('monitor');
+        }}
+        onNavigateToEdit={(plant) => {
+          setSelectedPlant(plant);
+          handleSetMode('edit');
         }}
       />
     </div>

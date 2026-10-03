@@ -53,3 +53,18 @@ export interface SlamMap {
   opacity?: number; // 0.0 - 1.0
 }
 
+export interface PlantSite {
+  id: string;
+  name: string;
+  code: string;
+  locationName: string;
+  country: string;
+  coordinates: [number, number]; // [lng, lat]
+  status: 'online' | 'warning' | 'offline';
+  robotCount: number;
+  activeTasks: number;
+  areaM2: number;
+  description: string;
+  isaacSimWebRTCUrl: string; // e.g. "ws://localhost:8080/webrtc" or "http://localhost:8011"
+}
+
