@@ -31,10 +31,11 @@ flowchart TD
         end
     end
 
-    HostCode -->|Volume 掛載| Docker
-    Browser <-->|HTTP / WebSocket| FastAPI
-    CoreService -->|X11 Forwarding| Screen
-    ROS2Bridge <-->|ROS 2 Topics (/fleet_states)| CoreService
+    HostCode -->|"Volume 掛載 (./backend, ./frontend)"| FastAPI
+    HostCode -->|"Volume 掛載 (./workspace)"| RMFCore
+    Browser <-->|"HTTP / WebSocket (Port 8000)"| FastAPI
+    Gazebo -->|"X11 顯示傳發 (/tmp/.X11-unix)"| Screen
+    ROS2Bridge <-->|"ROS 2 Topics (/fleet_states)"| FleetAdapter
 ```
 
 ---
