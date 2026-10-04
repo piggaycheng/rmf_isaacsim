@@ -83,10 +83,66 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Viewport transforms (pan and zoom)
-  const [offset, setOffset] = useState<{ x: number; y: number }>({ x: 300, y: 300 });
+  const [offset, setOffset] = useState<{ x: number; y: number }>(() => {
+    if (typeof window !== 'undefined') {
+      return {
+        x: Math.round(window.innerWidth / 2),
+        y: Math.round(window.innerHeight / 2),
+      };
+    }
+    return { x: 500, y: 400 };
+  });
   const [scale, setScale] = useState<number>(30); // 30 pixels per meter
   const [isPanning, setIsPanning] = useState<boolean>(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Center (0,0) coordinate to the middle of the canvas
+  const centerOrigin = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const parent = canvas.parentElement;
+    const width = parent?.clientWidth || canvas.clientWidth || window.innerWidth;
+    const height = parent?.clientHeight || canvas.clientHeight || window.innerHeight;
+    if (width > 0 && height > 0) {
+      setOffset({
+        x: Math.round(width / 2),
+        y: Math.round(height / 2),
+      });
+    }
+  }, []);
+
+  // Auto-center (0,0) coordinate whenever entering the page or switching mode
+  useEffect(() => {
+    centerOrigin();
+
+    // In case layout/sidebar takes a tick or CSS transitions
+    const timer = setTimeout(centerOrigin, 50);
+
+    const parent = canvasRef.current?.parentElement;
+    let observer: ResizeObserver | null = null;
+    let hasCentered = false;
+
+    if (parent && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect;
+          if (width > 0 && height > 0 && !hasCentered) {
+            hasCentered = true;
+            setOffset({
+              x: Math.round(width / 2),
+              y: Math.round(height / 2),
+            });
+          }
+        }
+      });
+      observer.observe(parent);
+    }
+
+    return () => {
+      clearTimeout(timer);
+      observer?.disconnect();
+    };
+  }, [mode, centerOrigin]);
 
   // Mouse hover position and world coordinates
   const [hoverPos, setHoverPos] = useState<{
@@ -738,7 +794,7 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
       )}
 
       {/* Zoom / Pan & Cursor Coordinate indicator overlay */}
-      <div className="absolute bottom-4 left-4 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-3 py-1.5 rounded-lg text-xs text-slate-300 flex items-center space-x-3 pointer-events-none z-10">
+      <div className="absolute bottom-4 left-4 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-3 py-1.5 rounded-lg text-xs text-slate-300 flex items-center space-x-3 pointer-events-auto z-10 select-none">
         <span>比例尺: 1m = {Math.round(scale)}px</span>
         {hoverPos && (
           <>
@@ -752,6 +808,14 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         )}
         <span className="text-slate-600">•</span>
         <span>滑鼠拖曳框選 • 右鍵平移 • 滾輪縮放</span>
+        <span className="text-slate-600">•</span>
+        <button
+          onClick={centerOrigin}
+          className="text-cyan-400 hover:text-cyan-300 hover:underline font-medium transition-colors cursor-pointer"
+          title="將視圖 (0,0) 原點置中"
+        >
+          原點置中
+        </button>
       </div>
     </div>
   );
