@@ -230,7 +230,57 @@ ACTIVE_MAP_FILE = os.path.join(MAPS_DIR, "active_nav_graph.json")
 ACTIVE_YAML_FILE = os.path.join(MAPS_DIR, "active_nav_graph.building.yaml")
 ACTIVE_NAV_0_FILE = os.path.join(NAV_GRAPHS_DIR, "0.yaml")
 
-current_slam_map: Dict[str, Any] = {}
+SLAM_METADATA_FILE = os.path.join(UPLOAD_DIR, "slam_map_metadata.json")
+SLAM_YAML_FILE = os.path.join(UPLOAD_DIR, "current_slam_map.yaml")
+SLAM_PNG_FILE = os.path.join(UPLOAD_DIR, "current_slam_map.png")
+
+def load_initial_slam_map() -> Dict[str, Any]:
+    # 1. Try reading saved metadata JSON
+    if os.path.exists(SLAM_METADATA_FILE) and os.path.exists(SLAM_PNG_FILE):
+        try:
+            with open(SLAM_METADATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data.get("image_url"):
+                    return data
+        except Exception as e:
+            print(f"Notice: Failed to load slam_map_metadata.json: {e}")
+
+    # 2. If PNG image exists on disk, recover metadata from disk + yaml
+    if os.path.exists(SLAM_PNG_FILE):
+        try:
+            img = Image.open(SLAM_PNG_FILE)
+            w, h = img.size
+            res = 0.05
+            orig = [-10.0, -10.0, 0.0]
+            if os.path.exists(SLAM_YAML_FILE):
+                try:
+                    with open(SLAM_YAML_FILE, "r", encoding="utf-8") as yf:
+                        ydata = yaml.safe_load(yf)
+                        if isinstance(ydata, dict):
+                            res = float(ydata.get("resolution", 0.05))
+                            orig = list(ydata.get("origin", [-10.0, -10.0, 0.0]))
+                except Exception:
+                    pass
+            recovered = {
+                "name": "current_slam_map.png",
+                "image_url": "/api/map/image",
+                "resolution": res,
+                "origin": orig,
+                "width": w,
+                "height": h,
+                "real_width_m": w * res,
+                "real_height_m": h * res,
+                "opacity": 0.85,
+            }
+            # Auto-save metadata so next time it is ready
+            with open(SLAM_METADATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(recovered, f, indent=2, ensure_ascii=False)
+            return recovered
+        except Exception as e:
+            print(f"Notice: Failed to recover SLAM map from PNG: {e}")
+    return {}
+
+current_slam_map: Dict[str, Any] = load_initial_slam_map()
 
 class MapSaveRequest(BaseModel):
     name: str = "office_map"
@@ -391,6 +441,7 @@ async def upload_slam_map(
         # 1. Read and parse YAML file if provided
         resolution = 0.05
         origin = [-10.0, -10.0, 0.0]
+        yaml_bytes = None
         if yaml_file:
             yaml_bytes = await yaml_file.read()
             yaml_data = yaml.safe_load(yaml_bytes.decode('utf-8'))
@@ -403,8 +454,12 @@ async def upload_slam_map(
         image = Image.open(io.BytesIO(pgm_bytes))
         width, height = image.size
 
-        png_path = os.path.join(UPLOAD_DIR, "current_slam_map.png")
-        image.save(png_path, "PNG")
+        image.save(SLAM_PNG_FILE, "PNG")
+
+        # 3. Save raw YAML file to disk if uploaded
+        if yaml_bytes:
+            with open(SLAM_YAML_FILE, "wb") as yf:
+                yf.write(yaml_bytes)
 
         current_slam_map = {
             "name": pgm_file.filename or "slam_map",
@@ -415,7 +470,12 @@ async def upload_slam_map(
             "height": height,
             "real_width_m": width * resolution,
             "real_height_m": height * resolution,
+            "opacity": 0.85,
         }
+
+        # 4. Save metadata JSON to disk (permanent persistence across restarts!)
+        with open(SLAM_METADATA_FILE, "w", encoding="utf-8") as mf:
+            json.dump(current_slam_map, mf, indent=2, ensure_ascii=False)
 
         # Broadcast update to web clients
         await broadcast({
@@ -427,15 +487,33 @@ async def upload_slam_map(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@app.delete("/api/map/slam")
+async def delete_slam_map():
+    global current_slam_map
+    current_slam_map = {}
+    for path in [SLAM_METADATA_FILE, SLAM_YAML_FILE, SLAM_PNG_FILE]:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    await broadcast({
+        "type": "slam_map",
+        "map": None,
+    })
+    return {"status": "success", "message": "SLAM 地圖已完全清除"}
+
 @app.get("/api/map/slam")
 def get_slam_map():
+    global current_slam_map
+    if not current_slam_map or not current_slam_map.get("image_url"):
+        current_slam_map = load_initial_slam_map()
     return current_slam_map
 
-@app.get("/api/map/image")
+@app.api_route("/api/map/image", methods=["GET", "HEAD"])
 def get_map_image():
-    png_path = os.path.join(UPLOAD_DIR, "current_slam_map.png")
-    if os.path.exists(png_path):
-        return FileResponse(png_path, media_type="image/png")
+    if os.path.exists(SLAM_PNG_FILE):
+        return FileResponse(SLAM_PNG_FILE, media_type="image/png")
     return {"error": "No map image available"}
 
 # Serve compiled frontend static files
@@ -444,4 +522,10 @@ if os.path.exists(FRONTEND_DIST):
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="static")
 
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_excludes=["saved_maps/*", "uploads/*", "*.png", "*.yaml", "*.json", "*.pgm"],
+    )

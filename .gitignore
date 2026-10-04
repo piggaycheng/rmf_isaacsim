@@ -70,7 +70,6 @@ blob-report/
 backend/saved_maps/*
 !backend/saved_maps/.gitkeep
 backend/uploads/*
-!backend/uploads/current_slam_map.png
 !backend/uploads/.gitkeep
 
 # Environment variables & Sensitive data

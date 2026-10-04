@@ -68,7 +68,7 @@ export const ImportMapModal: React.FC<ImportMapModalProps> = ({
     }
 
     try {
-      const response = await fetch('http://localhost:8000/api/map/upload-slam', {
+      const response = await fetch('/api/map/upload-slam', {
         method: 'POST',
         body: formData,
       });

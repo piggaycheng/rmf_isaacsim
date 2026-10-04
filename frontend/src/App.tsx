@@ -152,8 +152,19 @@ export function App() {
   const [dispatchModalOpen, setDispatchModalOpen] = useState<boolean>(false);
   const [dispatchPresetWp, setDispatchPresetWp] = useState<Waypoint | null>(null);
 
-  // SLAM Map state
-  const [slamMap, setSlamMap] = useState<SlamMap | null>(null);
+  // SLAM Map state (Lazy initialized from localStorage for 0ms restoration)
+  const [slamMap, setSlamMap] = useState<SlamMap | null>(() => {
+    try {
+      const cached = localStorage.getItem('rmf_active_slam_map');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && parsed.image_url) {
+          return parsed;
+        }
+      }
+    } catch (e) {}
+    return null;
+  });
   const [importModalOpen, setImportModalOpen] = useState<boolean>(false);
 
   // Backend / Simulation state
@@ -178,11 +189,28 @@ export function App() {
       .then((res) => res.json())
       .then((data) => {
         if (data && data.image_url) {
-          setSlamMap(data);
+          setSlamMap((prev) => {
+            const merged = { ...data, opacity: prev?.opacity ?? data.opacity ?? 0.85 };
+            try {
+              localStorage.setItem('rmf_active_slam_map', JSON.stringify(merged));
+            } catch (e) {}
+            return merged;
+          });
         }
       })
       .catch(() => {});
   }, []);
+
+  // 1.1 Persist SLAM map & opacity changes to localStorage
+  useEffect(() => {
+    try {
+      if (slamMap) {
+        localStorage.setItem('rmf_active_slam_map', JSON.stringify(slamMap));
+      } else {
+        localStorage.removeItem('rmf_active_slam_map');
+      }
+    } catch (e) {}
+  }, [slamMap]);
 
   // 2. Fetch initial Saved Navigation Graph from backend on startup
   useEffect(() => {
@@ -260,8 +288,18 @@ export function App() {
             if (data.type === 'tasks' && data.tasks) {
               setTasks(data.tasks);
             }
-            if (data.type === 'slam_map' && data.map) {
-              setSlamMap(data.map);
+            if (data.type === 'slam_map') {
+              if (data.map) {
+                setSlamMap((prev) => ({
+                  ...data.map,
+                  opacity: prev?.opacity ?? data.map.opacity ?? 0.85,
+                }));
+              } else {
+                setSlamMap(null);
+                try {
+                  localStorage.removeItem('rmf_active_slam_map');
+                } catch (e) {}
+              }
             }
           } catch (e) {
             console.error('Failed to parse WS msg', e);
@@ -639,8 +677,8 @@ export function App() {
             </span>
           )}
 
-          {/* Traffic Network Controls (Shown in Edit & Monitor Mode) */}
-          {mode !== 'world' && (
+          {/* Traffic Network Controls (Only shown in Edit Mode) */}
+          {mode === 'edit' && (
             <>
               <Button
                 size="sm"
@@ -859,7 +897,13 @@ export function App() {
                       SLAM 雷達底圖
                     </span>
                     <button
-                      onClick={() => setSlamMap(null)}
+                      onClick={() => {
+                        setSlamMap(null);
+                        try {
+                          localStorage.removeItem('rmf_active_slam_map');
+                        } catch (e) {}
+                        fetch('/api/map/slam', { method: 'DELETE' }).catch(() => {});
+                      }}
                       className="text-slate-400 hover:text-rose-400 p-0.5 rounded transition-colors"
                       title="卸載底圖"
                     >

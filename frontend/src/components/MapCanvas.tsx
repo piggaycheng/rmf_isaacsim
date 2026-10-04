@@ -29,6 +29,41 @@ function distToSegment(px: number, py: number, x1: number, y1: number, x2: numbe
   return Math.hypot(px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1)));
 }
 
+// Configuration for waypoint placement tools (label, colors, etc.)
+const PLACEMENT_TOOL_CONFIG: Record<
+  string,
+  { label: string; color: string; border: string; bg: string; dotColor: string }
+> = {
+  waypoint: {
+    label: '一般導航點',
+    color: 'text-cyan-400',
+    border: 'border-cyan-400',
+    bg: 'bg-cyan-500/20',
+    dotColor: '#38bdf8',
+  },
+  charger: {
+    label: '充電樁點位',
+    color: 'text-amber-400',
+    border: 'border-amber-400',
+    bg: 'bg-amber-500/20',
+    dotColor: '#f59e0b',
+  },
+  parking: {
+    label: '停車等候點',
+    color: 'text-purple-400',
+    border: 'border-purple-400',
+    bg: 'bg-purple-500/20',
+    dotColor: '#a855f7',
+  },
+  workcell: {
+    label: '工作站點',
+    color: 'text-emerald-400',
+    border: 'border-emerald-400',
+    bg: 'bg-emerald-500/20',
+    dotColor: '#10b981',
+  },
+};
+
 export const MapCanvas: React.FC<MapCanvasProps> = ({
   mode,
   tool,
@@ -52,6 +87,14 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
   const [scale, setScale] = useState<number>(30); // 30 pixels per meter
   const [isPanning, setIsPanning] = useState<boolean>(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Mouse hover position and world coordinates
+  const [hoverPos, setHoverPos] = useState<{
+    screenX: number;
+    screenY: number;
+    worldX: number;
+    worldY: number;
+  } | null>(null);
 
   // Lane creation state
   const [laneStartId, setLaneStartId] = useState<string | null>(null);
@@ -516,6 +559,14 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
     const clientX = e.clientX - rect.left;
     const clientY = e.clientY - rect.top;
 
+    const world = screenToWorld(clientX, clientY);
+    setHoverPos({
+      screenX: clientX,
+      screenY: clientY,
+      worldX: parseFloat(world.x.toFixed(2)),
+      worldY: parseFloat(world.y.toFixed(2)),
+    });
+
     if (isPanning) {
       setOffset({
         x: clientX - panStart.x,
@@ -530,8 +581,20 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
     }
 
     if (draggingWaypointId && mode === 'edit') {
-      const worldPos = screenToWorld(clientX, clientY);
-      onMoveWaypoint(draggingWaypointId, parseFloat(worldPos.x.toFixed(2)), parseFloat(worldPos.y.toFixed(2)));
+      onMoveWaypoint(draggingWaypointId, parseFloat(world.x.toFixed(2)), parseFloat(world.y.toFixed(2)));
+    }
+  };
+
+  const handleMouseLeave = () => {
+    setHoverPos(null);
+    if (isPanning) {
+      setIsPanning(false);
+    }
+    if (draggingWaypointId) {
+      setDraggingWaypointId(null);
+    }
+    if (marqueeBox) {
+      setMarqueeBox(null);
     }
   };
 
@@ -601,6 +664,8 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
     setOffset({ x: newOffsetX, y: newOffsetY });
   };
 
+  const placementConfig = mode === 'edit' ? PLACEMENT_TOOL_CONFIG[tool] : null;
+
   return (
     <div className="relative w-full h-full overflow-hidden select-none bg-[#090d16]">
       <canvas
@@ -609,13 +674,83 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
         onWheel={handleWheel}
         onContextMenu={(e) => e.preventDefault()}
       />
-      {/* Zoom / Pan indicator overlay */}
-      <div className="absolute bottom-4 left-4 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-3 py-1.5 rounded-lg text-xs text-slate-300 flex items-center space-x-3">
+
+      {/* Real-time Cursor Coordinates Tooltip & Ghost Preview when placing waypoints */}
+      {placementConfig && hoverPos && !isPanning && !draggingWaypointId && (
+        <>
+          {/* Subtle crosshair guide lines */}
+          <div
+            className="pointer-events-none absolute left-0 right-0 h-px border-t border-dashed border-cyan-400/25 z-20"
+            style={{ top: hoverPos.screenY }}
+          />
+          <div
+            className="pointer-events-none absolute top-0 bottom-0 w-px border-l border-dashed border-cyan-400/25 z-20"
+            style={{ left: hoverPos.screenX }}
+          />
+
+          {/* Ghost waypoint circle */}
+          <div
+            className={`pointer-events-none absolute w-6 h-6 rounded-full border-2 border-dashed ${placementConfig.border} ${placementConfig.bg} -translate-x-1/2 -translate-y-1/2 flex items-center justify-center z-20 shadow-lg`}
+            style={{
+              left: hoverPos.screenX,
+              top: hoverPos.screenY,
+              boxShadow: `0 0 12px ${placementConfig.dotColor}66`,
+            }}
+          >
+            <div
+              className="w-1.5 h-1.5 rounded-full"
+              style={{ backgroundColor: placementConfig.dotColor }}
+            />
+          </div>
+
+          {/* Floating coordinates badge */}
+          <div
+            className="pointer-events-none absolute z-30 flex items-center space-x-2 px-2.5 py-1 rounded-md bg-slate-950/95 border shadow-2xl backdrop-blur text-xs font-mono select-none"
+            style={{
+              left:
+                hoverPos.screenX > (canvasRef.current?.clientWidth || 800) - 230
+                  ? hoverPos.screenX - 225
+                  : hoverPos.screenX + 16,
+              top: hoverPos.screenY < 45 ? hoverPos.screenY + 18 : hoverPos.screenY - 34,
+              borderColor: `${placementConfig.dotColor}88`,
+            }}
+          >
+            <span className={`text-[10px] font-sans font-bold ${placementConfig.color} flex items-center`}>
+              <span
+                className="w-1.5 h-1.5 rounded-full mr-1.5 animate-pulse"
+                style={{ backgroundColor: placementConfig.dotColor }}
+              />
+              {placementConfig.label}
+            </span>
+            <span className="text-slate-600">|</span>
+            <span className="text-slate-300">
+              X: <strong className="text-white">{hoverPos.worldX >= 0 ? `+${hoverPos.worldX.toFixed(2)}` : hoverPos.worldX.toFixed(2)}</strong>m
+            </span>
+            <span className="text-slate-300">
+              Y: <strong className="text-white">{hoverPos.worldY >= 0 ? `+${hoverPos.worldY.toFixed(2)}` : hoverPos.worldY.toFixed(2)}</strong>m
+            </span>
+          </div>
+        </>
+      )}
+
+      {/* Zoom / Pan & Cursor Coordinate indicator overlay */}
+      <div className="absolute bottom-4 left-4 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-3 py-1.5 rounded-lg text-xs text-slate-300 flex items-center space-x-3 pointer-events-none z-10">
         <span>比例尺: 1m = {Math.round(scale)}px</span>
-        <span>•</span>
+        {hoverPos && (
+          <>
+            <span className="text-slate-600">•</span>
+            <span className="font-mono text-cyan-300 flex items-center">
+              <span className="text-slate-400 mr-1.5">游標坐標:</span>
+              X: <strong className="text-white ml-0.5 mr-2">{hoverPos.worldX >= 0 ? `+${hoverPos.worldX.toFixed(2)}` : hoverPos.worldX.toFixed(2)}m</strong>
+              Y: <strong className="text-white ml-0.5">{hoverPos.worldY >= 0 ? `+${hoverPos.worldY.toFixed(2)}` : hoverPos.worldY.toFixed(2)}m</strong>
+            </span>
+          </>
+        )}
+        <span className="text-slate-600">•</span>
         <span>滑鼠拖曳框選 • 右鍵平移 • 滾輪縮放</span>
       </div>
     </div>
