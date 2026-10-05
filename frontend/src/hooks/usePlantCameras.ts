@@ -129,14 +129,13 @@ export function usePlantCameras(plant: PlantSite | null) {
     };
   }, []);
 
-  // Toggle or open a specific camera
-  const toggleCamera = useCallback((cam: CameraInfo) => {
+  // Set camera enabled state explicitly (true = start camera & stream, false = stop camera)
+  const setCameraEnabled = useCallback((cam: CameraInfo, enabled: boolean) => {
     if (!clientRef.current || !clientRef.current.connected) {
-      console.warn('[MQTT] Client not connected. Cannot toggle camera.');
+      console.warn('[MQTT] Client not connected. Cannot set camera state.');
       return;
     }
 
-    const nextState = !cam.enabled;
     // Resolve target topic: Isaac Sim expects slam/cameras/<camera_name>/enable
     let topic = cam.enable_topic;
     if (!topic || topic.startsWith('/')) {
@@ -145,22 +144,27 @@ export function usePlantCameras(plant: PlantSite | null) {
     }
 
     // Isaac Sim mqtt_cameras.py strictly checks: payload in ("true", "1", "on") / ("false", "0", "off")
-    const payload = nextState ? 'true' : 'false';
+    const payload = enabled ? 'true' : 'false';
 
-    console.log(`[MQTT] Publishing command to ${topic}:`, payload);
+    console.log(`[MQTT] Setting camera ${cam.name} enabled=${enabled} on ${topic}`);
     clientRef.current.publish(topic, payload, { qos: 1 }, (err) => {
       if (err) {
-        console.error(`[MQTT] Failed to publish toggle to ${topic}:`, err);
+        console.error(`[MQTT] Failed to publish state to ${topic}:`, err);
       } else {
-        console.log(`[MQTT] Toggle command sent to ${topic}: ${payload}`);
+        console.log(`[MQTT] Camera state successfully published to ${topic}: ${payload}`);
       }
     });
 
     // Optimistically update camera state in UI
     setCameras((prev) =>
-      prev.map((c) => (c.name === cam.name ? { ...c, enabled: nextState } : c))
+      prev.map((c) => (c.name === cam.name ? { ...c, enabled } : c))
     );
   }, [activeTopic]);
+
+  // Toggle or open a specific camera
+  const toggleCamera = useCallback((cam: CameraInfo) => {
+    setCameraEnabled(cam, !cam.enabled);
+  }, [setCameraEnabled]);
 
   return {
     connectionStatus,
@@ -168,6 +172,7 @@ export function usePlantCameras(plant: PlantSite | null) {
     cameras,
     activeTopic,
     lastUpdated,
+    setCameraEnabled,
     toggleCamera,
   };
 }

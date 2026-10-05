@@ -6,14 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
   Video,
-  Power,
   Tv,
   Wifi,
   WifiOff,
   Radio,
-  Clock,
-  Layers,
-  Sparkles,
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
@@ -31,11 +27,10 @@ export function PlantCameraList({
 }: PlantCameraListProps) {
   const {
     connectionStatus,
-    cameraData,
     cameras,
     activeTopic,
     lastUpdated,
-    toggleCamera,
+    setCameraEnabled,
   } = usePlantCameras(plant);
 
   const [selectedCameraForStream, setSelectedCameraForStream] = useState<CameraInfo | null>(null);
@@ -46,9 +41,24 @@ export function PlantCameraList({
     return null;
   }
 
+  // 1. 開啟即時畫面時，自動發送 MQTT 指令啟動該相機 (true)
   const handleOpenStream = (camera: CameraInfo) => {
-    setSelectedCameraForStream(camera);
+    setCameraEnabled(camera, true);
+    setSelectedCameraForStream({ ...camera, enabled: true });
     setStreamModalOpen(true);
+  };
+
+  // 2. 關閉畫面時，自動發送 MQTT 指令關閉相機 (false) 節省資源
+  const handleCloseStream = (open: boolean) => {
+    if (!open) {
+      if (selectedCameraForStream) {
+        setCameraEnabled(selectedCameraForStream, false);
+      }
+      setSelectedCameraForStream(null);
+      setStreamModalOpen(false);
+    } else {
+      setStreamModalOpen(true);
+    }
   };
 
   return (
@@ -173,34 +183,20 @@ export function PlantCameraList({
                       </div>
                     </div>
 
-                    {/* Action Buttons */}
-                    <div className="grid grid-cols-2 gap-1.5 pt-2 border-t border-slate-800/80">
-                      {/* 1. Toggle Camera (MQTT Publish) */}
+                    {/* Single On-Demand Stream Action Button */}
+                    <div className="pt-2 border-t border-slate-800/80">
                       <Button
                         size="sm"
-                        variant={cam.enabled ? 'secondary' : 'default'}
-                        onClick={() => toggleCamera(cam)}
-                        className={`h-7 text-[11px] font-medium px-2 ${
-                          cam.enabled
-                            ? 'bg-rose-950/40 text-rose-300 hover:bg-rose-900/60 border border-rose-800/50'
-                            : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                        }`}
-                        title={`透過 MQTT 發送指令至 ${cam.enable_topic}`}
-                      >
-                        <Power className="w-3 h-3 mr-1" />
-                        {cam.enabled ? '關閉相機' : '開啟相機'}
-                      </Button>
-
-                      {/* 2. Open Stream Viewer (MediaMTX WebRTC) */}
-                      <Button
-                        size="sm"
-                        variant="outline"
                         onClick={() => handleOpenStream(cam)}
-                        className="h-7 text-[11px] font-medium px-2 border-slate-700 bg-slate-900/80 hover:bg-slate-800 text-cyan-300 hover:text-white"
-                        title="開啟 MediaMTX WebRTC 即時影像"
+                        className={`w-full h-7 text-[11px] font-medium px-2 shadow-sm transition-all ${
+                          cam.enabled
+                            ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/20'
+                            : 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-cyan-600/20'
+                        }`}
+                        title="開啟即時畫面（自動啟動相機推流）"
                       >
-                        <Tv className="w-3 h-3 mr-1 text-cyan-400" />
-                        即時畫面
+                        <Tv className="w-3.5 h-3.5 mr-1.5 text-cyan-200" />
+                        開啟即時畫面
                       </Button>
                     </div>
                   </div>
@@ -214,10 +210,9 @@ export function PlantCameraList({
       {/* Stream Viewer Modal */}
       <CameraStreamModal
         open={streamModalOpen}
-        onOpenChange={setStreamModalOpen}
+        onOpenChange={handleCloseStream}
         camera={selectedCameraForStream}
         plant={plant}
-        onToggleCamera={toggleCamera}
       />
     </div>
   );

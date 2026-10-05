@@ -516,6 +516,18 @@ def get_map_image():
         return FileResponse(SLAM_PNG_FILE, media_type="image/png")
     return {"error": "No map image available"}
 
+# MediaMTX stream readiness checking endpoint
+@app.get("/api/stream/status/{stream_name:path}")
+def get_stream_status(stream_name: str):
+    import urllib.request
+    try:
+        url = f"http://127.0.0.1:9997/v3/paths/get/{stream_name}"
+        with urllib.request.urlopen(url, timeout=0.5) as r:
+            data = json.loads(r.read())
+            return {"ready": bool(data.get("ready")), "online": bool(data.get("online"))}
+    except Exception:
+        return {"ready": False, "online": False}
+
 # Serve compiled frontend static files
 FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "../frontend/dist"))
 if os.path.exists(FRONTEND_DIST):
