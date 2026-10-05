@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
+import { PlantCameraList } from '@/components/PlantCameraList';
 import {
   Globe,
   MapPin,
@@ -323,6 +324,7 @@ export function WorldMap({
 
   // Reset to World View
   const handleResetWorldView = () => {
+    onSelectPlant(null as any);
     if (mapRef.current) {
       mapRef.current.flyTo({
         center: [100, 25],
@@ -578,78 +580,88 @@ export function WorldMap({
 
         {/* Bottom Floating Inspector: Selected Plant Banner */}
         {selectedPlant && (
-          <div className="absolute bottom-5 left-4 right-4 md:left-8 md:right-8 z-10 pointer-events-auto">
-            <div className="bg-[#0b111e]/95 backdrop-blur-md border border-cyan-800/60 rounded-2xl p-4 shadow-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
-              {/* Plant Meta */}
-              <div className="flex items-start space-x-3.5">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-600 flex items-center justify-center text-white shadow-lg shadow-cyan-600/30 shrink-0">
-                  <Building2 className="w-5 h-5" />
-                </div>
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <h3 className="font-bold text-sm md:text-base text-slate-100">{selectedPlant.name}</h3>
-                    <Badge variant="outline" className="text-[10px] border-cyan-500/50 text-cyan-400 font-mono">
-                      {selectedPlant.code}
-                    </Badge>
-                    <Badge variant="success" className="text-[10px]">
-                      {selectedPlant.status === 'online' ? '連線運行中' : '待機'}
-                    </Badge>
+          <div className="absolute bottom-5 left-4 right-4 md:left-8 md:right-8 z-10 pointer-events-auto max-h-[80vh] flex flex-col justify-end space-y-2.5">
+            <div className="bg-[#0b111e]/95 backdrop-blur-md border border-cyan-800/60 rounded-2xl p-4 shadow-2xl flex flex-col gap-3">
+              {/* Row 1: Plant Meta & Action Buttons */}
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                {/* Plant Meta */}
+                <div className="flex items-start space-x-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-600 flex items-center justify-center text-white shadow-lg shadow-cyan-600/30 shrink-0">
+                    <Building2 className="w-5 h-5" />
                   </div>
-                  <p className="text-xs text-slate-400 mt-0.5">{selectedPlant.locationName}</p>
-                  <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-                    經緯度: [{selectedPlant.coordinates[0].toFixed(4)}, {selectedPlant.coordinates[1].toFixed(4)}] •
-                    面積: {selectedPlant.areaM2.toLocaleString()} m² •
-                    WebRTC 信令: {selectedPlant.isaacSimWebRTCUrl}
-                  </p>
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <h3 className="font-bold text-sm md:text-base text-slate-100">{selectedPlant.name}</h3>
+                      <Badge variant="outline" className="text-[10px] border-cyan-500/50 text-cyan-400 font-mono">
+                        {selectedPlant.code}
+                      </Badge>
+                      <Badge variant="success" className="text-[10px]">
+                        {selectedPlant.status === 'online' ? '連線運行中' : '待機'}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-0.5">{selectedPlant.locationName}</p>
+                    <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                      經緯度: [{selectedPlant.coordinates[0].toFixed(4)}, {selectedPlant.coordinates[1].toFixed(4)}] •
+                      面積: {selectedPlant.areaM2.toLocaleString()} m² •
+                      MQTT 相機主題: {selectedPlant.cameraTopic || '未配置'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="flex items-center space-x-2.5 shrink-0 flex-wrap">
+                  {/* 1. Primary: Isaac Sim WebRTC Button */}
+                  <Button
+                    size="sm"
+                    className="h-9 px-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-white font-bold text-xs shadow-lg shadow-emerald-500/20"
+                    onClick={() => onOpenIsaacSim(selectedPlant)}
+                    title="開啟 Isaac Sim WebRTC 數位雙生模擬串流"
+                  >
+                    <Video className="w-4 h-4 mr-1.5" />
+                    打開 Isaac Sim 模擬畫面
+                  </Button>
+
+                  {/* 2. Enter Plant Monitor */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-9 text-xs border-slate-700 bg-slate-900/80 hover:bg-slate-800 text-slate-200"
+                    onClick={() => onNavigateToMonitor(selectedPlant)}
+                    title="進入此廠區 Open-RMF 即時車隊監控"
+                  >
+                    <Radio className="w-3.5 h-3.5 mr-1.5 text-primary" />
+                    進入即時監控
+                  </Button>
+
+                  {/* 3. Edit Traffic Network */}
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="h-9 text-xs text-slate-300 hover:text-white"
+                    onClick={() => onNavigateToEdit(selectedPlant)}
+                    title="編輯此廠區 Open-RMF 導航路網"
+                  >
+                    <GitCommit className="w-3.5 h-3.5 mr-1 text-slate-400" />
+                    編輯路網
+                  </Button>
+
+                  {/* Close card button */}
+                  <button
+                    onClick={() => onSelectPlant(null as any)}
+                    className="text-slate-500 hover:text-slate-300 p-1.5 rounded-lg"
+                    title="關閉資訊列"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
 
-              {/* Action Buttons */}
-              <div className="flex items-center space-x-2.5 shrink-0 flex-wrap">
-                {/* 1. Primary: Isaac Sim WebRTC Button */}
-                <Button
-                  size="sm"
-                  className="h-9 px-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-white font-bold text-xs shadow-lg shadow-emerald-500/20"
-                  onClick={() => onOpenIsaacSim(selectedPlant)}
-                  title="開啟 Isaac Sim WebRTC 數位雙生模擬串流"
-                >
-                  <Video className="w-4 h-4 mr-1.5" />
-                  打開 Isaac Sim 模擬畫面
-                </Button>
-
-                {/* 2. Enter Plant Monitor */}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 text-xs border-slate-700 bg-slate-900/80 hover:bg-slate-800 text-slate-200"
-                  onClick={() => onNavigateToMonitor(selectedPlant)}
-                  title="進入此廠區 Open-RMF 即時車隊監控"
-                >
-                  <Radio className="w-3.5 h-3.5 mr-1.5 text-primary" />
-                  進入即時監控
-                </Button>
-
-                {/* 3. Edit Traffic Network */}
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="h-9 text-xs text-slate-300 hover:text-white"
-                  onClick={() => onNavigateToEdit(selectedPlant)}
-                  title="編輯此廠區 Open-RMF 導航路網"
-                >
-                  <GitCommit className="w-3.5 h-3.5 mr-1 text-slate-400" />
-                  編輯路網
-                </Button>
-
-                {/* Close card button */}
-                <button
-                  onClick={() => onSelectPlant(null as any)}
-                  className="text-slate-500 hover:text-slate-300 p-1.5 rounded-lg"
-                  title="關閉資訊列"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+              {/* Row 2: Plant Camera List (On-Demand MQTT Subscription) */}
+              {selectedPlant.cameraTopic && (
+                <div className="pt-1">
+                  <PlantCameraList plant={selectedPlant} />
+                </div>
+              )}
             </div>
           </div>
         )}

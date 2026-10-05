@@ -14,6 +14,8 @@ export const INITIAL_PLANT_SITES: PlantSite[] = [
     areaM2: 18500,
     description: '主力半導體潔淨室與自動化物料搬運 (AMR / OHT) 示範基地，運行 Open-RMF 車隊核心。',
     isaacSimWebRTCUrl: 'ws://localhost:8080/webrtc',
+    cameraTopic: 'slam/cameras',
+    mqttBrokerUrl: 'ws://localhost:8083/mqtt',
   },
   {
     id: 'site_tainan_logistics',
@@ -28,6 +30,7 @@ export const INITIAL_PLANT_SITES: PlantSite[] = [
     areaM2: 42000,
     description: '高吞吐量高架立體倉儲，全自動堆高機與潛伏式 AGV 混合協同調度。',
     isaacSimWebRTCUrl: 'ws://localhost:8081/webrtc',
+    cameraTopic: 'tainan/cameras',
   },
   {
     id: 'site_taichung_precision',
@@ -42,6 +45,7 @@ export const INITIAL_PLANT_SITES: PlantSite[] = [
     areaM2: 12500,
     description: 'CNC 自動化加工與機械手臂上下料 AMR 無人化黑燈工廠產線。',
     isaacSimWebRTCUrl: 'ws://localhost:8082/webrtc',
+    cameraTopic: 'taichung/cameras',
   },
   {
     id: 'site_silicon_valley',
@@ -56,6 +60,7 @@ export const INITIAL_PLANT_SITES: PlantSite[] = [
     areaM2: 9800,
     description: '次世代具身智能 (Embodied AI) AMR 與 NVIDIA Isaac Sim 數位雙生高精模擬測試場。',
     isaacSimWebRTCUrl: 'ws://localhost:8083/webrtc',
+    cameraTopic: 'silicon_valley/cameras',
   },
   {
     id: 'site_munich_plant',
@@ -70,6 +75,7 @@ export const INITIAL_PLANT_SITES: PlantSite[] = [
     areaM2: 31000,
     description: '歐洲車規級零件智慧物流，支援 VDA 5050 與 Open-RMF 雙軌協同通訊。',
     isaacSimWebRTCUrl: 'ws://localhost:8084/webrtc',
+    cameraTopic: 'munich/cameras',
   },
   {
     id: 'site_yokohama_center',
@@ -84,6 +90,7 @@ export const INITIAL_PLANT_SITES: PlantSite[] = [
     areaM2: 15600,
     description: '高密度協作無人搬運系統，整合人機共融安全防護與即時語音派遣。',
     isaacSimWebRTCUrl: 'ws://localhost:8085/webrtc',
+    cameraTopic: 'yokohama/cameras',
   },
 ];
 
@@ -95,7 +102,11 @@ export function loadPlantSites(): PlantSite[] {
     if (cached) {
       const parsed = JSON.parse(cached);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+        // Hydrate newly added fields from defaults
+        return parsed.map((p: PlantSite) => {
+          const init = INITIAL_PLANT_SITES.find((s) => s.id === p.id);
+          return init ? { ...init, ...p, cameraTopic: p.cameraTopic || init.cameraTopic } : p;
+        });
       }
     }
   } catch (e) {

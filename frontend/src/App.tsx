@@ -9,6 +9,7 @@ import { Waypoint, Lane, Robot, Task, WaypointType, SlamMap, PlantSite } from '@
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
+import { PlantCameraList } from '@/components/PlantCameraList';
 import { loadPlantSites, savePlantSites } from '@/data/plantSites';
 import {
   MousePointer,
@@ -100,10 +101,7 @@ export function App() {
 
   // Plant Sites & Isaac Sim Modal State
   const [plantSites, setPlantSites] = useState<PlantSite[]>(loadPlantSites);
-  const [selectedPlant, setSelectedPlant] = useState<PlantSite | null>(() => {
-    const sites = loadPlantSites();
-    return sites[0] || null;
-  });
+  const [selectedPlant, setSelectedPlant] = useState<PlantSite | null>(null);
   const [isaacModalOpen, setIsIsaacModalOpen] = useState<boolean>(false);
   const [isaacModalPlant, setIsIsaacModalPlant] = useState<PlantSite | null>(null);
 
@@ -1133,6 +1131,11 @@ export function App() {
           ) : (
             /* Monitor Mode: Fleet & Task Status */
             <div className="space-y-4">
+              {/* Plant Cameras (MQTT Live On-Demand) */}
+              {selectedPlant && selectedPlant.cameraTopic && (
+                <PlantCameraList plant={selectedPlant} defaultExpanded={false} />
+              )}
+
               {/* Fleet Summary */}
               <div>
                 <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-3">

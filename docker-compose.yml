@@ -53,3 +53,40 @@ services:
       - ./frontend:/root/rmf_ws/frontend:rw
     working_dir: /root/rmf_ws/backend
     command: python3 server.py
+
+  # 3. EMQX - MQTT 訊息代理伺服器 (MQTT 3.1.1/5.0, WebSocket, 規則引擎與管理後台)
+  emqx:
+    image: emqx:latest
+    container_name: emqx_broker
+    restart: unless-stopped
+    ports:
+      - "1883:1883"      # MQTT TCP
+      - "8083:8083"      # MQTT over WebSocket (前端瀏覽器直連)
+      - "8084:8084"      # MQTT over WSS (安全 WebSocket)
+      - "8883:8883"      # MQTT SSL/TLS
+      - "18083:18083"    # EMQX Web Dashboard 管理後台 (預設帳號: admin / public)
+    volumes:
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+
+  # 4. MediaMTX - 即時影像串流媒體伺服器 (支援 RTSP, RTMP, HLS, WebRTC)
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx_server
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - MTX_API=yes
+    # 使用 host 網路模式以獲得最佳的低延遲 WebRTC UDP 穿透與推拉流效能
+    # 常用監聽連接埠：
+    # - 8554: RTSP 影音串流輸入/輸出 (rtsp://localhost:8554/<stream_name>)
+    # - 8889: WebRTC (WHEP/WHIP) 低延遲網頁播放 (http://localhost:8889/<stream_name>)
+    # - 8888: HLS 串流 (http://localhost:8888/<stream_name>)
+    # - 1935: RTMP 串流
+    # - 9997: MediaMTX API (http://localhost:9997/v3/paths/list)
+    # - 8189/udp: WebRTC ICE 媒體數據傳輸
+
+volumes:
+  emqx_data:
+  emqx_log:
+

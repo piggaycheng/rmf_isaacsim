@@ -66,5 +66,22 @@ export interface PlantSite {
   areaM2: number;
   description: string;
   isaacSimWebRTCUrl: string; // e.g. "ws://localhost:8080/webrtc" or "http://localhost:8011"
+  mqttBrokerUrl?: string; // e.g. "ws://localhost:8083/mqtt"
+  cameraTopic?: string; // e.g. "slam/cameras"
 }
 
+export interface CameraInfo {
+  name: string;
+  rtsp_path: string;
+  enable_topic: string;
+  width: number;
+  height: number;
+  fps: number;
+  enabled: boolean;
+}
+
+export interface PlantCameraPayload {
+  online: boolean;
+  rtsp_port: number;
+  cameras: CameraInfo[];
+}
