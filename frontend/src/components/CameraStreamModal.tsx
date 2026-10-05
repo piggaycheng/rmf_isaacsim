@@ -89,6 +89,31 @@ export function CameraStreamModal({
     };
   }, [open, camera?.rtsp_path]);
 
+  // Fast-path auto stop when user refreshes (F5) or closes the browser window/tab
+  useEffect(() => {
+    if (!open || !camera) return;
+
+    const handleUnload = () => {
+      try {
+        const payload = JSON.stringify({
+          camera_name: camera.name,
+          topic_prefix: plant?.cameraTopic || 'slam/cameras',
+        });
+        const blob = new Blob([payload], { type: 'application/json' });
+        navigator.sendBeacon('/api/stream/camera/disable', blob);
+      } catch (e) {
+        // Ignore fallback
+      }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
+    };
+  }, [open, camera, plant]);
+
   if (!open || !camera) return null;
 
   const handleCopyRTSP = () => {
