@@ -19,7 +19,6 @@ import {
   Search,
   Plus,
   Compass,
-  Video,
   Radio,
   GitCommit,
   ExternalLink,
@@ -40,7 +39,7 @@ interface WorldMapProps {
   plants: PlantSite[];
   selectedPlant: PlantSite | null;
   onSelectPlant: (plant: PlantSite) => void;
-  onOpenIsaacSim: (plant: PlantSite) => void;
+  onOpenIsaacSim?: (plant: PlantSite) => void;
   onNavigateToMonitor: (plant: PlantSite) => void;
   onNavigateToEdit: (plant: PlantSite) => void;
   onAddPlant: (newPlant: PlantSite) => void;
@@ -471,32 +470,19 @@ export function WorldMap({
                 </div>
 
                 {/* Quick Action Buttons */}
-                <div className="flex items-center justify-between pt-1 gap-2">
-                  <Button
-                    size="sm"
-                    className="h-7 text-[11px] flex-1 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-medium shadow-sm"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenIsaacSim(plant);
-                    }}
-                    title="開啟 Isaac Sim WebRTC 數位雙生模擬畫面"
-                  >
-                    <Video className="w-3 h-3 mr-1" />
-                    Isaac Sim 模擬畫面
-                  </Button>
-
+                <div className="flex items-center justify-end pt-1">
                   <Button
                     size="sm"
                     variant="outline"
-                    className="h-7 text-[11px] border-slate-700 bg-slate-950/80 hover:bg-slate-800 text-slate-300"
+                    className="h-7 text-[11px] w-full border-slate-700 bg-slate-900/60 hover:bg-slate-800 hover:text-white text-slate-300 transition-colors"
                     onClick={(e) => {
                       e.stopPropagation();
                       onNavigateToMonitor(plant);
                     }}
                     title="進入該廠區 Open-RMF 即時監控"
                   >
-                    <Radio className="w-3 h-3 mr-1 text-primary" />
-                    即時監控
+                    <Radio className="w-3 h-3 mr-1 text-cyan-400" />
+                    進入即時監控
                   </Button>
                 </div>
               </div>
@@ -610,26 +596,14 @@ export function WorldMap({
 
                 {/* Action Buttons */}
                 <div className="flex items-center space-x-2.5 shrink-0 flex-wrap">
-                  {/* 1. Primary: Isaac Sim WebRTC Button */}
+                  {/* 1. Primary: Enter Plant Monitor */}
                   <Button
                     size="sm"
-                    className="h-9 px-4 bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-white font-bold text-xs shadow-lg shadow-emerald-500/20"
-                    onClick={() => onOpenIsaacSim(selectedPlant)}
-                    title="開啟 Isaac Sim WebRTC 數位雙生模擬串流"
-                  >
-                    <Video className="w-4 h-4 mr-1.5" />
-                    打開 Isaac Sim 模擬畫面
-                  </Button>
-
-                  {/* 2. Enter Plant Monitor */}
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-9 text-xs border-slate-700 bg-slate-900/80 hover:bg-slate-800 text-slate-200"
+                    className="h-9 px-4 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium text-xs shadow-md shadow-cyan-600/20"
                     onClick={() => onNavigateToMonitor(selectedPlant)}
                     title="進入此廠區 Open-RMF 即時車隊監控"
                   >
-                    <Radio className="w-3.5 h-3.5 mr-1.5 text-primary" />
+                    <Radio className="w-3.5 h-3.5 mr-1.5" />
                     進入即時監控
                   </Button>
 
