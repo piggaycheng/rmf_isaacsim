@@ -249,19 +249,20 @@ export function WorldMap({
       // Create Custom HTML Marker element
       const el = document.createElement('div');
       el.className = 'group cursor-pointer select-none';
-      el.style.transform = 'translate(-50%, -100%)';
 
       el.innerHTML = `
         <div class="relative flex flex-col items-center">
           <!-- Tooltip label on hover or when selected -->
           <div class="mb-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold whitespace-nowrap border shadow-xl transition-all duration-200 pointer-events-auto flex items-center space-x-1.5 ${
             isSelected
-              ? 'bg-slate-900 border-primary text-primary-foreground shadow-primary/20 scale-110 z-30'
-              : 'bg-slate-900/90 border-slate-700 text-slate-200 backdrop-blur-md opacity-90 group-hover:opacity-100 group-hover:scale-105 z-10'
+              ? 'bg-slate-950/95 border-2 border-cyan-400 text-white shadow-cyan-500/30 ring-1 ring-cyan-400/50 scale-110 z-30'
+              : 'bg-slate-900/90 border-slate-700 text-slate-100 backdrop-blur-md opacity-90 group-hover:opacity-100 group-hover:scale-105 z-10'
           }">
             <span class="w-2 h-2 rounded-full ${plant.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}"></span>
-            <span>${plant.name}</span>
-            <span class="text-[9px] px-1 py-0.2 rounded bg-slate-800 text-slate-400 font-mono">${plant.code}</span>
+            <span class="${isSelected ? 'text-white font-bold' : 'text-slate-100'}">${plant.name}</span>
+            <span class="text-[9px] px-1 py-0.2 rounded ${
+              isSelected ? 'bg-cyan-950 text-cyan-300 border border-cyan-800/80' : 'bg-slate-800 text-slate-400'
+            } font-mono">${plant.code}</span>
           </div>
 
           <!-- Pin Icon with Radar Ripple -->
@@ -293,13 +294,14 @@ export function WorldMap({
         map.flyTo({
           center: plant.coordinates,
           zoom: Math.max(map.getZoom(), 13.5),
+          padding: { bottom: 260 },
           speed: 1.4,
           curve: 1.42,
           essential: true,
         });
       });
 
-      const marker = new Marker({ element: el })
+      const marker = new Marker({ element: el, anchor: 'bottom' })
         .setLngLat(plant.coordinates)
         .addTo(map);
 
@@ -314,6 +316,7 @@ export function WorldMap({
       mapRef.current.flyTo({
         center: plant.coordinates,
         zoom: 14,
+        padding: { bottom: 260 },
         speed: 1.2,
         curve: 1.3,
         essential: true,
