@@ -1102,14 +1102,34 @@ export function App() {
           {mode === 'edit' ? (
             /* Edit Mode: Waypoint / Lane Inspector */
             <div className="space-y-4">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                <h2 className="text-sm font-bold text-slate-200 flex items-center space-x-1.5">
-                  <Layers className="w-4 h-4 text-primary" />
-                  <span>路網屬性檢視器</span>
-                </h2>
-                <Badge variant="outline" className="text-[10px]">
-                  {waypoints.length} 站點 / {lanes.length} 路線
-                </Badge>
+              <div className="border-b border-slate-800 pb-2.5 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-bold text-slate-200 flex items-center space-x-1.5">
+                    <Layers className="w-4 h-4 text-primary" />
+                    <span>路網屬性檢視器</span>
+                  </h2>
+                  <Badge variant="outline" className="text-[10px] text-cyan-400 border-cyan-800/60 bg-cyan-950/40 font-medium">
+                    共 {graphs.length} 層路網
+                  </Badge>
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span className="flex items-center space-x-1.5 truncate">
+                    <span>當前層：</span>
+                    <span
+                      className="inline-block w-2.5 h-2.5 rounded-full shrink-0 shadow-sm"
+                      style={{
+                        backgroundColor:
+                          GRAPH_PALETTE[activeGraphIdx % GRAPH_PALETTE.length],
+                      }}
+                    />
+                    <strong className="text-slate-200 truncate">
+                      Graph {activeGraphIdx} ({graphs.find((g) => g.id === activeGraphIdx)?.name || '未命名'})
+                    </strong>
+                  </span>
+                  <span className="text-[10px] text-slate-500 shrink-0 ml-1">
+                    {waypoints.length} 站點 · {lanes.length} 路線
+                  </span>
+                </div>
               </div>
 
               {/* SLAM Map Info Card (if loaded) */}
@@ -1456,10 +1476,84 @@ export function App() {
                   </div>
                 </div>
               ) : (
-                <div className="p-6 text-center text-xs text-slate-500 border border-dashed border-slate-800 rounded-xl space-y-1.5">
-                  <p className="font-medium text-slate-400">尚未選取任何物件</p>
-                  <p>點選單一站點編輯屬性，或在空白處拖曳矩形批次框選刪除多個點位。</p>
-                  <p className="text-[10px] text-slate-600">快捷鍵：選取後按 Delete 鍵可直接刪除</p>
+                /* Empty Selection: Show Nav Graphs Layers Overview */
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-300 flex items-center space-x-1.5">
+                      <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>路網圖層總覽 ({graphs.length} 層)</span>
+                    </span>
+                    <button
+                      onClick={handleAddGraph}
+                      className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center space-x-0.5 bg-cyan-950/40 hover:bg-cyan-900/50 px-2 py-0.5 rounded border border-cyan-800/40 transition-colors"
+                      title="新增一組全新 Nav Graph"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>新增圖層</span>
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    {graphs.map((g) => {
+                      const isActive = g.id === activeGraphIdx;
+                      const gLanes = lanes.filter((l) => (l.graph_idx ?? 0) === g.id);
+                      const gWaypoints = waypoints.filter((w) => isWaypointInGraph(w, g.id, lanes));
+                      const gColor = GRAPH_PALETTE[g.id % GRAPH_PALETTE.length];
+
+                      return (
+                        <div
+                          key={g.id}
+                          onClick={() => handleSelectGraphTab(g.id)}
+                          className={`p-2.5 rounded-xl border transition-all cursor-pointer ${
+                            isActive
+                              ? 'bg-slate-900 border-cyan-500/50 shadow-sm shadow-cyan-950/50 ring-1 ring-cyan-500/30'
+                              : 'bg-slate-950/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900/40'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <div className="flex items-center space-x-2">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full shrink-0 shadow-sm"
+                                style={{ backgroundColor: gColor }}
+                              />
+                              <span className={`text-xs font-semibold ${isActive ? 'text-slate-100' : 'text-slate-300'}`}>
+                                {g.name}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                (Graph {g.id})
+                              </span>
+                            </div>
+                            {isActive ? (
+                              <Badge className="text-[9px] px-1.5 py-0 h-4 bg-cyan-500/20 text-cyan-300 border-cyan-500/30">
+                                當前編輯中
+                              </Badge>
+                            ) : (
+                              <span className="text-[10px] text-slate-500 hover:text-slate-300">
+                                點擊切換 ➔
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-1.5 text-[11px] text-slate-400 bg-slate-900/40 rounded-lg p-1.5 border border-slate-800/60">
+                            <div>
+                              <span className="text-slate-500 text-[10px] block">專屬路線</span>
+                              <span className="font-semibold text-slate-200">{gLanes.length}</span> 條
+                            </div>
+                            <div>
+                              <span className="text-slate-500 text-[10px] block">關聯站點</span>
+                              <span className="font-semibold text-slate-200">{gWaypoints.length}</span> 個
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="p-3 text-center text-[11px] text-slate-500 border border-dashed border-slate-800 rounded-xl space-y-1">
+                    <p className="font-medium text-slate-400">💡 操作提示</p>
+                    <p>點選畫布上的單一站點或路線可編輯屬性；拖曳可框選批次操作。</p>
+                    <p className="text-[10px] text-slate-600">快捷鍵：選取後按 Delete 鍵可直接刪除</p>
+                  </div>
                 </div>
               )}
             </div>
