@@ -7,7 +7,42 @@ export interface Waypoint {
   y: number; // in meters (or canvas coordinates)
   type: WaypointType;
   yaw?: number; // radians
+  graph_idx?: number; // default: 0
 }
+
+export function getWaypointGraphIndices(wp: Waypoint, lanes: Lane[]): number[] {
+  const connectedGraphs = new Set<number>();
+  for (const l of lanes) {
+    if (l.start_id === wp.id || l.end_id === wp.id) {
+      connectedGraphs.add(l.graph_idx ?? 0);
+    }
+  }
+  if (connectedGraphs.size > 0) {
+    return Array.from(connectedGraphs);
+  }
+  return [wp.graph_idx ?? 0];
+}
+
+export function isWaypointInGraph(wp: Waypoint, graphIdx: number, lanes: Lane[]): boolean {
+  return getWaypointGraphIndices(wp, lanes).includes(graphIdx);
+}
+
+export interface NavGraph {
+  id: number;
+  name: string;
+  color: string;
+}
+
+export const GRAPH_PALETTE = [
+  '#38bdf8', // Cyan / Light Blue (Graph 0)
+  '#f59e0b', // Amber / Orange (Graph 1)
+  '#10b981', // Emerald / Green (Graph 2)
+  '#a855f7', // Purple (Graph 3)
+  '#f43f5e', // Rose / Red (Graph 4)
+  '#6366f1', // Indigo (Graph 5)
+  '#eab308', // Yellow (Graph 6)
+  '#06b6d4', // Darker Cyan (Graph 7)
+];
 
 export interface Lane {
   id: string;
@@ -15,6 +50,7 @@ export interface Lane {
   end_id: string;
   bidirectional: boolean;
   speed_limit?: number; // m/s
+  graph_idx?: number; // 0, 1, 2... default: 0
 }
 
 export interface Robot {

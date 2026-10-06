@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, WaypointType, SlamMap, PlantSite } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
@@ -37,7 +37,15 @@ import {
   Globe,
   Video,
   Building2,
+  Plus,
+  Eye,
+  EyeOff,
+  Pencil,
 } from 'lucide-react';
+
+const DEFAULT_GRAPHS: NavGraph[] = [
+  { id: 0, name: 'Graph 0 (預設車隊)', color: '#38bdf8' },
+];
 
 // Initial Demo Map Data (Office like)
 const INITIAL_WAYPOINTS: Waypoint[] = [
@@ -132,6 +140,24 @@ export function App() {
     return INITIAL_LANES;
   });
 
+  // Navigation Graphs state
+  const [graphs, setGraphs] = useState<NavGraph[]>(() => {
+    try {
+      const cached = localStorage.getItem('rmf_active_nav_graph');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.graphs && Array.isArray(parsed.graphs) && parsed.graphs.length > 0) {
+          return parsed.graphs;
+        }
+      }
+    } catch (e) {}
+    return DEFAULT_GRAPHS;
+  });
+  const [activeGraphIdx, setActiveGraphIdx] = useState<number>(0);
+  const [focusActiveGraph, setFocusActiveGraph] = useState<boolean>(true);
+  const [editingGraphId, setEditingGraphId] = useState<number | null>(null);
+  const [editingGraphName, setEditingGraphName] = useState<string>('');
+
   const [robots, setRobots] = useState<Robot[]>(INITIAL_ROBOTS);
   const [tasks, setTasks] = useState<Task[]>([
     {
@@ -220,6 +246,7 @@ export function App() {
           if (!cached) {
             setWaypoints(data.waypoints);
             if (Array.isArray(data.lanes)) setLanes(data.lanes);
+            if (Array.isArray(data.graphs) && data.graphs.length > 0) setGraphs(data.graphs);
           }
         }
       })
@@ -232,6 +259,7 @@ export function App() {
       name: 'office_map',
       waypoints,
       lanes,
+      graphs,
     };
 
     // Immediate local save
@@ -261,7 +289,7 @@ export function App() {
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [waypoints, lanes]);
+  }, [waypoints, lanes, graphs]);
 
   // WebSocket Connection to Backend
   useEffect(() => {
@@ -388,7 +416,14 @@ export function App() {
   const handleAddWaypoint = (x: number, y: number, type: WaypointType) => {
     const id = `wp_${Date.now()}`;
     const name = `${type === 'normal' ? 'wp' : type}_${waypoints.length + 1}`;
-    const newWp: Waypoint = { id, name, x, y, type };
+    const newWp: Waypoint = {
+      id,
+      name,
+      x,
+      y,
+      type,
+      graph_idx: activeGraphIdx,
+    };
     setWaypoints((prev) => [...prev, newWp]);
     setSelectedWaypointIds([id]);
     setSelectedLaneIds([]);
@@ -413,8 +448,65 @@ export function App() {
       start_id: startId,
       end_id: endId,
       bidirectional: true,
+      graph_idx: activeGraphIdx,
     };
     setLanes((prev) => [...prev, newLane]);
+  };
+
+  // Select active graph tab & purge any selected lanes/waypoints not in active graph (Option A)
+  const handleSelectGraphTab = (id: number) => {
+    setActiveGraphIdx(id);
+    setSelectedLaneIds((prev) =>
+      prev.filter((laneId) => {
+        const lane = lanes.find((l) => l.id === laneId);
+        return (lane?.graph_idx ?? 0) === id;
+      })
+    );
+    setSelectedWaypointIds((prev) =>
+      prev.filter((wpId) => {
+        const wp = waypoints.find((w) => w.id === wpId);
+        return wp ? isWaypointInGraph(wp, id, lanes) : false;
+      })
+    );
+  };
+
+  // Graph Management Actions
+  const handleAddGraph = () => {
+    const existingIds = graphs.map((g) => g.id);
+    const nextId = existingIds.length > 0 ? Math.max(...existingIds) + 1 : 0;
+    const nextColor = GRAPH_PALETTE[nextId % GRAPH_PALETTE.length];
+    const newGraph: NavGraph = {
+      id: nextId,
+      name: `Graph ${nextId}`,
+      color: nextColor,
+    };
+    setGraphs((prev) => [...prev, newGraph]);
+    handleSelectGraphTab(nextId);
+  };
+
+  const handleDeleteGraph = (graphId: number) => {
+    if (graphs.length <= 1) return;
+    const fallbackGraph = graphs.find((g) => g.id !== graphId) || graphs[0];
+    // Reassign any lanes in this graph to the fallback graph
+    setLanes((prev) =>
+      prev.map((l) => (l.graph_idx === graphId ? { ...l, graph_idx: fallbackGraph.id } : l))
+    );
+    setGraphs((prev) => prev.filter((g) => g.id !== graphId));
+    if (activeGraphIdx === graphId) {
+      handleSelectGraphTab(fallbackGraph.id);
+    }
+  };
+
+  const handleSaveGraphName = (graphId: number, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setEditingGraphId(null);
+      return;
+    }
+    setGraphs((prev) =>
+      prev.map((g) => (g.id === graphId ? { ...g, name: trimmed } : g))
+    );
+    setEditingGraphId(null);
   };
 
   const handleSelectWaypoint = (id: string | null) => {
@@ -524,6 +616,7 @@ export function App() {
       name: 'office_map',
       waypoints,
       lanes,
+      graphs,
     };
     try {
       // 1. Immediately cache in localStorage
@@ -537,7 +630,7 @@ export function App() {
       });
       const data = await res.json();
       if (res.ok) {
-        setSaveToast(`已儲存 (${waypoints.length} 點, ${lanes.length} 線)`);
+        setSaveToast(`已儲存 (${waypoints.length} 點, ${lanes.length} 線, ${graphs.length} 路網)`);
       } else {
         setSaveToast('儲存失敗');
       }
@@ -555,6 +648,7 @@ export function App() {
       name: 'rmf_navigation_graph',
       waypoints,
       lanes,
+      graphs,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -569,9 +663,9 @@ export function App() {
     window.open('/api/map/download/yaml', '_blank');
   };
 
-  // Export Nav Graph 0 YAML (Open-RMF nav_graphs/0.yaml for fleet adapters)
-  const handleExportNav0Yaml = () => {
-    window.open('/api/map/download/nav_graph_0', '_blank');
+  // Export Nav Graph YAML for current active graph (nav_graphs/{activeGraphIdx}.yaml)
+  const handleExportActiveNavYaml = () => {
+    window.open(`/api/map/download/nav_graph/${activeGraphIdx}`, '_blank');
   };
 
   const selectedWaypoint =
@@ -726,11 +820,11 @@ export function App() {
               <Button
                 size="sm"
                 variant="secondary"
-                onClick={handleExportNav0Yaml}
-                title="下載 Open-RMF 車隊專用導航路網 (nav_graphs/0.yaml)"
+                onClick={handleExportActiveNavYaml}
+                title={`下載 Open-RMF 車隊專用導航路網 (nav_graphs/${activeGraphIdx}.yaml)`}
               >
                 <Download className="w-3.5 h-3.5 mr-1" />
-                0.yaml
+                Graph {activeGraphIdx}.yaml
               </Button>
             </>
           )}
@@ -826,26 +920,158 @@ export function App() {
         )}
 
         {/* Center: Interactive Map Canvas */}
-        <main className="flex-1 h-full relative">
-          <MapCanvas
-            mode={mode}
-            tool={tool}
-            waypoints={waypoints}
-            lanes={lanes}
-            robots={robots}
-            slamMap={slamMap}
-            selectedWaypointIds={selectedWaypointIds}
-            selectedLaneIds={selectedLaneIds}
-            onSelectWaypoint={handleSelectWaypoint}
-            onSelectMultiple={handleSelectMultiple}
-            onAddWaypoint={handleAddWaypoint}
-            onMoveWaypoint={handleMoveWaypoint}
-            onAddLane={handleAddLane}
-            onWaypointClickInMonitor={(wp) => {
-              setDispatchPresetWp(wp);
-              setDispatchModalOpen(true);
-            }}
-          />
+        <main className="flex-1 h-full relative flex flex-col">
+          {/* Top Graph Management Bar (Edit Mode Only) */}
+          {mode === 'edit' && (
+            <div className="h-10 bg-[#0b101d] border-b border-slate-800 px-3 flex items-center justify-between z-10 select-none flex-shrink-0">
+              {/* Left: Graphs tabs */}
+              <div className="flex items-center space-x-1.5 overflow-x-auto py-1 scrollbar-none">
+                <span className="text-[11px] font-semibold text-slate-400 flex items-center mr-1">
+                  <Layers className="w-3.5 h-3.5 mr-1 text-primary" />
+                  路網分組:
+                </span>
+                {graphs.map((g) => {
+                  const laneCount = lanes.filter((l) => (l.graph_idx ?? 0) === g.id).length;
+                  const isActive = activeGraphIdx === g.id;
+                  return (
+                    <div
+                      key={g.id}
+                      onClick={() => handleSelectGraphTab(g.id)}
+                      className={`group flex items-center space-x-1.5 px-2.5 py-1 rounded-md text-xs cursor-pointer transition-all border ${
+                        isActive
+                          ? 'bg-slate-800 border-slate-600 text-white font-medium shadow-sm'
+                          : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                      }`}
+                    >
+                      <span
+                        className="w-2.5 h-2.5 rounded-full inline-block shadow-sm flex-shrink-0"
+                        style={{ backgroundColor: g.color }}
+                      />
+                      {editingGraphId === g.id ? (
+                        <input
+                          autoFocus
+                          type="text"
+                          value={editingGraphName}
+                          onChange={(e) => setEditingGraphName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleSaveGraphName(g.id, editingGraphName);
+                            if (e.key === 'Escape') setEditingGraphId(null);
+                          }}
+                          onBlur={() => handleSaveGraphName(g.id, editingGraphName)}
+                          className="h-5 px-1 py-0 bg-slate-950 border border-primary text-xs text-white rounded w-28 focus:outline-none"
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className="truncate max-w-[130px]">{g.name}</span>
+                      )}
+                      <span
+                        className={`text-[10px] px-1 rounded ${
+                          isActive ? 'bg-slate-700 text-slate-200' : 'bg-slate-800/80 text-slate-400'
+                        }`}
+                      >
+                        {laneCount}線
+                      </span>
+
+                      {/* Edit name icon button */}
+                      {editingGraphId !== g.id && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingGraphId(g.id);
+                            setEditingGraphName(g.name);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 hover:text-primary transition-opacity p-0.5"
+                          title="重新命名此路網"
+                        >
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      )}
+
+                      {/* Delete icon button (only if > 1 graph) */}
+                      {graphs.length > 1 && editingGraphId !== g.id && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (window.confirm(`確定要刪除「${g.name}」嗎？該路網中的路線將會轉移至其他路網。`)) {
+                              handleDeleteGraph(g.id);
+                            }
+                          }}
+                          className="opacity-0 group-hover:opacity-100 hover:text-rose-400 transition-opacity p-0.5"
+                          title="刪除此路網"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* + Add Graph button */}
+                <button
+                  onClick={handleAddGraph}
+                  className="flex items-center space-x-1 px-2 py-1 rounded-md text-xs text-slate-400 hover:text-primary hover:bg-slate-800 border border-dashed border-slate-700 transition-all"
+                  title="新增一組全新的 Navigation Graph"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>新增路網</span>
+                </button>
+              </div>
+
+              {/* Right: Graph display filter */}
+              <div className="flex items-center space-x-2">
+                <span className="text-[11px] text-slate-400 hidden xl:flex items-center">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 inline-block" />
+                  已鎖定範圍：僅選取當前路網 (Graph {activeGraphIdx})
+                </span>
+                <button
+                  onClick={() => setFocusActiveGraph(!focusActiveGraph)}
+                  className={`flex items-center space-x-1 text-xs px-2.5 py-1 rounded border transition-colors ${
+                    focusActiveGraph
+                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                  title={focusActiveGraph ? '當前模式：僅高亮當前路網，其他路網淡化半透明顯示（點擊切換為顯示全部原色）' : '當前模式：顯示所有路網原色（點擊切換為聚焦當前路網）'}
+                >
+                  {focusActiveGraph ? (
+                    <>
+                      <EyeOff className="w-3.5 h-3.5 text-amber-400" />
+                      <span>聚焦當前 (淡化其他)</span>
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="w-3.5 h-3.5 text-slate-400" />
+                      <span>顯示全部路網原色</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 h-full relative">
+            <MapCanvas
+              mode={mode}
+              tool={tool}
+              waypoints={waypoints}
+              lanes={lanes}
+              robots={robots}
+              slamMap={slamMap}
+              graphs={graphs}
+              activeGraphIdx={activeGraphIdx}
+              focusActiveGraph={focusActiveGraph}
+              selectedWaypointIds={selectedWaypointIds}
+              selectedLaneIds={selectedLaneIds}
+              onSelectWaypoint={handleSelectWaypoint}
+              onSelectMultiple={handleSelectMultiple}
+              onAddWaypoint={handleAddWaypoint}
+              onMoveWaypoint={handleMoveWaypoint}
+              onAddLane={handleAddLane}
+              onWaypointClickInMonitor={(wp) => {
+                setDispatchPresetWp(wp);
+                setDispatchModalOpen(true);
+              }}
+            />
+          </div>
 
           {/* Monitor Mode: Floating Quick Dispatch Prompt */}
           {mode === 'monitor' && (
@@ -964,6 +1190,43 @@ export function App() {
                     </div>
                   )}
 
+                  {selectedLaneIds.length > 0 && (
+                    <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                      <label className="text-[11px] text-slate-300 block font-medium">
+                        批次轉移選取的 {selectedLaneIds.length} 條路線至路網：
+                      </label>
+                      <div className="flex space-x-1.5">
+                        <select
+                          id="batch-graph-target"
+                          defaultValue={activeGraphIdx}
+                          className="flex-1 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-xs text-slate-200"
+                        >
+                          {graphs.map((g) => (
+                            <option key={g.id} value={g.id}>
+                              {g.name} (Graph {g.id})
+                            </option>
+                          ))}
+                        </select>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="h-7 text-xs"
+                          onClick={() => {
+                            const sel = (document.getElementById('batch-graph-target') as HTMLSelectElement)?.value;
+                            const targetIdx = parseInt(sel, 10);
+                            if (!isNaN(targetIdx)) {
+                              setLanes((prev) =>
+                                prev.map((l) => (selectedLaneIds.includes(l.id) ? { ...l, graph_idx: targetIdx } : l))
+                              );
+                            }
+                          }}
+                        >
+                          套用
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="pt-2 space-y-1.5">
                     <Button
                       variant="destructive"
@@ -1007,6 +1270,36 @@ export function App() {
                       {' ⇄ '}
                       {waypoints.find((w) => w.id === selectedLane.end_id)?.name || selectedLane.end_id}
                     </p>
+                  </div>
+
+                  {/* Graph Selection */}
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">所屬路網 (Nav Graph)</label>
+                    <div className="flex items-center space-x-2">
+                      <span
+                        className="w-3 h-3 rounded-full flex-shrink-0"
+                        style={{
+                          backgroundColor:
+                            graphs.find((g) => g.id === (selectedLane.graph_idx ?? 0))?.color || '#38bdf8',
+                        }}
+                      />
+                      <select
+                        value={selectedLane.graph_idx ?? 0}
+                        onChange={(e) => {
+                          const newGraphIdx = parseInt(e.target.value, 10);
+                          setLanes((prev) =>
+                            prev.map((l) => (l.id === selectedLane.id ? { ...l, graph_idx: newGraphIdx } : l))
+                          );
+                        }}
+                        className="flex-1 bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200"
+                      >
+                        {graphs.map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {g.name} (Graph {g.id})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
 
                   <div>
@@ -1106,6 +1399,48 @@ export function App() {
                       <option value="parking">🅿️ 停車等候點 (Parking)</option>
                       <option value="workcell">📦 物料取放站 (Workcell)</option>
                     </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">所屬路網 (Nav Graph)</label>
+                    <div className="flex items-center gap-2">
+                      <div
+                        className="w-3 h-3 rounded-full shrink-0 shadow-sm"
+                        style={{
+                          backgroundColor:
+                            GRAPH_PALETTE[(selectedWaypoint.graph_idx ?? 0) % GRAPH_PALETTE.length],
+                        }}
+                      />
+                      <select
+                        value={selectedWaypoint.graph_idx ?? 0}
+                        onChange={(e) => {
+                          const newGraphIdx = parseInt(e.target.value, 10);
+                          setWaypoints((prev) =>
+                            prev.map((w) =>
+                              w.id === selectedWaypoint.id ? { ...w, graph_idx: newGraphIdx } : w
+                            )
+                          );
+                        }}
+                        className="flex-1 bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200"
+                      >
+                        {graphs.map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {g.name} (Graph {g.id})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {(() => {
+                      const connectedGraphs = getWaypointGraphIndices(selectedWaypoint, lanes);
+                      if (connectedGraphs.length > 1) {
+                        return (
+                          <p className="text-[10px] text-amber-400/90 mt-1.5 leading-tight">
+                            🔗 此站點連接至多組路網路線：{connectedGraphs.map((idx) => `Graph ${idx}`).join(', ')}
+                          </p>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
 
                   <div className="pt-2">

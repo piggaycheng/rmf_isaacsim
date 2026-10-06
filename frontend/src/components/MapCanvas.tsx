@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Waypoint, Lane, Robot, WaypointType, SlamMap } from '@/types/rmf';
+import { Waypoint, Lane, Robot, WaypointType, SlamMap, NavGraph, getWaypointGraphIndices, isWaypointInGraph } from '@/types/rmf';
 
 export type EditorTool = 'select' | 'waypoint' | 'lane' | 'charger' | 'parking' | 'workcell';
 
@@ -10,6 +10,9 @@ interface MapCanvasProps {
   lanes: Lane[];
   robots: Robot[];
   slamMap?: SlamMap | null;
+  graphs?: NavGraph[];
+  activeGraphIdx?: number;
+  focusActiveGraph?: boolean;
   selectedWaypointIds: string[];
   selectedLaneIds: string[];
   onSelectWaypoint: (id: string | null) => void;
@@ -71,6 +74,9 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
   lanes,
   robots,
   slamMap,
+  graphs,
+  activeGraphIdx = 0,
+  focusActiveGraph = true,
   selectedWaypointIds,
   selectedLaneIds,
   onSelectWaypoint,
@@ -285,8 +291,18 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
       const s1 = worldToScreen(p1.x, p1.y);
       const s2 = worldToScreen(p2.x, p2.y);
       const isSelected = selectedLaneIds.includes(lane.id);
+      const laneGraphIdx = lane.graph_idx ?? 0;
+      const isDimmed = mode === 'edit' && focusActiveGraph && laneGraphIdx !== activeGraphIdx;
+
+      // Color lookup from graph definition
+      const graphDef = graphs?.find((g) => g.id === laneGraphIdx);
+      const graphColor = graphDef ? graphDef.color : '#38bdf8';
 
       ctx.save();
+      if (isDimmed) {
+        ctx.globalAlpha = 0.22;
+      }
+
       ctx.beginPath();
       ctx.moveTo(s1.x, s1.y);
       ctx.lineTo(s2.x, s2.y);
@@ -298,8 +314,8 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.shadowColor = '#f59e0b';
         ctx.shadowBlur = 8;
       } else {
-        ctx.strokeStyle = lane.bidirectional ? '#38bdf8' : '#0ea5e9';
-        ctx.lineWidth = 3;
+        ctx.strokeStyle = graphColor;
+        ctx.lineWidth = isDimmed ? 2 : 3.5;
       }
 
       ctx.setLineDash(lane.bidirectional ? [] : [6, 4]);
@@ -311,9 +327,9 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
       const midY = (s1.y + s2.y) / 2;
       const angle = Math.atan2(s2.y - s1.y, s2.x - s1.x);
 
-      ctx.fillStyle = isSelected ? '#f59e0b' : '#38bdf8';
+      ctx.fillStyle = isSelected ? '#f59e0b' : graphColor;
       ctx.beginPath();
-      ctx.arc(midX, midY, isSelected ? 4 : 3, 0, Math.PI * 2);
+      ctx.arc(midX, midY, isSelected ? 4 : (isDimmed ? 2.5 : 3.5), 0, Math.PI * 2);
       ctx.fill();
 
       // Draw arrow
@@ -337,7 +353,19 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
       const isSelected = selectedWaypointIds.includes(wp.id);
       const isConnecting = wp.id === laneStartId;
 
+      // Determine graph membership & color matching the lane's graph palette
+      const wpGraphIndices = getWaypointGraphIndices(wp, lanes);
+      const inActiveGraph = wpGraphIndices.includes(activeGraphIdx);
+      const isDimmed = mode === 'edit' && focusActiveGraph && !inActiveGraph;
+
+      const primaryGraphIdx = inActiveGraph ? activeGraphIdx : (wpGraphIndices[0] ?? (wp.graph_idx ?? 0));
+      const graphDef = graphs?.find((g) => g.id === primaryGraphIdx);
+      const graphColor = graphDef ? graphDef.color : '#38bdf8';
+
       ctx.save();
+      if (isDimmed) {
+        ctx.globalAlpha = 0.22;
+      }
 
       // Outer glow if selected or connecting
       if (isSelected || isConnecting) {
@@ -350,27 +378,28 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.stroke();
       }
 
-      // Waypoint circle color based on type
+      // Waypoint circle - Fill with graph's color so point matches lane color scheme!
       ctx.beginPath();
       ctx.arc(pos.x, pos.y, 10, 0, Math.PI * 2);
-      let fillColor = '#3b82f6'; // normal: blue
+
       let badge = '';
+      let accentBorderColor = '#ffffff';
 
       if (wp.type === 'charger') {
-        fillColor = '#f59e0b'; // amber
         badge = '⚡';
+        accentBorderColor = '#f59e0b';
       } else if (wp.type === 'parking') {
-        fillColor = '#8b5cf6'; // purple
         badge = 'P';
+        accentBorderColor = '#c084fc';
       } else if (wp.type === 'workcell') {
-        fillColor = '#10b981'; // emerald
         badge = 'W';
+        accentBorderColor = '#34d399';
       }
 
-      ctx.fillStyle = fillColor;
+      ctx.fillStyle = graphColor;
       ctx.fill();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = accentBorderColor;
+      ctx.lineWidth = 1.8;
       ctx.stroke();
 
       // Waypoint Label / Badge inside
@@ -494,6 +523,9 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
     mode,
     marqueeBox,
     worldToScreen,
+    graphs,
+    activeGraphIdx,
+    focusActiveGraph,
   ]);
 
   // Mouse Handlers
@@ -514,6 +546,10 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
     if (e.button === 0) {
       // 1. Check if clicked a waypoint
       const clickedWp = waypoints.find((wp) => {
+        // Option A: In Edit Mode, waypoints not in the active graph cannot be clicked or interacted with!
+        if (mode === 'edit' && !isWaypointInGraph(wp, activeGraphIdx, lanes)) {
+          return false;
+        }
         const screenPos = worldToScreen(wp.x, wp.y);
         const dist = Math.hypot(screenPos.x - clientX, screenPos.y - clientY);
         return dist <= 14;
@@ -577,6 +613,10 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
 
         // Check if clicked a lane
         const clickedLane = lanes.find((l) => {
+          // Option A: In edit mode, only allow selecting lanes belonging to the active graph
+          if (mode === 'edit' && (l.graph_idx ?? 0) !== activeGraphIdx) {
+            return false;
+          }
           const p1 = waypoints.find((w) => w.id === l.start_id);
           const p2 = waypoints.find((w) => w.id === l.end_id);
           if (!p1 || !p2) return false;
@@ -676,6 +716,10 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         // Find all waypoints inside the box
         const foundWpIds: string[] = [];
         waypoints.forEach((wp) => {
+          // Option A: In Edit Mode, waypoints not in the active graph cannot be box-selected
+          if (mode === 'edit' && !isWaypointInGraph(wp, activeGraphIdx, lanes)) {
+            return;
+          }
           const screenPos = worldToScreen(wp.x, wp.y);
           if (screenPos.x >= minX && screenPos.x <= maxX && screenPos.y >= minY && screenPos.y <= maxY) {
             foundWpIds.push(wp.id);
@@ -685,6 +729,10 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         // Find all lanes inside the box or connecting selected waypoints
         const foundLaneIds: string[] = [];
         lanes.forEach((l) => {
+          // Option A: In edit mode, marquee box selection only includes lanes belonging to the active graph
+          if (mode === 'edit' && (l.graph_idx ?? 0) !== activeGraphIdx) {
+            return;
+          }
           if (foundWpIds.includes(l.start_id) && foundWpIds.includes(l.end_id)) {
             foundLaneIds.push(l.id);
           }

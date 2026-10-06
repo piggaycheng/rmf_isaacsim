@@ -75,9 +75,10 @@ class TaskRequest(BaseModel):
     robot_id: Optional[str] = None
 
 class MapSaveRequest(BaseModel):
-    name: str
+    name: str = "office_map"
     waypoints: List[Dict[str, Any]]
     lanes: List[Dict[str, Any]]
+    graphs: Optional[List[Dict[str, Any]]] = None
 
 # WebSocket Connection Manager
 @app.websocket("/ws/fleet")
@@ -388,11 +389,6 @@ def load_initial_slam_map() -> Dict[str, Any]:
 
 current_slam_map: Dict[str, Any] = load_initial_slam_map()
 
-class MapSaveRequest(BaseModel):
-    name: str = "office_map"
-    waypoints: List[Dict[str, Any]]
-    lanes: List[Dict[str, Any]]
-
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "active_clients": len(active_connections)}
@@ -412,21 +408,41 @@ def get_saved_map():
             with open(ACTIVE_MAP_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            return {"error": str(e), "waypoints": [], "lanes": []}
-    return {"name": "default", "waypoints": [], "lanes": []}
+            return {"error": str(e), "waypoints": [], "lanes": [], "graphs": []}
+    return {
+        "name": "default",
+        "waypoints": [],
+        "lanes": [],
+        "graphs": [{"id": 0, "name": "Graph 0 (預設車隊)", "color": "#38bdf8"}],
+    }
+
+@app.get("/api/map/graphs")
+def get_available_graphs():
+    if os.path.exists(ACTIVE_MAP_FILE):
+        try:
+            with open(ACTIVE_MAP_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("graphs", [{"id": 0, "name": "Graph 0 (預設車隊)", "color": "#38bdf8"}])
+        except Exception:
+            pass
+    return [{"id": 0, "name": "Graph 0 (預設車隊)", "color": "#38bdf8"}]
 
 @app.post("/api/map")
 async def save_map(req: MapSaveRequest):
+    default_graphs = [{"id": 0, "name": "Graph 0 (預設車隊)", "color": "#38bdf8"}]
+    graphs_list = req.graphs if req.graphs and len(req.graphs) > 0 else default_graphs
+
     map_data = {
         "name": req.name,
         "waypoints": req.waypoints,
         "lanes": req.lanes,
+        "graphs": graphs_list,
     }
-    
+
     # 1. Save JSON
     with open(ACTIVE_MAP_FILE, "w", encoding="utf-8") as f:
         json.dump(map_data, f, indent=2, ensure_ascii=False)
-        
+
     # 2. Save Open-RMF Building Map YAML (.building.yaml)
     wp_list = req.waypoints
     rmf_building_structure = {
@@ -457,7 +473,7 @@ async def save_map(req: MapSaveRequest):
                         next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("end_id")), 0),
                         {
                             "is_bidirectional": bool(l.get("bidirectional", True)),
-                            "graph_idx": 0,
+                            "graph_idx": int(l.get("graph_idx", 0)),
                             "speed_limit": float(l.get("speed_limit", 0.0))
                         }
                     ]
@@ -469,21 +485,14 @@ async def save_map(req: MapSaveRequest):
     with open(ACTIVE_YAML_FILE, "w", encoding="utf-8") as f:
         yaml.dump(rmf_building_structure, f, allow_unicode=True, sort_keys=False)
 
-    # 3. Save Open-RMF Nav Graph (nav_graphs/0.yaml for fleet adapter)
-    nav_0_lanes = []
-    for l in req.lanes:
-        start_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("start_id")), 0)
-        end_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("end_id")), 0)
-        speed_limit = float(l.get("speed_limit", 0.0))
-        is_bidi = bool(l.get("bidirectional", True))
-        p = {"speed_limit": speed_limit} if speed_limit > 0.0 else {}
-        if is_bidi:
-            nav_0_lanes.append([start_idx, end_idx, dict(p)])
-            nav_0_lanes.append([end_idx, start_idx, dict(p)])
-        else:
-            nav_0_lanes.append([start_idx, end_idx, dict(p)])
+    # 3. Save Open-RMF Nav Graphs for all graph indices (nav_graphs/{g_idx}.yaml)
+    graph_indices = sorted(list(
+        {int(l.get("graph_idx", 0)) for l in req.lanes} |
+        {int(g.get("id", 0)) for g in graphs_list} |
+        {0}
+    ))
 
-    nav_0_vertices = [
+    nav_vertices = [
         [
             float(w.get("x", 0.0)),
             float(w.get("y", 0.0)),
@@ -498,19 +507,38 @@ async def save_map(req: MapSaveRequest):
         for idx, w in enumerate(wp_list)
     ]
 
-    nav_0_data = {
-        "building_name": req.name,
-        "levels": {
-            "L1": {
-                "lanes": nav_0_lanes,
-                "vertices": nav_0_vertices,
-            }
-        },
-        "doors": {},
-        "lifts": {},
-    }
-    with open(ACTIVE_NAV_0_FILE, "w", encoding="utf-8") as f:
-        yaml.dump(nav_0_data, f, allow_unicode=True, sort_keys=False)
+    saved_graph_files = []
+    for g_idx in graph_indices:
+        g_lanes = []
+        for l in req.lanes:
+            if int(l.get("graph_idx", 0)) != g_idx:
+                continue
+            start_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("start_id")), 0)
+            end_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("end_id")), 0)
+            speed_limit = float(l.get("speed_limit", 0.0))
+            is_bidi = bool(l.get("bidirectional", True))
+            p = {"speed_limit": speed_limit} if speed_limit > 0.0 else {}
+            if is_bidi:
+                g_lanes.append([start_idx, end_idx, dict(p)])
+                g_lanes.append([end_idx, start_idx, dict(p)])
+            else:
+                g_lanes.append([start_idx, end_idx, dict(p)])
+
+        g_data = {
+            "building_name": req.name,
+            "levels": {
+                "L1": {
+                    "lanes": g_lanes,
+                    "vertices": nav_vertices,
+                }
+            },
+            "doors": {},
+            "lifts": {},
+        }
+        g_file = os.path.join(NAV_GRAPHS_DIR, f"{g_idx}.yaml")
+        with open(g_file, "w", encoding="utf-8") as f:
+            yaml.dump(g_data, f, allow_unicode=True, sort_keys=False)
+        saved_graph_files.append(g_file)
 
     await broadcast({
         "type": "map_updated",
@@ -519,10 +547,10 @@ async def save_map(req: MapSaveRequest):
 
     return {
         "status": "success",
-        "message": f"路網已成功儲存 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線)",
+        "message": f"路網已成功儲存 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)",
         "file_json": ACTIVE_MAP_FILE,
         "file_building_yaml": ACTIVE_YAML_FILE,
-        "file_nav_0_yaml": ACTIVE_NAV_0_FILE,
+        "graph_indices": graph_indices,
     }
 
 @app.get("/api/map/download/yaml")
@@ -536,6 +564,13 @@ def download_nav_graph_0():
     if os.path.exists(ACTIVE_NAV_0_FILE):
         return FileResponse(ACTIVE_NAV_0_FILE, filename="0.yaml", media_type="application/x-yaml")
     return {"error": "尚未儲存路網，無法下載 0.yaml"}
+
+@app.get("/api/map/download/nav_graph/{graph_idx}")
+def download_nav_graph(graph_idx: int):
+    target_file = os.path.join(NAV_GRAPHS_DIR, f"{graph_idx}.yaml")
+    if os.path.exists(target_file):
+        return FileResponse(target_file, filename=f"{graph_idx}.yaml", media_type="application/x-yaml")
+    return {"error": f"尚未儲存路網，無法下載 {graph_idx}.yaml"}
 
 @app.post("/api/map/upload-slam")
 async def upload_slam_map(
