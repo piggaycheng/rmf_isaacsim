@@ -132,6 +132,7 @@ export interface PlantSite {
 
 export interface CameraInfo {
   name: string;
+  display_name?: string;
   rtsp_path: string;
   enable_topic: string;
   width: number;

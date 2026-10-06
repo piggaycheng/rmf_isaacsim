@@ -148,7 +148,7 @@ export function CameraStreamModal({
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h3 className="text-sm font-bold text-slate-100">{camera.name}</h3>
+                <h3 className="text-sm font-bold text-slate-100">{camera.display_name || camera.name}</h3>
                 <Badge
                   variant={isReady ? 'success' : 'outline'}
                   className={`text-[10px] px-2 flex items-center space-x-1 ${

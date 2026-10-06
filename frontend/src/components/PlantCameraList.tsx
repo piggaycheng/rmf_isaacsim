@@ -140,7 +140,7 @@ export function PlantCameraList({
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
               {cameras.map((cam) => {
-                const displayName = cam.name.split('/').pop() || cam.name;
+                const displayName = cam.display_name || cam.name;
                 return (
                   <div
                     key={cam.name}
