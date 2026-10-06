@@ -10,6 +10,7 @@ import { ImportMapModal } from '@/components/ImportMapModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
 import { PlantCameraList } from '@/components/PlantCameraList';
+import { FleetAdapterManager } from '@/components/FleetAdapterManager';
 import { loadPlantSites, savePlantSites } from '@/data/plantSites';
 import {
   MousePointer,
@@ -92,14 +93,14 @@ const INITIAL_ROBOTS: Robot[] = [
   },
 ];
 
-export type AppMode = 'world' | 'monitor' | 'edit';
+export type AppMode = 'world' | 'monitor' | 'edit' | 'adapters';
 
 export function App() {
   // 1. Mode state (Persisted in localStorage so F5 keeps current mode)
   const [mode, setMode] = useState<AppMode>(() => {
     try {
       const cached = localStorage.getItem('rmf_active_mode') as AppMode;
-      if (cached === 'world' || cached === 'monitor' || cached === 'edit') {
+      if (cached === 'world' || cached === 'monitor' || cached === 'edit' || cached === 'adapters') {
         return cached;
       }
     } catch (e) {}
@@ -737,6 +738,20 @@ export function App() {
             <GitCommit className="w-3.5 h-3.5" />
             <span>✏️ 編輯路網 (Edit Mode)</span>
           </button>
+
+          {/* 4. Fleet Adapter Management Tab */}
+          <button
+            onClick={() => handleSetMode('adapters')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              mode === 'adapters'
+                ? 'bg-primary text-primary-foreground shadow'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+            title="管理與設定 Open-RMF 車隊適配器 (Fleet Adapters)"
+          >
+            <Cpu className="w-3.5 h-3.5" />
+            <span>🤖 車隊適配器 (Adapters)</span>
+          </button>
         </div>
 
         {/* Right Info & Actions */}
@@ -854,6 +869,17 @@ export function App() {
             setPlantSites(updated);
             savePlantSites(updated);
             setSelectedPlant(newPlant);
+          }}
+        />
+      ) : mode === 'adapters' ? (
+        <FleetAdapterManager
+          graphs={graphs}
+          robots={robots}
+          onOpenIsaacSim={() => {
+            if (selectedPlant) {
+              setIsIsaacModalPlant(selectedPlant);
+              setIsIsaacModalOpen(true);
+            }
           }}
         />
       ) : (

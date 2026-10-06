@@ -66,6 +66,30 @@ export interface Robot {
   path?: { x: number; y: number }[];
 }
 
+export type FleetAdapterType = 'easy_full_control' | 'read_and_request';
+export type FleetAdapterStatus = 'online' | 'standby' | 'warning' | 'offline';
+
+export interface FleetAdapter {
+  id: string;
+  name: string;
+  fleet_name: string;
+  adapter_type: FleetAdapterType;
+  status: FleetAdapterStatus;
+  graph_idx: number;
+  ros2_domain_id: number;
+  linear_velocity: number; // m/s
+  angular_velocity: number; // rad/s
+  robot_radius: number; // meters
+  recharge_threshold: number; // %
+  recharge_target: number; // %
+  default_charger?: string;
+  default_parking?: string;
+  robots: string[]; // robot IDs
+  latency_ms?: number;
+  updated_at?: string;
+  logs?: string[];
+}
+
 export interface Task {
   id: string;
   type: 'patrol' | 'delivery' | 'goto';

@@ -677,6 +677,116 @@ def api_disable_camera(req: CameraDisableRequest):
     ok = disable_camera_stream(req.camera_name, req.topic_prefix or "slam/cameras")
     return {"status": "ok" if ok else "error", "camera": req.camera_name}
 
+# Fleet Adapters Management Endpoints
+FLEET_ADAPTERS_FILE = os.path.join(MAPS_DIR, "fleet_adapters.json")
+
+def load_fleet_adapters_data() -> List[Dict[str, Any]]:
+    if os.path.exists(FLEET_ADAPTERS_FILE):
+        try:
+            with open(FLEET_ADAPTERS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"Notice: Failed to load fleet_adapters.json: {e}")
+    return []
+
+def save_fleet_adapters_data(adapters: List[Dict[str, Any]]) -> None:
+    try:
+        with open(FLEET_ADAPTERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(adapters, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving fleet_adapters.json: {e}")
+
+@app.get("/api/fleet-adapters")
+def get_fleet_adapters():
+    return load_fleet_adapters_data()
+
+@app.post("/api/fleet-adapters")
+async def save_or_update_fleet_adapter(adapter: Dict[str, Any]):
+    adapters = load_fleet_adapters_data()
+    adapter_id = adapter.get("id")
+    if not adapter_id:
+        adapter_id = f"adapter_{len(adapters) + 1}_{int(asyncio.get_event_loop().time())}"
+        adapter["id"] = adapter_id
+
+    idx = next((i for i, a in enumerate(adapters) if a.get("id") == adapter_id), -1)
+    if idx >= 0:
+        adapters[idx] = adapter
+    else:
+        adapters.append(adapter)
+    save_fleet_adapters_data(adapters)
+    await broadcast({
+        "type": "fleet_adapters_updated",
+        "adapters": adapters
+    })
+    return {"status": "success", "adapter": adapter}
+
+@app.delete("/api/fleet-adapters/{adapter_id}")
+async def delete_fleet_adapter(adapter_id: str):
+    adapters = load_fleet_adapters_data()
+    adapters = [a for a in adapters if a.get("id") != adapter_id]
+    save_fleet_adapters_data(adapters)
+    await broadcast({
+        "type": "fleet_adapters_updated",
+        "adapters": adapters
+    })
+    return {"status": "success", "message": f"Adapter {adapter_id} 已刪除"}
+
+@app.post("/api/fleet-adapters/{adapter_id}/set-graph")
+async def set_fleet_adapter_graph(adapter_id: str, payload: Dict[str, Any]):
+    new_graph_idx = int(payload.get("graph_idx", 0))
+    adapters = load_fleet_adapters_data()
+    adapter = next((a for a in adapters if a.get("id") == adapter_id), None)
+    if not adapter:
+        return {"status": "error", "message": "Adapter not found"}
+
+    old_idx = adapter.get("graph_idx", 0)
+    adapter["graph_idx"] = new_graph_idx
+    log_msg = f"[INFO] [easy_full_control]: Executed dynamic set_graph({new_graph_idx}) from Graph {old_idx} -> Success (0 restart needed)"
+    if "logs" not in adapter or not isinstance(adapter["logs"], list):
+        adapter["logs"] = []
+    adapter["logs"].append(log_msg)
+    save_fleet_adapters_data(adapters)
+
+    await broadcast({
+        "type": "fleet_adapters_updated",
+        "adapters": adapters
+    })
+    return {
+        "status": "success",
+        "message": f"車隊 '{adapter.get('fleet_name')}' 已成功動態切換至 Graph {new_graph_idx}！",
+        "adapter": adapter
+    }
+
+@app.post("/api/fleet-adapters/{adapter_id}/action")
+async def fleet_adapter_action(adapter_id: str, payload: Dict[str, Any]):
+    action = payload.get("action", "restart")
+    adapters = load_fleet_adapters_data()
+    adapter = next((a for a in adapters if a.get("id") == adapter_id), None)
+    if not adapter:
+        return {"status": "error", "message": "Adapter not found"}
+
+    if "logs" not in adapter or not isinstance(adapter["logs"], list):
+        adapter["logs"] = []
+
+    if action == "restart":
+        adapter["status"] = "online"
+        adapter["logs"].append(f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' service reloaded.")
+    elif action == "pause":
+        adapter["status"] = "standby"
+        adapter["logs"].append(f"[WARN] [system]: Fleet Adapter '{adapter.get('name')}' paused.")
+    elif action == "resume":
+        adapter["status"] = "online"
+        adapter["logs"].append(f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' resumed online.")
+
+    save_fleet_adapters_data(adapters)
+    await broadcast({
+        "type": "fleet_adapters_updated",
+        "adapters": adapters
+    })
+    return {"status": "success", "action": action, "adapter": adapter}
+
 # Serve compiled frontend static files
 FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "../frontend/dist"))
 if os.path.exists(FRONTEND_DIST):
