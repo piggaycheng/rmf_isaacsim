@@ -875,6 +875,8 @@ export function App() {
         <FleetAdapterManager
           graphs={graphs}
           robots={robots}
+          waypoints={waypoints}
+          lanes={lanes}
           onOpenIsaacSim={() => {
             if (selectedPlant) {
               setIsIsaacModalPlant(selectedPlant);

@@ -12,6 +12,9 @@ export interface Waypoint {
 
 export function getWaypointGraphIndices(wp: Waypoint, lanes: Lane[]): number[] {
   const connectedGraphs = new Set<number>();
+  if (wp.graph_idx !== undefined) {
+    connectedGraphs.add(wp.graph_idx);
+  }
   for (const l of lanes) {
     if (l.start_id === wp.id || l.end_id === wp.id) {
       connectedGraphs.add(l.graph_idx ?? 0);
@@ -20,7 +23,7 @@ export function getWaypointGraphIndices(wp: Waypoint, lanes: Lane[]): number[] {
   if (connectedGraphs.size > 0) {
     return Array.from(connectedGraphs);
   }
-  return [wp.graph_idx ?? 0];
+  return [0];
 }
 
 export function isWaypointInGraph(wp: Waypoint, graphIdx: number, lanes: Lane[]): boolean {
@@ -69,6 +72,31 @@ export interface Robot {
 export type FleetAdapterType = 'easy_full_control' | 'read_and_request';
 export type FleetAdapterStatus = 'online' | 'standby' | 'warning' | 'offline';
 
+export interface AdapterRobotConfig {
+  name: string;
+  charger_waypoint?: string;
+  parking_waypoint?: string;
+}
+
+export function normalizeRobotConfig(
+  r: string | AdapterRobotConfig,
+  defaultParking = 'parking_1',
+  defaultCharger = 'charger_1'
+): AdapterRobotConfig {
+  if (typeof r === 'string') {
+    return {
+      name: r,
+      parking_waypoint: defaultParking,
+      charger_waypoint: defaultCharger,
+    };
+  }
+  return {
+    name: r.name || '',
+    parking_waypoint: r.parking_waypoint || defaultParking,
+    charger_waypoint: r.charger_waypoint || defaultCharger,
+  };
+}
+
 export interface FleetAdapter {
   id: string;
   name: string;
@@ -84,7 +112,7 @@ export interface FleetAdapter {
   recharge_target: number; // %
   default_charger?: string;
   default_parking?: string;
-  robots: string[]; // robot IDs
+  robots: (string | AdapterRobotConfig)[]; // robot IDs or dedicated configs
   latency_ms?: number;
   updated_at?: string;
   logs?: string[];

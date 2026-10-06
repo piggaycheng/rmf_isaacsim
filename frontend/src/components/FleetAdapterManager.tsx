@@ -1,5 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { FleetAdapter, NavGraph, Robot, GRAPH_PALETTE } from '@/types/rmf';
+import {
+  FleetAdapter,
+  NavGraph,
+  Robot,
+  Waypoint,
+  Lane,
+  AdapterRobotConfig,
+  normalizeRobotConfig,
+  isWaypointInGraph,
+  getWaypointGraphIndices,
+  GRAPH_PALETTE,
+} from '@/types/rmf';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Input } from './ui/input';
@@ -28,17 +39,23 @@ import {
   Layers,
   BatteryCharging,
   Info,
+  Bot,
+  MapPin,
 } from 'lucide-react';
 
 interface FleetAdapterManagerProps {
   graphs: NavGraph[];
   robots: Robot[];
+  waypoints?: Waypoint[];
+  lanes?: Lane[];
   onOpenIsaacSim?: () => void;
 }
 
 export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
   graphs,
   robots,
+  waypoints = [],
+  lanes = [],
 }) => {
   const [adapters, setAdapters] = useState<FleetAdapter[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -72,9 +89,34 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
     robot_radius: 0.35,
     recharge_threshold: 20,
     recharge_target: 90,
+    default_charger: 'charger_1',
+    default_parking: 'parking_1',
     robots: [],
   });
-  const [robotsInputStr, setRobotsInputStr] = useState<string>('');
+
+  // Dedicated Per-Robot configuration state
+  const [robotConfigs, setRobotConfigs] = useState<AdapterRobotConfig[]>([]);
+
+  // Selected Nav Graph in the Create/Edit Modal
+  const currentModalGraphIdx = formData.graph_idx ?? 0;
+
+  // Waypoints belonging to the selected Nav Graph in the modal
+  const activeGraphWaypoints = waypoints.filter((w) =>
+    isWaypointInGraph(w, currentModalGraphIdx, lanes)
+  );
+  const activeParkingWaypoints = activeGraphWaypoints.filter((w) => w.type === 'parking');
+  const activeChargerWaypoints = activeGraphWaypoints.filter((w) => w.type === 'charger');
+  const activeOtherWaypoints = activeGraphWaypoints.filter(
+    (w) => w.type !== 'parking' && w.type !== 'charger'
+  );
+
+  // Cross-graph waypoints (belonging to OTHER graphs, for reference)
+  const crossGraphParkingWaypoints = waypoints.filter(
+    (w) => w.type === 'parking' && !isWaypointInGraph(w, currentModalGraphIdx, lanes)
+  );
+  const crossGraphChargerWaypoints = waypoints.filter(
+    (w) => w.type === 'charger' && !isWaypointInGraph(w, currentModalGraphIdx, lanes)
+  );
 
   // Fetch adapters from server
   const fetchAdapters = async () => {
@@ -104,7 +146,16 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
   const handleOpenEdit = (adapter: FleetAdapter) => {
     setEditingAdapter(adapter);
     setFormData({ ...adapter });
-    setRobotsInputStr(adapter.robots.join(', '));
+    const gIdx = adapter.graph_idx ?? 0;
+    const gWps = waypoints.filter((w) => isWaypointInGraph(w, gIdx, lanes));
+    const gParks = gWps.filter((w) => w.type === 'parking');
+    const gCharges = gWps.filter((w) => w.type === 'charger');
+    const defPark = adapter.default_parking || gParks[0]?.name || 'parking_1';
+    const defCharge = adapter.default_charger || gCharges[0]?.name || 'charger_1';
+    const initialConfigs = (adapter.robots || []).map((r) =>
+      normalizeRobotConfig(r, defPark, defCharge)
+    );
+    setRobotConfigs(initialConfigs);
     setCreateEditModalOpen(true);
   };
 
@@ -112,19 +163,27 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
   const handleOpenCreate = () => {
     setEditingAdapter(null);
     const nextId = `adapter_${Date.now()}`;
+    const initialGraphIdx = 0;
+    const gWps = waypoints.filter((w) => isWaypointInGraph(w, initialGraphIdx, lanes));
+    const gParks = gWps.filter((w) => w.type === 'parking');
+    const gCharges = gWps.filter((w) => w.type === 'charger');
+    const defPark = gParks[0]?.name || 'parking_1';
+    const defCharge = gCharges[0]?.name || 'charger_1';
     setFormData({
       id: nextId,
       name: `FleetAdapter_${adapters.length + 1}`,
       fleet_name: `fleet_${adapters.length + 1}`,
       adapter_type: 'easy_full_control',
       status: 'online',
-      graph_idx: 0,
+      graph_idx: initialGraphIdx,
       ros2_domain_id: 0,
       linear_velocity: 1.2,
       angular_velocity: 1.0,
       robot_radius: 0.4,
       recharge_threshold: 20,
       recharge_target: 90,
+      default_charger: defCharge,
+      default_parking: defPark,
       robots: [],
       latency_ms: 15,
       updated_at: '即時連線中',
@@ -133,17 +192,73 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
         `[INFO] [easy_full_control]: Ready to connect to Open-RMF Core`,
       ],
     });
-    setRobotsInputStr('');
+    setRobotConfigs([]);
     setCreateEditModalOpen(true);
+  };
+
+  // Robot configuration handlers
+  const handleAddRobot = () => {
+    const nextIdx = robotConfigs.length + 1;
+    const defPark = formData.default_parking || activeParkingWaypoints[0]?.name || 'parking_1';
+    const defCharge = formData.default_charger || activeChargerWaypoints[0]?.name || 'charger_1';
+    const suggestedPark = activeParkingWaypoints[nextIdx - 1]?.name || defPark;
+    const suggestedCharge = activeChargerWaypoints[nextIdx - 1]?.name || defCharge;
+    setRobotConfigs([
+      ...robotConfigs,
+      {
+        name: `${formData.fleet_name || 'robot'}_${nextIdx}`,
+        parking_waypoint: suggestedPark,
+        charger_waypoint: suggestedCharge,
+      },
+    ]);
+  };
+
+  const handleRemoveRobot = (index: number) => {
+    setRobotConfigs(robotConfigs.filter((_, i) => i !== index));
+  };
+
+  const handleUpdateRobot = (index: number, field: keyof AdapterRobotConfig, val: string) => {
+    setRobotConfigs(
+      robotConfigs.map((cfg, i) => (i === index ? { ...cfg, [field]: val } : cfg))
+    );
+  };
+
+  // Quick import from detected live robots
+  const handleImportLiveRobots = () => {
+    const fleetName = formData.fleet_name || '';
+    const matching = robots.filter(
+      (r) =>
+        (!fleetName || r.fleet === fleetName || r.fleet.toLowerCase().includes(fleetName.toLowerCase())) &&
+        !robotConfigs.some((c) => c.name === r.id)
+    );
+    if (matching.length === 0) return;
+
+    const defPark = formData.default_parking || activeParkingWaypoints[0]?.name || 'parking_1';
+    const defCharge = formData.default_charger || activeChargerWaypoints[0]?.name || 'charger_1';
+
+    const newConfigs: AdapterRobotConfig[] = matching.map((r, i) => {
+      const idx = robotConfigs.length + i;
+      return {
+        name: r.id,
+        parking_waypoint: activeParkingWaypoints[idx]?.name || defPark,
+        charger_waypoint: activeChargerWaypoints[idx]?.name || defCharge,
+      };
+    });
+
+    setRobotConfigs([...robotConfigs, ...newConfigs]);
   };
 
   // Submit Create or Edit
   const handleSaveAdapter = async (e: React.FormEvent) => {
     e.preventDefault();
-    const parsedRobots = robotsInputStr
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+
+    const cleanConfigs = robotConfigs
+      .map((c) => ({
+        name: c.name.trim(),
+        parking_waypoint: c.parking_waypoint || formData.default_parking || 'parking_1',
+        charger_waypoint: c.charger_waypoint || formData.default_charger || 'charger_1',
+      }))
+      .filter((c) => c.name.length > 0);
 
     const adapterToSave: FleetAdapter = {
       id: editingAdapter ? editingAdapter.id : (formData.id || `adapter_${Date.now()}`),
@@ -160,7 +275,7 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
       recharge_target: Number(formData.recharge_target) || 90,
       default_charger: formData.default_charger || 'charger_1',
       default_parking: formData.default_parking || 'parking_1',
-      robots: parsedRobots,
+      robots: cleanConfigs,
       latency_ms: formData.latency_ms ?? 14,
       updated_at: '已儲存',
       logs: editingAdapter?.logs || [
@@ -292,9 +407,21 @@ rmf_fleet:
     default_charger_waypoint: "${a.default_charger || 'charger_1'}"
     default_parking_waypoint: "${a.default_parking || 'parking_1'}"
 
-  # Managed Robot Fleet
+  # Managed Robot Fleet (Per-Robot Dedicated Waypoints)
   robots:
-${a.robots.map((r) => `    - name: "${r}"\n      model: "amr_standard"`).join('\n')}
+${
+  a.robots.length === 0
+    ? '    []'
+    : a.robots
+        .map((r) => {
+          const cfg = normalizeRobotConfig(r, a.default_parking, a.default_charger);
+          return `    - name: "${cfg.name}"
+      model: "amr_standard"
+      parking_waypoint: "${cfg.parking_waypoint}"
+      charger_waypoint: "${cfg.charger_waypoint}"`;
+        })
+        .join('\n')
+}
 `;
   };
 
@@ -303,7 +430,10 @@ ${a.robots.map((r) => `    - name: "${r}"\n      model: "amr_standard"`).join('\
     const matchesSearch =
       a.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       a.fleet_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      a.robots.some((r) => r.toLowerCase().includes(searchQuery.toLowerCase()));
+      a.robots.some((r) => {
+        const rName = typeof r === 'string' ? r : r.name;
+        return rName.toLowerCase().includes(searchQuery.toLowerCase());
+      });
     const matchesGraph =
       selectedGraphFilter === 'all' || a.graph_idx === parseInt(selectedGraphFilter, 10);
     return matchesSearch && matchesGraph;
@@ -600,40 +730,61 @@ ${a.robots.map((r) => `    - name: "${r}"\n      model: "amr_standard"`).join('\
 
                 {/* Section: Managed Robots List */}
                 <div className="space-y-1.5">
-                  <span className="text-[11px] font-medium text-slate-400 flex items-center justify-between">
-                    <span>納管車輛 ({adapter.robots.length} 台)</span>
-                    <span className="text-[10px] text-slate-500">
-                      預設充電樁: {adapter.default_charger || 'charger_1'}
+                  <div className="flex items-center justify-between text-[11px] font-medium text-slate-400">
+                    <span className="flex items-center gap-1.5">
+                      <Bot className="w-3.5 h-3.5 text-cyan-400" />
+                      納管車輛 ({adapter.robots.length} 台)
                     </span>
-                  </span>
+                    <span className="text-[10px] text-slate-500">
+                      預設待機: <span className="text-purple-300 font-mono">{adapter.default_parking || 'parking_1'}</span> | 預設充電: <span className="text-amber-300 font-mono">{adapter.default_charger || 'charger_1'}</span>
+                    </span>
+                  </div>
 
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                     {adapter.robots.length === 0 ? (
-                      <span className="text-[11px] text-slate-500 italic">尚無納管車輛</span>
+                      <span className="text-[11px] text-slate-500 italic col-span-full">尚無納管車輛</span>
                     ) : (
-                      adapter.robots.map((robotId) => {
-                        const liveRobot = robots.find((r) => r.id === robotId);
+                      adapter.robots.map((robotItem) => {
+                        const cfg = normalizeRobotConfig(robotItem, adapter.default_parking, adapter.default_charger);
+                        const liveRobot = robots.find((r) => r.id === cfg.name);
                         return (
                           <div
-                            key={robotId}
-                            className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 text-xs"
+                            key={cfg.name}
+                            className="p-2 rounded-lg bg-slate-950/70 border border-slate-800/80 flex flex-col justify-between space-y-1.5 hover:border-slate-750 transition-colors"
                           >
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full ${
-                                liveRobot?.status === 'moving'
-                                  ? 'bg-cyan-400 animate-pulse'
-                                  : liveRobot?.status === 'charging'
-                                  ? 'bg-amber-400'
-                                  : 'bg-emerald-400'
-                              }`}
-                            />
-                            <span className="font-semibold text-slate-200">{robotId}</span>
-                            {liveRobot && (
-                              <span className="text-[10px] text-slate-400 flex items-center ml-1">
-                                <BatteryCharging className="w-2.5 h-2.5 mr-0.5 text-emerald-400" />
-                                {Math.round(liveRobot.battery)}%
-                              </span>
-                            )}
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-1.5 truncate">
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    liveRobot?.status === 'moving'
+                                      ? 'bg-cyan-400 animate-pulse'
+                                      : liveRobot?.status === 'charging'
+                                      ? 'bg-amber-400 animate-pulse'
+                                      : 'bg-emerald-400'
+                                  }`}
+                                />
+                                <span className="font-semibold text-slate-200 text-xs truncate" title={cfg.name}>
+                                  {cfg.name}
+                                </span>
+                              </div>
+                              {liveRobot && (
+                                <span className="text-[10px] text-slate-400 flex items-center font-mono shrink-0 ml-1">
+                                  <BatteryCharging className="w-2.5 h-2.5 mr-0.5 text-emerald-400" />
+                                  {Math.round(liveRobot.battery)}%
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center justify-between text-[10px] pt-1 border-t border-slate-900 font-mono">
+                              <div className="flex items-center text-purple-300" title={`專屬停車位: ${cfg.parking_waypoint}`}>
+                                <span className="text-purple-400 mr-1">🅿️</span>
+                                <span className="truncate max-w-[85px]">{cfg.parking_waypoint}</span>
+                              </div>
+                              <div className="flex items-center text-amber-300" title={`專屬充電樁: ${cfg.charger_waypoint}`}>
+                                <span className="text-amber-400 mr-1">⚡</span>
+                                <span className="truncate max-w-[85px]">{cfg.charger_waypoint}</span>
+                              </div>
+                            </div>
                           </div>
                         );
                       })
@@ -725,18 +876,22 @@ ${a.robots.map((r) => `    - name: "${r}"\n      model: "amr_standard"`).join('\
       )}
 
       {/* 1. Modal: Create / Edit Adapter */}
-      <Dialog open={createEditModalOpen} onOpenChange={setCreateEditModalOpen}>
+      <Dialog
+        open={createEditModalOpen}
+        onOpenChange={setCreateEditModalOpen}
+        className="max-w-2xl max-h-[90vh] flex flex-col"
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center space-x-2 text-base font-bold">
             <Cpu className="w-4 h-4 text-primary" />
             <span>{editingAdapter ? `編輯 Fleet Adapter (${editingAdapter.name})` : '新增 Fleet Adapter'}</span>
           </DialogTitle>
           <DialogDescription className="text-xs text-slate-400">
-            設定車隊名稱、所屬導航路網、適配器類型與運動學參數。
+            設定車隊名稱、所屬導航路網、運動學參數，並為旗下每台機器人指派專屬停車待機位與充電樁。
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSaveAdapter} className="space-y-4 py-2">
+        <form onSubmit={handleSaveAdapter} className="flex-1 overflow-y-auto space-y-4 pr-1 py-1">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-[11px] text-slate-400 block mb-1">適配器名稱 (Display Name)</label>
@@ -774,7 +929,35 @@ ${a.robots.map((r) => `    - name: "${r}"\n      model: "amr_standard"`).join('\
               <label className="text-[11px] text-slate-400 block mb-1">指派導航路網 (Nav Graph)</label>
               <select
                 value={formData.graph_idx}
-                onChange={(e) => setFormData({ ...formData, graph_idx: parseInt(e.target.value, 10) })}
+                onChange={(e) => {
+                  const newGraphIdx = parseInt(e.target.value, 10);
+                  const newGraphWps = waypoints.filter((w) => isWaypointInGraph(w, newGraphIdx, lanes));
+                  const newGraphParks = newGraphWps.filter((w) => w.type === 'parking');
+                  const newGraphChargers = newGraphWps.filter((w) => w.type === 'charger');
+
+                  const newDefPark = newGraphParks[0]?.name || (newGraphWps[0]?.name || 'parking_1');
+                  const newDefCharge = newGraphChargers[0]?.name || (newGraphWps[0]?.name || 'charger_1');
+
+                  setFormData((prev) => ({
+                    ...prev,
+                    graph_idx: newGraphIdx,
+                    default_parking: newDefPark,
+                    default_charger: newDefCharge,
+                  }));
+
+                  // Update per-robot parking/charger to match the newly selected graph
+                  setRobotConfigs((prevConfigs) =>
+                    prevConfigs.map((cfg, idx) => {
+                      const parkOnGraph = newGraphWps.some((w) => w.name === cfg.parking_waypoint);
+                      const chargeOnGraph = newGraphWps.some((w) => w.name === cfg.charger_waypoint);
+                      return {
+                        ...cfg,
+                        parking_waypoint: parkOnGraph ? cfg.parking_waypoint : (newGraphParks[idx]?.name || newDefPark),
+                        charger_waypoint: chargeOnGraph ? cfg.charger_waypoint : (newGraphChargers[idx]?.name || newDefCharge),
+                      };
+                    })
+                  );
+                }}
                 className="w-full bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200"
               >
                 {graphs.map((g) => (
@@ -840,19 +1023,336 @@ ${a.robots.map((r) => `    - name: "${r}"\n      model: "amr_standard"`).join('\
             </div>
           </div>
 
-          <div>
-            <label className="text-[11px] text-slate-400 block mb-1">
-              納管車輛名單 (以逗號分隔機器人 ID)
-            </label>
-            <Input
-              value={robotsInputStr}
-              onChange={(e) => setRobotsInputStr(e.target.value)}
-              placeholder="例如：tinyRobot1, tinyRobot2, tinyRobot3"
-              className="h-8 text-xs bg-slate-950 border-slate-800"
-            />
+          {/* Section: Fleet Default Waypoints (Filtered by selected Nav Graph) */}
+          <div className="p-3 rounded-lg bg-slate-950/60 border border-slate-800 space-y-2">
+            <div className="flex items-center justify-between text-xs font-semibold text-slate-300">
+              <div className="flex items-center space-x-1.5">
+                <MapPin className="w-3.5 h-3.5 text-purple-400" />
+                <span>車隊預設回充與待機站點 (Fallback Defaults)</span>
+              </div>
+              <Badge className="bg-cyan-950/80 text-cyan-300 border-cyan-800/80 text-[10px] font-mono">
+                依循 Graph {currentModalGraphIdx}
+              </Badge>
+            </div>
+            <p className="text-[10px] text-slate-400 leading-tight">
+              當個別車輛未指定專屬點位時，系統將預設使用此處的站點進行待命或回充。
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div>
+                <label className="text-[10px] text-slate-400 block mb-1">
+                  🅿️ 車隊預設停車待命點 (Default Parking)
+                </label>
+                <select
+                  value={formData.default_parking || 'parking_1'}
+                  onChange={(e) => setFormData({ ...formData, default_parking: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-purple-300 font-mono"
+                >
+                  {activeParkingWaypoints.length > 0 ? (
+                    <optgroup label={`🎯 Graph ${currentModalGraphIdx} 專屬停車位 (${activeParkingWaypoints.length})`}>
+                      {activeParkingWaypoints.map((w) => (
+                        <option key={w.id} value={w.name}>
+                          🅿️ {w.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : (
+                    <option disabled value="">
+                      ⚠️ Graph {currentModalGraphIdx} 尚無標記為 Parking 的點位
+                    </option>
+                  )}
+
+                  {activeOtherWaypoints.length > 0 && (
+                    <optgroup label={`Graph ${currentModalGraphIdx} 其他點位 (${activeOtherWaypoints.length})`}>
+                      {activeOtherWaypoints.map((w) => (
+                        <option key={w.id} value={w.name}>
+                          📍 {w.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+
+                  {crossGraphParkingWaypoints.length > 0 && (
+                    <optgroup label="🌐 其他 Graph 停車位 (跨路網)">
+                      {crossGraphParkingWaypoints.map((w) => {
+                        const gIndices = getWaypointGraphIndices(w, lanes);
+                        return (
+                          <option key={w.id} value={w.name}>
+                            🅿️ {w.name} (Graph {gIndices.join(',')})
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                  )}
+
+                  {formData.default_parking &&
+                    !waypoints.some((w) => w.name === formData.default_parking) && (
+                      <option value={formData.default_parking}>
+                        🅿️ {formData.default_parking} (自訂)
+                      </option>
+                    )}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] text-slate-400 block mb-1">
+                  ⚡ 車隊預設充電樁 (Default Charger)
+                </label>
+                <select
+                  value={formData.default_charger || 'charger_1'}
+                  onChange={(e) => setFormData({ ...formData, default_charger: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-amber-300 font-mono"
+                >
+                  {activeChargerWaypoints.length > 0 ? (
+                    <optgroup label={`🎯 Graph ${currentModalGraphIdx} 專屬充電樁 (${activeChargerWaypoints.length})`}>
+                      {activeChargerWaypoints.map((w) => (
+                        <option key={w.id} value={w.name}>
+                          ⚡ {w.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ) : (
+                    <option disabled value="">
+                      ⚠️ Graph {currentModalGraphIdx} 尚無標記為 Charger 的點位
+                    </option>
+                  )}
+
+                  {activeOtherWaypoints.length > 0 && (
+                    <optgroup label={`Graph ${currentModalGraphIdx} 其他點位 (${activeOtherWaypoints.length})`}>
+                      {activeOtherWaypoints.map((w) => (
+                        <option key={w.id} value={w.name}>
+                          📍 {w.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+
+                  {crossGraphChargerWaypoints.length > 0 && (
+                    <optgroup label="🌐 其他 Graph 充電樁 (跨路網)">
+                      {crossGraphChargerWaypoints.map((w) => {
+                        const gIndices = getWaypointGraphIndices(w, lanes);
+                        return (
+                          <option key={w.id} value={w.name}>
+                            ⚡ {w.name} (Graph {gIndices.join(',')})
+                          </option>
+                        );
+                      })}
+                    </optgroup>
+                  )}
+
+                  {formData.default_charger &&
+                    !waypoints.some((w) => w.name === formData.default_charger) && (
+                      <option value={formData.default_charger}>
+                        ⚡ {formData.default_charger} (自訂)
+                      </option>
+                    )}
+                </select>
+              </div>
+            </div>
           </div>
 
-          <DialogFooter className="pt-2">
+          {/* Section: Per-Robot Dedicated Waypoint Configuration */}
+          <div className="space-y-2 border-t border-slate-800 pt-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                  <Bot className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>納管車輛與個別專屬點位 ({robotConfigs.length} 台)</span>
+                  <Badge className="bg-cyan-950/80 text-cyan-300 border-cyan-800/80 text-[10px] font-mono">
+                    路網: Graph {currentModalGraphIdx}
+                  </Badge>
+                </h4>
+                <p className="text-[10px] text-slate-400">
+                  為各車分別指定獨立的 Park 與 Charger 點位，避免同車隊待命或充電時造成交通死鎖。
+                </p>
+              </div>
+
+              <div className="flex items-center space-x-1.5">
+                {(() => {
+                  const fleetName = formData.fleet_name || '';
+                  const matching = robots.filter(
+                    (r) =>
+                      (!fleetName || r.fleet === fleetName || r.fleet.toLowerCase().includes(fleetName.toLowerCase())) &&
+                      !robotConfigs.some((c) => c.name === r.id)
+                  );
+                  if (matching.length === 0) return null;
+                  return (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleImportLiveRobots}
+                      className="h-7 text-xs bg-slate-900 border-slate-700 text-slate-300 hover:text-white"
+                      title="快速帶入目前連線中的車輛 ID"
+                    >
+                      匯入在線車輛 ({matching.length})
+                    </Button>
+                  );
+                })()}
+
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={handleAddRobot}
+                  className="h-7 text-xs bg-cyan-950/70 hover:bg-cyan-900 border border-cyan-700 text-cyan-300"
+                >
+                  <Plus className="w-3 h-3 mr-1" />
+                  新增車輛
+                </Button>
+              </div>
+            </div>
+
+            {robotConfigs.length === 0 ? (
+              <div className="p-4 rounded-lg border border-dashed border-slate-800 text-center bg-slate-950/30">
+                <p className="text-xs text-slate-400 mb-1">尚未建立個別納管車輛</p>
+                <p className="text-[10px] text-slate-500">
+                  點擊「新增車輛」即可為特定車輛指定專屬的停車位與充電樁。
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-1.5 max-h-[220px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-12 gap-2 px-2 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                  <div className="col-span-4">機器人 ID / 名稱</div>
+                  <div className="col-span-4">🅿️ 專屬待命停車點</div>
+                  <div className="col-span-3">⚡ 專屬充電樁</div>
+                  <div className="col-span-1 text-center">操作</div>
+                </div>
+
+                {robotConfigs.map((cfg, index) => (
+                  <div
+                    key={index}
+                    className="grid grid-cols-12 gap-2 items-center p-2 rounded-lg bg-slate-950/80 border border-slate-800/80 text-xs"
+                  >
+                    <div className="col-span-4">
+                      <Input
+                        required
+                        value={cfg.name}
+                        onChange={(e) => handleUpdateRobot(index, 'name', e.target.value)}
+                        placeholder="例如：tinyRobot1"
+                        className="h-7 text-xs bg-slate-900 border-slate-800 font-semibold"
+                      />
+                    </div>
+
+                    <div className="col-span-4">
+                      <select
+                        value={cfg.parking_waypoint || formData.default_parking || 'parking_1'}
+                        onChange={(e) => handleUpdateRobot(index, 'parking_waypoint', e.target.value)}
+                        className="w-full h-7 bg-slate-900 border border-slate-800 rounded px-2 text-xs text-purple-300 font-mono"
+                      >
+                        {formData.default_parking && (
+                          <option value={formData.default_parking}>
+                            (跟隨車隊預設) {formData.default_parking}
+                          </option>
+                        )}
+                        {activeParkingWaypoints.length > 0 && (
+                          <optgroup label={`🎯 Graph ${currentModalGraphIdx} 停車位`}>
+                            {activeParkingWaypoints.map((w) => (
+                              <option key={w.id} value={w.name}>
+                                🅿️ {w.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {activeOtherWaypoints.length > 0 && (
+                          <optgroup label={`Graph ${currentModalGraphIdx} 其他點位`}>
+                            {activeOtherWaypoints.map((w) => (
+                              <option key={w.id} value={w.name}>
+                                📍 {w.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {crossGraphParkingWaypoints.length > 0 && (
+                          <optgroup label="🌐 跨路網停車位">
+                            {crossGraphParkingWaypoints.map((w) => {
+                              const gIndices = getWaypointGraphIndices(w, lanes);
+                              return (
+                                <option key={w.id} value={w.name}>
+                                  🅿️ {w.name} (Graph {gIndices.join(',')})
+                                </option>
+                              );
+                            })}
+                          </optgroup>
+                        )}
+                        {cfg.parking_waypoint &&
+                          !waypoints.some((w) => w.name === cfg.parking_waypoint) &&
+                          cfg.parking_waypoint !== formData.default_parking && (
+                            <option value={cfg.parking_waypoint}>
+                              🅿️ {cfg.parking_waypoint} (自訂)
+                            </option>
+                          )}
+                      </select>
+                    </div>
+
+                    <div className="col-span-3">
+                      <select
+                        value={cfg.charger_waypoint || formData.default_charger || 'charger_1'}
+                        onChange={(e) => handleUpdateRobot(index, 'charger_waypoint', e.target.value)}
+                        className="w-full h-7 bg-slate-900 border border-slate-800 rounded px-2 text-xs text-amber-300 font-mono"
+                      >
+                        {formData.default_charger && (
+                          <option value={formData.default_charger}>
+                            (跟隨車隊預設) {formData.default_charger}
+                          </option>
+                        )}
+                        {activeChargerWaypoints.length > 0 && (
+                          <optgroup label={`🎯 Graph ${currentModalGraphIdx} 充電樁`}>
+                            {activeChargerWaypoints.map((w) => (
+                              <option key={w.id} value={w.name}>
+                                ⚡ {w.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {activeOtherWaypoints.length > 0 && (
+                          <optgroup label={`Graph ${currentModalGraphIdx} 其他點位`}>
+                            {activeOtherWaypoints.map((w) => (
+                              <option key={w.id} value={w.name}>
+                                📍 {w.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                        {crossGraphChargerWaypoints.length > 0 && (
+                          <optgroup label="🌐 跨路網充電樁">
+                            {crossGraphChargerWaypoints.map((w) => {
+                              const gIndices = getWaypointGraphIndices(w, lanes);
+                              return (
+                                <option key={w.id} value={w.name}>
+                                  ⚡ {w.name} (Graph {gIndices.join(',')})
+                                </option>
+                              );
+                            })}
+                          </optgroup>
+                        )}
+                        {cfg.charger_waypoint &&
+                          !waypoints.some((w) => w.name === cfg.charger_waypoint) &&
+                          cfg.charger_waypoint !== formData.default_charger && (
+                            <option value={cfg.charger_waypoint}>
+                              ⚡ {cfg.charger_waypoint} (自訂)
+                            </option>
+                          )}
+                      </select>
+                    </div>
+
+                    <div className="col-span-1 flex justify-center">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemoveRobot(index)}
+                        className="h-7 w-7 p-0 text-rose-400 hover:text-rose-300 hover:bg-rose-950/40"
+                        title="移除此車輛"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="pt-3 border-t border-slate-800">
             <Button
               type="button"
               variant="outline"
