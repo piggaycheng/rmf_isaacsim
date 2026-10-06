@@ -159,6 +159,9 @@ def load_fleet_adapters_data() -> List[Dict[str, Any]]:
             with open(FLEET_ADAPTERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
+                    # Ensure loaded data doesn't contain legacy logs
+                    for item in data:
+                        item.pop("logs", None)
                     return data
         except Exception as e:
             print(f"Notice: Failed to load fleet_adapters.json: {e}")
@@ -166,7 +169,14 @@ def load_fleet_adapters_data() -> List[Dict[str, Any]]:
 
 def save_fleet_adapters_data(adapters: List[Dict[str, Any]]) -> None:
     try:
+        # Strip runtime logs before persisting configuration to disk
+        clean_adapters = []
+        for a in adapters:
+            item = dict(a)
+            item.pop("logs", None)
+            clean_adapters.append(item)
+
         with open(FLEET_ADAPTERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(adapters, f, ensure_ascii=False, indent=2)
+            json.dump(clean_adapters, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Error saving fleet_adapters.json: {e}")
