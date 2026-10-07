@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 import paho.mqtt.client as mqtt
 
+import state
 from state import (
     current_robots,
     discovered_robots,
@@ -143,18 +144,21 @@ def init_discovery_mqtt():
             discovered_robots[robot_key] = existing
 
             # Synchronize active robots to current_robots for real-time map canvas rendering
+            # Only update if ROS 2 /fleet_states is not actively driving the robot (prevent race condition)
             if existing.get("status") != "offline":
-                current_robots[robot_id] = {
-                    "id": robot_id,
-                    "name": robot_id,
-                    "fleet": fleet_name,
-                    "x": round(float(existing["x"]), 3),
-                    "y": round(float(existing["y"]), 3),
-                    "yaw": round(float(existing["yaw"]), 3),
-                    "battery": round(float(existing["battery"]), 1),
-                    "status": "moving" if existing.get("status") == "moving" else ("charging" if existing.get("status") == "charging" else "idle"),
-                    "current_task": "執行導航任務中" if existing.get("status") == "moving" else "在線待命中",
-                }
+                is_rmf_active = (time.time() - getattr(state, "last_ros2_time", 0.0)) < 2.5
+                if not is_rmf_active or robot_id not in current_robots:
+                    current_robots[robot_id] = {
+                        "id": robot_id,
+                        "name": robot_id,
+                        "fleet": fleet_name,
+                        "x": round(float(existing["x"]), 3),
+                        "y": round(float(existing["y"]), 3),
+                        "yaw": round(float(existing["yaw"]), 3),
+                        "battery": round(float(existing["battery"]), 1),
+                        "status": "moving" if existing.get("status") == "moving" else ("charging" if existing.get("status") == "charging" else "idle"),
+                        "current_task": "執行導航任務中" if existing.get("status") == "moving" else "在線待命中",
+                    }
 
         except Exception as e:
             print(f"[DISCOVERY] Error parsing MQTT message: {e}")
@@ -183,11 +187,13 @@ async def discovery_watchdog_loop():
                 "type": "discovered_robots",
                 "discovered": discovered_list,
             })
-        if current_robots:
+        is_rmf_active = (time.time() - getattr(state, "last_ros2_time", 0.0)) < 2.5
+        if current_robots and not is_rmf_active:
             await broadcast({
                 "type": "fleet_states",
                 "robots": list(current_robots.values()),
             })
+
 
 # ==========================================
 # REST API Endpoints

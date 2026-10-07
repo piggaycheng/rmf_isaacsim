@@ -1599,9 +1599,9 @@ export function App() {
                                 ? 'warning'
                                 : 'secondary'
                             }
-                            className="text-[10px] uppercase"
+                            className="text-[10px] uppercase font-mono"
                           >
-                            {robot.status}
+                            {robot.status === 'moving' ? 'MOVING' : robot.status === 'charging' ? 'CHARGING' : 'IDLE'}
                           </Badge>
                         </div>
                         <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">
@@ -1611,7 +1611,9 @@ export function App() {
                           </span>
                         </div>
                         <div className="text-[10px] bg-slate-950 px-2 py-1 rounded text-slate-400 truncate">
-                          {robot.current_task || '無運行任務'}
+                          {robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving'
+                            ? robot.current_task
+                            : '在線待命中'}
                         </div>
                       </CardContent>
                     </Card>

@@ -3,11 +3,11 @@ import json
 import math
 from typing import Dict, Any, List
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import state
 from state import (
     current_robots,
     current_tasks,
     active_connections,
-    last_ros2_time,
     broadcast,
     get_discovered_robots_list,
     TaskRequest,
@@ -98,11 +98,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # Background Simulation Loop (Simulates smooth movement if no live ROS 2 /fleet_states yet)
 async def simulation_loop():
+    import time
     while True:
         await asyncio.sleep(0.1)
-        now = asyncio.get_event_loop().time()
+        now = time.time()
         # Only simulate if ROS 2 hasn't published within last 2 seconds
-        if now - last_ros2_time > 2.0:
+        if now - state.last_ros2_time > 2.0:
             for robot in current_robots.values():
                 if robot["status"] == "moving":
                     target_x = 8.0 if robot["id"] == "tinyRobot1" else 2.0

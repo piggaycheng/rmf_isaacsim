@@ -72,6 +72,7 @@ class ManagedRobot:
         self.cmd_id = 0
         self.current_execution = None
         self.target_position: Optional[np.ndarray] = None
+        self.is_holding: bool = False
 
 
 class MqttFleetAdapter:
@@ -337,9 +338,9 @@ class MqttFleetAdapter:
             robot.last_heartbeat = time.time()
             robot.is_online = True
 
-            # Check if active navigation command reached its destination
+            # Check if active navigation command reached its destination (ignore if in-place holding)
             reported_cmd_id = payload.get("current_cmd_id")
-            if robot.current_execution and robot.target_position is not None:
+            if robot.current_execution and robot.target_position is not None and not robot.is_holding:
                 dx = robot.target_position[0] - x
                 dy = robot.target_position[1] - y
                 dist = math.hypot(dx, dy)
@@ -402,7 +403,7 @@ class MqttFleetAdapter:
 
         with self.lock:
             robot = self.robots.get(robot_id)
-            if robot and robot.current_execution:
+            if robot and robot.current_execution and not robot.is_holding:
                 if cmd_id == robot.cmd_id and status in ["completed", "success"]:
                     print(f"[NAV] Verified completion of cmd_id {cmd_id} for '{robot_id}'.")
                     try:
@@ -421,12 +422,27 @@ class MqttFleetAdapter:
             if not robot:
                 return
 
-            robot.cmd_id += 1
-            robot.current_execution = execution
             target_pos = np.array(
                 [destination.position[0], destination.position[1], destination.position[2]],
                 dtype=np.float64,
             )
+            dx = target_pos[0] - robot.position[0]
+            dy = target_pos[1] - robot.position[1]
+            dist = math.hypot(dx, dy)
+
+            # Filter in-place hold / responsive wait (< 0.20m):
+            # Do NOT dispatch downward MQTT command to AMR, and do NOT call finished() immediately.
+            # RMF EasyFullControl will safely hold the robot here until a new task is dispatched.
+            if dist < 0.20:
+                print(f"[RMF -> AMR] In-place hold for '{robot_id}' at [{target_pos[0]:.2f}, {target_pos[1]:.2f}] (dist: {dist:.3f}m < 0.2m). Holding without downward MQTT command.")
+                robot.current_execution = execution
+                robot.target_position = target_pos
+                robot.is_holding = True
+                return
+
+            robot.is_holding = False
+            robot.cmd_id += 1
+            robot.current_execution = execution
             robot.target_position = target_pos
 
             dock_name = getattr(destination, "dock", None)
@@ -457,6 +473,14 @@ class MqttFleetAdapter:
             if not robot:
                 return
 
+            was_holding = robot.is_holding
+            robot.is_holding = False
+            if was_holding:
+                robot.current_execution = None
+                robot.target_position = None
+                print(f"[RMF -> AMR] Released in-place hold for '{robot_id}' without downward STOP command.")
+                return
+
             robot.cmd_id += 1
             cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
@@ -468,6 +492,7 @@ class MqttFleetAdapter:
             }
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
             print(f"[RMF -> AMR] Dispatched STOP to '{robot_id}'")
+
 
     def _on_rmf_action(self, robot_id: str, category: str, description: Any, execution: Any):
         with self.lock:
