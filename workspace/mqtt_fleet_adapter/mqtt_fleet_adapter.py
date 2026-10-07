@@ -249,11 +249,12 @@ class MqttFleetAdapter:
         # Send ACK back to AMR
         self._send_register_ack(robot_id, success=True, msg="Registered successfully")
 
-    def _send_register_ack(self, robot_id: str, success: bool, msg: str):
+    def _send_register_ack(self, robot_id: str, success: bool, msg: str, status: Optional[str] = None):
         ack_topic = f"{self.topic_prefix}/{self.fleet_name}/robot/{robot_id}/register_ack"
+        final_status = status if status else ("success" if success else "error")
         ack_payload = {
             "robot_id": robot_id,
-            "status": "success" if success else "error",
+            "status": final_status,
             "message": msg,
             "assigned_fleet": self.fleet_name,
             "server_time": time.time(),
@@ -269,9 +270,9 @@ class MqttFleetAdapter:
         with self.lock:
             robot = self.robots.get(robot_id)
             if not robot:
-                # Robot sent heartbeat without registering first!
-                print(f"[WARN] Heartbeat from unregistered robot '{robot_id}'. Requesting registration...")
-                self._send_register_ack(robot_id, success=False, msg="Please register before sending heartbeats")
+                # Robot sent heartbeat without registering first (e.g. FA late startup or restart)
+                print(f"[WARN] Heartbeat from unregistered robot '{robot_id}'. Requesting re-registration...")
+                self._send_register_ack(robot_id, success=False, msg="Robot not recognized by FA, please re-register", status="require_register")
                 return
 
             # Update telemetry

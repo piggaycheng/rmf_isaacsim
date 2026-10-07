@@ -49,7 +49,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 task_id = f"task_{len(current_tasks) + 1:03d}"
                 target_wp = payload.get("target_waypoint")
                 task_type = payload.get("type", "goto")
-                assigned_robot = payload.get("robot_id", "tinyRobot1")
+                assigned_robot = payload.get("robot_id") or (list(current_robots.keys())[0] if current_robots else "robot_1")
 
                 new_task = {
                     "id": task_id,

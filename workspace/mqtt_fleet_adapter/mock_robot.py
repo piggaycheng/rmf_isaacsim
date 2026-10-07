@@ -112,9 +112,14 @@ class MockRobot:
         payload = json.loads(msg.payload.decode("utf-8"))
 
         if topic == self.topic_register_ack:
-            if payload.get("status") == "success":
+            status = payload.get("status")
+            if status == "success":
                 print(f"[AMR] ✅ Registration SUCCESSFUL! Adapter acknowledged: {payload.get('message')}")
                 self.is_registered = True
+            elif status == "require_register":
+                print(f"[AMR] ⚠️ FA requested re-registration (status: require_register). Re-sending /register...")
+                self.is_registered = False
+                self.send_registration()
             else:
                 print(f"[AMR] ❌ Registration REJECTED: {payload.get('message')}")
 
@@ -203,15 +208,25 @@ class MockRobot:
             }
             self.client.publish(self.topic_heartbeat, json.dumps(hb_payload), qos=0)
 
+    def registration_retry_loop(self):
+        """Retries registration periodically until ACK is received."""
+        while self.running:
+            time.sleep(3.0)
+            if not self.is_registered:
+                print("[AMR] ⏳ Waiting for register_ack timeout (3s). Re-trying registration...")
+                self.send_registration()
+
     def start(self):
         self.client.connect(self.mqtt_host, self.mqtt_port, 60)
         self.client.loop_start()
 
-        # Start motion and heartbeat worker threads
+        # Start motion, heartbeat, and registration retry worker threads
         t_motion = threading.Thread(target=self.motion_loop, daemon=True)
         t_heartbeat = threading.Thread(target=self.heartbeat_loop, daemon=True)
+        t_reg_retry = threading.Thread(target=self.registration_retry_loop, daemon=True)
         t_motion.start()
         t_heartbeat.start()
+        t_reg_retry.start()
 
         print(f"[AMR] Mock AMR running. Press Ctrl+C to stop.")
         try:

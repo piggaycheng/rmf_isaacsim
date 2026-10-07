@@ -68,30 +68,7 @@ const INITIAL_LANES: Lane[] = [
   { id: 'lane_6', start_id: 'wp_5', end_id: 'wp_7', bidirectional: true },
 ];
 
-const INITIAL_ROBOTS: Robot[] = [
-  {
-    id: 'tinyRobot1',
-    name: 'tinyRobot1',
-    fleet: 'tinyRobot',
-    x: 2.0,
-    y: 1.0,
-    yaw: 0,
-    battery: 94,
-    status: 'idle',
-    current_task: '等待派發任務',
-  },
-  {
-    id: 'deliveryRobot1',
-    name: 'deliveryRobot1',
-    fleet: 'deliveryFleet',
-    x: 8.0,
-    y: 5.0,
-    yaw: 1.57,
-    battery: 78,
-    status: 'moving',
-    current_task: '前往 coe 巡邏中',
-  },
-];
+const INITIAL_ROBOTS: Robot[] = [];
 
 export type AppMode = 'world' | 'monitor' | 'edit' | 'adapters';
 
@@ -160,17 +137,7 @@ export function App() {
   const [editingGraphName, setEditingGraphName] = useState<string>('');
 
   const [robots, setRobots] = useState<Robot[]>(INITIAL_ROBOTS);
-  const [tasks, setTasks] = useState<Task[]>([
-    {
-      id: 'task_001',
-      type: 'patrol',
-      target_waypoint: 'coe',
-      robot_id: 'deliveryRobot1',
-      status: 'active',
-      progress: 45,
-      created_at: '13:20:10',
-    },
-  ]);
+  const [tasks, setTasks] = useState<Task[]>([]);
 
   const [selectedWaypointIds, setSelectedWaypointIds] = useState<string[]>([]);
   const [selectedLaneIds, setSelectedLaneIds] = useState<string[]>([]);

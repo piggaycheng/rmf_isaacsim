@@ -51,44 +51,11 @@ class CameraDisableRequest(BaseModel):
 # ==========================================
 # In-Memory Global State
 # ==========================================
-DEFAULT_ROBOTS = {
-    "tinyRobot1": {
-        "id": "tinyRobot1",
-        "name": "tinyRobot1",
-        "fleet": "tinyRobot",
-        "x": 2.0,
-        "y": 1.0,
-        "yaw": 0.0,
-        "battery": 94.0,
-        "status": "idle",
-        "current_task": "等待派發任務",
-    },
-    "deliveryRobot1": {
-        "id": "deliveryRobot1",
-        "name": "deliveryRobot1",
-        "fleet": "deliveryFleet",
-        "x": 8.0,
-        "y": 5.0,
-        "yaw": 1.57,
-        "battery": 78.0,
-        "status": "moving",
-        "current_task": "前往 coe 巡邏中",
-    },
-}
+DEFAULT_ROBOTS: Dict[str, Dict[str, Any]] = {}
 
 current_robots: Dict[str, Dict[str, Any]] = dict(DEFAULT_ROBOTS)
 
-current_tasks: List[Dict[str, Any]] = [
-    {
-        "id": "task_001",
-        "type": "patrol",
-        "target_waypoint": "coe",
-        "robot_id": "deliveryRobot1",
-        "status": "active",
-        "progress": 45,
-        "created_at": "13:20:10",
-    }
-]
+current_tasks: List[Dict[str, Any]] = []
 
 active_connections: List[WebSocket] = []
 last_ros2_time: float = 0.0

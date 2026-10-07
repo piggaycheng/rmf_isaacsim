@@ -56,7 +56,7 @@
 
 | 主題名稱 (Topic) | 傳輸方向 | 推薦 QoS | 觸發頻率 | 職責簡述 |
 | :--- | :---: | :---: | :---: | :--- |
-| `rmf/{fleet_name}/robot/{robot_id}/register` | 車端 $\rightarrow$ FA | **1** | 開機 / 重連時 1 次 | 提交車體規格並申請註冊進 Open-RMF |
+| `rmf/{fleet_name}/robot/{robot_id}/register` | 車端 $\rightarrow$ FA | **1** | 開機發送 (未獲 ACK 則每 3 秒自動重試) | 提交車體規格並申請註冊進 Open-RMF |
 | `rmf/{fleet_name}/robot/{robot_id}/register_ack` | FA $\rightarrow$ 車端 | **1** | 回應註冊請求時 | FA 確認接受註冊並回傳系統圖資配置 |
 | `rmf/{fleet_name}/robot/{robot_id}/heartbeat` | 車端 $\rightarrow$ FA | **0** | 週期性 (1 ~ 5 Hz) | 回報即時位置、電量與當前運動狀態 |
 | `rmf/{fleet_name}/robot/{robot_id}/command` | FA $\rightarrow$ 車端 | **1** | 事件觸發 (任務派遣) | RMF 核心派發之導航目標點或停止指令 |
@@ -72,7 +72,11 @@
 - **Topic**：`rmf/{fleet_name}/robot/{robot_id}/register`
 - **方向**：車載端 $\rightarrow$ Fleet Adapter
 - **QoS**：`1`
-- **說明**：車輛系統啟動完成且定位成功後發送。告知 FA 該車輛的物理幾何形狀與預設站點。
+- **觸發與發送時機**：
+  1. **開機首次發送**：車輛系統啟動完成且定位成功後立即發送。
+  2. **3 秒自動重試機制（晚開機應對）**：發送後**若超過 3 秒未收到 `register_ack`**（例如 Fleet Adapter 較晚啟動或重啟中），車端**必須以 3 秒為間隔持續自動重發**，直到收到 `status: "success"` 的 ACK 為止。
+  3. **逆向要求重註冊**：若車輛運行中收到 `register_ack` 帶有 `status: "require_register"`（代表 FA 剛重啟遺失了名冊），車端**必須立即重新發送**此註冊封包。
+- **說明**：告知 FA 該車輛的物理幾何形狀與預設站點。未完成註冊前，車輛不可切換至 `idle` 亦不可接受調度指令。
 
 #### JSON Schema 與欄位定義
 ```json
@@ -142,6 +146,17 @@
   "server_time": 1728312000.456
 }
 ```
+
+#### 晚啟動/重啟要求補註冊範例 (Require Registration)
+```json
+{
+  "robot_id": "tinyRobot1",
+  "status": "require_register",
+  "message": "Robot not recognized by FA, please re-register immediately",
+  "server_time": 1728312000.456
+}
+```
+> **重要自癒機制**：若 FA 比車輛晚開機、或 FA 曾中途重啟，當 FA 收到未知心跳時會主動發送此訊息。車載端收到 `status: "require_register"` 時，**必須立即自動補發 `/register`**。
 
 ---
 
@@ -335,6 +350,42 @@ sequenceDiagram
     RMF->>FA: 18. 排程器指派下一個路徑點或宣告任務結束
 ```
 
+### 5.2 晚啟動與斷線自癒機制循序圖 (Late Startup & Reconnection)
+
+當車載端比 FA 提早開機、或 FA 伺服器中途當機重開時，系統透過以下雙層防護機制在 1 秒內自動修復連線：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant AMR as AMR 車載系統 (早開機)
+    participant Broker as EMQX MQTT Broker
+    participant FA as Fleet Adapter (晚開機/重啟)
+
+    Note over AMR: 車輛 08:00 開機，此時 FA 尚未啟動
+    AMR->>Broker: 1. Publish /register
+    Note over AMR: ⏳ 等待 register_ack 超時 (3秒未收到 ACK)
+    AMR->>Broker: 2. 定期重發 /register (每 3 秒一次)
+
+    Note over FA: FA 於 08:05 啟動上線並訂閱主題！
+    
+    alt 分支 A：捕捉到車端的定期重發
+        AMR->>Broker: 3. 下一次重發 /register
+        Broker->>FA: 4. 收到註冊請求
+        FA->>Broker: 5. Publish /register_ack (status: "success")
+        Broker->>AMR: 6. 註冊成功，握手閉環
+    else 分支 B：由心跳逆向觸發補註冊 (更即時)
+        AMR->>Broker: 3. 車端持續發送 /heartbeat
+        Broker->>FA: 4. FA 收到未知車輛心跳
+        Note over FA: 發現此車不在名冊中！
+        FA->>Broker: 5. Publish /register_ack (status: "require_register")
+        Broker->>AMR: 6. 收到要求補註冊指示
+        AMR->>Broker: 7. 立即補發 /register
+        Broker->>FA: 8. 收到補發之註冊
+        FA->>Broker: 9. Publish /register_ack (status: "success")
+        Broker->>AMR: 10. 註冊成功，自動恢復連線！
+    end
+```
+
 ---
 
 ## 6. 車載端實作檢查清單 (Implementation Checklist)
@@ -344,6 +395,8 @@ sequenceDiagram
 - [ ] **坐標系校正**：確認車端傳出的座標系原點與 SLAM 2D 地圖的原點完全一致（右手定則，角度逆時針為正）。
 - [ ] **連線設置 LWT**：連線時是否已設定 `.../status` 的遺囑訊息？
 - [ ] **握手確認**：開機後是否確實等待 `register_ack` 回覆成功後，才將車況設定為 `idle`？
+- [ ] **註冊定時重試**：發出 `/register` 後若超過 3 秒未收到 ACK，是否具備定時重試重發機制？
+- [ ] **斷線自癒支援**：若收到 `register_ack` 為 `status: "require_register"`，是否立即自動補發 `/register`？
 - [ ] **指令確認 (cmd_id 追蹤)**：收到 `/command` 後，心跳中的 `current_cmd_id` 是否有對應更新？完成時是否送出包含同一個 `cmd_id` 的 `command_result`？
 - [ ] **心跳頻率穩定**：心跳維持在 2~5 Hz，避免過低造成 RMF 誤判為掉線，亦避免高於 20 Hz 浪費頻寬。
 - [ ] **角度範圍規範**：朝向角度是否嚴格限制在 $[-\pi, +\pi]$（約 $-3.14159$ 至 $+3.14159$）之間？
