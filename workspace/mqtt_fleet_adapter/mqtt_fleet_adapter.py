@@ -32,6 +32,18 @@ except ImportError as e:
     print("[WARN] Running in standalone mock mode only.")
 
 
+def find_backend_path(subpath: str) -> str:
+    candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../backend", subpath)),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../backend", subpath)),
+        os.path.abspath(os.path.join("/root/rmf_ws/backend", subpath)),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
 class ManagedRobot:
     """Tracks state and command execution handles for a single robot."""
 
@@ -120,20 +132,52 @@ class MqttFleetAdapter:
             rclpy.init()
             rmf_adapter.init_rclcpp()
 
-            self.fleet_config = rmf_easy.FleetConfiguration.from_config_files(
-                self.config_path, self.nav_graph_path
-            )
-            if not self.fleet_config:
-                raise RuntimeError("Failed to load FleetConfiguration from config/nav_graph files")
-
-            self.node = rclpy.node.Node(f"{self.fleet_name}_command_handle")
-            self.adapter = Adapter.make(f"{self.fleet_name}_fleet_adapter")
+            self.node = rclpy.node.Node("rmf_mqtt_command_handle")
+            self.adapter = Adapter.make("rmf_mqtt_fleet_adapter")
             if not self.adapter:
                 raise RuntimeError("Unable to initialize Adapter. Make sure RMF Schedule is running.")
 
             self.adapter.start()
-            self.fleet_handle = self.adapter.add_easy_fleet(self.fleet_config)
-            print(f"[INFO] Open-RMF EasyFullControl Adapter ready for fleet '{self.fleet_name}'")
+            self.fleet_handles: Dict[str, Any] = {}
+
+            # Load fleets from fleet_adapters.json if available
+            adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
+            adapters_data = []
+            if os.path.exists(adapters_file):
+                try:
+                    with open(adapters_file, "r", encoding="utf-8") as f:
+                        adapters_data = json.load(f)
+                except Exception as e:
+                    print(f"[WARN] Failed to read fleet_adapters.json: {e}")
+
+            if not adapters_data:
+                adapters_data = [{"fleet_name": self.fleet_name, "graph_idx": 0}]
+
+            for item in adapters_data:
+                f_name = item.get("fleet_name") or self.fleet_name
+                g_idx = item.get("graph_idx", 0)
+                nav_path = find_backend_path(f"saved_maps/nav_graphs/{g_idx}.yaml")
+                if not os.path.exists(nav_path):
+                    nav_path = self.nav_graph_path
+
+                try:
+                    cfg = rmf_easy.FleetConfiguration.from_config_files(self.config_path, nav_path)
+                    if cfg:
+                        cfg.fleet_name = f_name
+                        handle = self.adapter.add_easy_fleet(cfg)
+                        self.fleet_handles[f_name] = handle
+                        print(f"[RMF] Successfully registered fleet [{f_name}] (Graph {g_idx}) into Open-RMF!")
+                except Exception as e:
+                    print(f"[ERROR] Failed to register fleet [{f_name}]: {e}")
+
+            if self.fleet_handles:
+                self.fleet_handle = list(self.fleet_handles.values())[0]
+            else:
+                self.fleet_config = rmf_easy.FleetConfiguration.from_config_files(self.config_path, self.nav_graph_path)
+                self.fleet_handle = self.adapter.add_easy_fleet(self.fleet_config)
+                self.fleet_handles[self.fleet_name] = self.fleet_handle
+
+            print(f"[INFO] Open-RMF EasyFullControl Adapter ready for fleets: {list(self.fleet_handles.keys())}")
         except Exception as e:
             print(f"[ERROR] Failed to start live Open-RMF Adapter: {e}")
             print("[WARN] Switching to Mock/Standalone mode.")
@@ -201,8 +245,9 @@ class MqttFleetAdapter:
         y = float(loc.get("y", 0.0))
         yaw = float(loc.get("yaw", 0.0))
         level_name = loc.get("level_name", "L1")
-        default_charger = payload.get("default_charger", "charger_1")
-        default_parking = payload.get("default_parking", "parking_1")
+        fallback_charger = "wp_5" if fleet_name == "fleet2" else "wp_1"
+        default_charger = payload.get("default_charger") or fallback_charger
+        default_parking = payload.get("default_parking") or fallback_charger
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
         with self.lock:
@@ -214,7 +259,8 @@ class MqttFleetAdapter:
 
             # Live Open-RMF Registration
             update_handle = None
-            if not self.mock_rmf and self.fleet_handle:
+            target_handle = self.fleet_handles.get(fleet_name) or self.fleet_handle
+            if not self.mock_rmf and target_handle:
                 try:
                     initial_state = rmf_easy.RobotState(level_name, initial_pos, 1.0)
                     robot_config = rmf_easy.RobotConfiguration([default_charger])
@@ -225,10 +271,10 @@ class MqttFleetAdapter:
                         lambda cat, desc, exec_h: self._on_rmf_action(robot_id, cat, desc, exec_h),
                     )
 
-                    update_handle = self.fleet_handle.add_robot(
+                    update_handle = target_handle.add_robot(
                         robot_id, initial_state, robot_config, callbacks
                     )
-                    print(f"[RMF] Successfully registered '{robot_id}' into Open-RMF fleet handle!")
+                    print(f"[RMF] Successfully registered '{robot_id}' into Open-RMF fleet [{fleet_name}] handle!")
                 except Exception as e:
                     print(f"[ERROR] Failed to add robot to RMF core: {e}")
                     self._send_register_ack(robot_id, success=False, msg=str(e), fleet_name=fleet_name)
@@ -299,7 +345,7 @@ class MqttFleetAdapter:
                 dist = math.hypot(dx, dy)
 
                 # Arrived if within tolerance (<0.20m) or if robot transitioned to idle having finished this cmd
-                cmd_matches = (reported_cmd_id is None or reported_cmd_id == robot.cmd_id)
+                cmd_matches = (reported_cmd_id is not None and reported_cmd_id == robot.cmd_id)
                 if (dist < 0.20) or (status == "idle" and cmd_matches):
                     print(f"[NAV] Robot '{robot_id}' completed cmd_id {robot.cmd_id} (dist: {dist:.3f}m, status: {status}). Finishing execution.")
                     try:
@@ -511,7 +557,7 @@ def main():
     )
     parser.add_argument(
         "-n", "--nav_graph",
-        default=os.path.join(os.path.dirname(__file__), "../../backend/saved_maps/nav_graphs/0.yaml"),
+        default=find_backend_path("saved_maps/nav_graphs/0.yaml"),
         help="Path to nav graph YAML",
     )
     parser.add_argument(

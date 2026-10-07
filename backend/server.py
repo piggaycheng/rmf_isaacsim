@@ -34,6 +34,8 @@ app.include_router(adapter_router)
 app.include_router(camera_router)
 app.include_router(discovery_router)
 
+from rmf_service import rmf_service
+
 @app.on_event("startup")
 async def startup_event():
     # 1. Background simulation, MediaMTX watchdog, and MQTT robot auto-discovery
@@ -41,40 +43,16 @@ async def startup_event():
     asyncio.create_task(mediamtx_watchdog_loop())
     asyncio.create_task(discovery_watchdog_loop())
 
-    # 2. Start ROS 2 listener in background thread if available
+    # 2. Start Open-RMF core services (Schedule, Dispatcher, MQTT Fleet Adapter) and ROS 2 Bridge
     try:
-        import rclpy
-        from rclpy.node import Node
-        from rmf_fleet_msgs.msg import FleetState
-
-        def ros2_spin():
-            rclpy.init()
-            node = Node("rmf_web_studio_bridge")
-
-            def fleet_callback(msg: FleetState):
-                nonlocal node
-                fleet_name = msg.name
-                for r in msg.robots:
-                    r_id = r.name
-                    current_robots[r_id] = {
-                        "id": r_id,
-                        "name": r_id,
-                        "fleet": fleet_name,
-                        "x": r.location.x,
-                        "y": r.location.y,
-                        "yaw": r.location.yaw,
-                        "battery": r.battery_percent,
-                        "status": "moving" if r.mode.mode == 2 else "charging" if r.mode.mode == 3 else "idle",
-                        "current_task": r.task_id or "工作中",
-                    }
-
-            node.create_subscription(FleetState, "/fleet_states", fleet_callback, 10)
-            rclpy.spin(node)
-
-        t = threading.Thread(target=ros2_spin, daemon=True)
-        t.start()
+        rmf_service.start_background_processes()
+        rmf_service.init_ros2_node()
     except Exception as e:
-        print(f"ROS 2 background bridge startup notice: {e}")
+        print(f"RMF Core startup notice: {e}")
+
+@app.on_event("shutdown")
+def shutdown_event():
+    rmf_service.shutdown()
 
 # Serve compiled frontend static files
 FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "../frontend/dist"))

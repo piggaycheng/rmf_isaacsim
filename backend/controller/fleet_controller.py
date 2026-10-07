@@ -10,7 +10,9 @@ from state import (
     last_ros2_time,
     broadcast,
     get_discovered_robots_list,
+    TaskRequest,
 )
+from rmf_service import rmf_service
 
 router = APIRouter(tags=["Fleet & Tasks"])
 
@@ -25,6 +27,22 @@ def get_robots():
 @router.get("/api/tasks")
 def get_tasks():
     return current_tasks
+
+@router.post("/api/tasks/dispatch")
+async def dispatch_task_endpoint(req: TaskRequest):
+    """Submits task dispatch request to Open-RMF scheduler."""
+    assigned_robot = req.robot_id if req.robot_id != "any" else None
+    res = rmf_service.dispatch_task(
+        task_type=req.type,
+        target_waypoint=req.target_waypoint,
+        destination_waypoint=req.destination_waypoint,
+        robot_id=assigned_robot,
+    )
+    await broadcast({
+        "type": "tasks",
+        "tasks": current_tasks,
+    })
+    return res
 
 @router.websocket("/ws/fleet")
 async def websocket_endpoint(websocket: WebSocket):
@@ -51,26 +69,20 @@ async def websocket_endpoint(websocket: WebSocket):
             payload = msg.get("payload", {})
 
             if action == "dispatch_task":
-                task_id = f"task_{len(current_tasks) + 1:03d}"
                 target_wp = payload.get("target_waypoint")
                 task_type = payload.get("type", "goto")
-                assigned_robot = payload.get("robot_id") or (list(current_robots.keys())[0] if current_robots else "robot_1")
+                assigned_robot = payload.get("robot_id")
+                if assigned_robot == "any":
+                    assigned_robot = None
+                dest_wp = payload.get("destination_waypoint")
 
-                new_task = {
-                    "id": task_id,
-                    "type": task_type,
-                    "target_waypoint": target_wp,
-                    "destination_waypoint": payload.get("destination_waypoint"),
-                    "robot_id": assigned_robot,
-                    "status": "active",
-                    "progress": 0,
-                }
-                current_tasks.insert(0, new_task)
-
-                # Update robot state
-                if assigned_robot in current_robots:
-                    current_robots[assigned_robot]["status"] = "moving"
-                    current_robots[assigned_robot]["current_task"] = f"執行 {task_type} 前往 {target_wp}"
+                # Dispatch via Open-RMF scheduler
+                rmf_service.dispatch_task(
+                    task_type=task_type,
+                    target_waypoint=target_wp,
+                    destination_waypoint=dest_wp,
+                    robot_id=assigned_robot,
+                )
 
                 await broadcast({
                     "type": "tasks",
@@ -114,12 +126,14 @@ async def simulation_loop():
                     if t["progress"] >= 100:
                         t["status"] = "completed"
 
-            if active_connections:
-                await broadcast({
-                    "type": "fleet_states",
-                    "robots": list(current_robots.values()),
-                })
-                await broadcast({
-                    "type": "tasks",
-                    "tasks": current_tasks,
-                })
+        # Continuous real-time broadcast to connected Web Studio clients
+        if active_connections:
+            await broadcast({
+                "type": "fleet_states",
+                "robots": list(current_robots.values()),
+            })
+            await broadcast({
+                "type": "tasks",
+                "tasks": current_tasks,
+            })
+

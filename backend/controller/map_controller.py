@@ -131,14 +131,22 @@ async def save_map(req: MapSaveRequest):
         for idx, w in enumerate(wp_list)
     ]
 
+    # Ensure Open-RMF requirement: at least one vertex must have is_charger: True
+    if nav_vertices and not any(v[2].get("is_charger") for v in nav_vertices):
+        nav_vertices[0][2]["is_charger"] = True
+        nav_vertices[0][2]["is_parking_spot"] = True
+
     saved_graph_files = []
     for g_idx in graph_indices:
         g_lanes = []
+        g_used_vertex_indices = set()
         for l in req.lanes:
             if int(l.get("graph_idx", 0)) != g_idx:
                 continue
             start_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("start_id")), 0)
             end_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("end_id")), 0)
+            g_used_vertex_indices.add(start_idx)
+            g_used_vertex_indices.add(end_idx)
             speed_limit = float(l.get("speed_limit", 0.0))
             is_bidi = bool(l.get("bidirectional", True))
             p = {"speed_limit": speed_limit} if speed_limit > 0.0 else {}
@@ -148,12 +156,23 @@ async def save_map(req: MapSaveRequest):
             else:
                 g_lanes.append([start_idx, end_idx, dict(p)])
 
+        # Clone vertices for this graph and ensure at least one used vertex is a charger
+        graph_vertices = [
+            [v[0], v[1], dict(v[2])]
+            for v in nav_vertices
+        ]
+        has_charger = any(graph_vertices[idx][2].get("is_charger") for idx in g_used_vertex_indices)
+        if not has_charger and g_used_vertex_indices:
+            charger_idx = min(g_used_vertex_indices)
+            graph_vertices[charger_idx][2]["is_charger"] = True
+            graph_vertices[charger_idx][2]["is_parking_spot"] = True
+
         g_data = {
             "building_name": req.name,
             "levels": {
                 "L1": {
                     "lanes": g_lanes,
-                    "vertices": nav_vertices,
+                    "vertices": graph_vertices,
                 }
             },
             "doors": {},
