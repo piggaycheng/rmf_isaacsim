@@ -52,6 +52,8 @@ workspace/log/
 COLCON_IGNORE
 *.autosave
 *.bag
+*.rmf_schedule_node.yaml
+.rmf_schedule_node.yaml
 
 # External / Upstream Cloned Repositories
 # (rmf is an upstream repository with its own .git history)
