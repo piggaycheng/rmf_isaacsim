@@ -647,7 +647,7 @@ export function App() {
       : null;
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-[#070a13] text-slate-100 overflow-hidden select-none font-sans">
+    <div className="flex flex-col h-screen w-screen bg-[#070a13] text-slate-100 overflow-hidden font-sans">
       {/* 1. Top Navbar */}
       <header className="h-14 border-b border-slate-800 bg-[#0d1322]/90 backdrop-blur px-4 flex items-center justify-between z-20">
         <div className="flex items-center space-x-3">
@@ -666,7 +666,7 @@ export function App() {
         </div>
 
         {/* Mode Selector */}
-        <div className="flex items-center bg-slate-900 border border-slate-800 p-1 rounded-lg">
+        <div className="flex items-center bg-slate-900 border border-slate-800 p-1 rounded-lg select-none">
           {/* 1. World Map Tab (on the far left) */}
           <button
             onClick={() => handleSetMode('world')}
@@ -855,7 +855,7 @@ export function App() {
         <div className="flex-1 flex overflow-hidden relative">
         {/* Left Toolbar (Edit Mode Only) */}
         {mode === 'edit' && (
-          <aside className="w-14 border-r border-slate-800 bg-[#0d1322] flex flex-col items-center py-3 space-y-2 z-10">
+          <aside className="w-14 border-r border-slate-800 bg-[#0d1322] flex flex-col items-center py-3 space-y-2 z-10 select-none">
             <button
               onClick={() => setTool('select')}
               title="選取工具（單選點位、拖曳移動、空白處拖曳矩形框選）"

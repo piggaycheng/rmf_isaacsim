@@ -530,6 +530,9 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
 
   // Mouse Handlers
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Prevent default browser drag / text-selection behaviors while interacting with the canvas
+    e.preventDefault();
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();

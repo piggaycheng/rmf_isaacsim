@@ -389,7 +389,7 @@ export function WorldMap({
   return (
     <div className="flex-1 flex w-full h-full relative overflow-hidden bg-[#060911]">
       {/* 1. Left Sidebar: Factory Plants Directory */}
-      <aside className="w-80 md:w-96 border-r border-slate-800 bg-[#0c1220]/95 backdrop-blur-md flex flex-col z-10 shadow-xl select-none">
+      <aside className="w-80 md:w-96 border-r border-slate-800 bg-[#0c1220]/95 backdrop-blur-md flex flex-col z-10 shadow-xl">
         {/* Sidebar Header */}
         <div className="p-4 border-b border-slate-800 space-y-3">
           <div className="flex items-center justify-between">
