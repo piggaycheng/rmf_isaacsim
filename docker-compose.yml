@@ -51,6 +51,7 @@ services:
     volumes:
       - ./backend:/root/rmf_ws/backend:rw
       - ./frontend:/root/rmf_ws/frontend:rw
+      - ./workspace:/root/rmf_ws/src/custom_ws:rw
     working_dir: /root/rmf_ws/backend
     command: python3 server.py
 

@@ -1,0 +1,49 @@
+# ==============================================================================
+# Open-RMF Fleet Configuration for MQTT Fleet Adapter
+# Compatible with ROS 2 Jazzy & EasyFullControl API
+# ==============================================================================
+
+rmf_fleet:
+  name: "tinyRobot"
+  limits:
+    linear: [1.2, 0.6]     # max velocity (m/s), max acceleration (m/s^2)
+    angular: [1.0, 0.5]    # max velocity (rad/s), max acceleration (rad/s^2)
+  profile:
+    footprint: 0.35        # robot radius in meters
+    vicinity: 0.65         # vicinity radius in meters
+  reversible: true         # whether robots can drive backwards
+  battery_system:
+    voltage: 24.0          # Volts
+    capacity: 30.0         # Amp-hours
+    charging_current: 10.0 # Amps
+  mechanical_system:
+    mass: 40.0             # kg
+    moment_of_inertia: 15.0 # kg*m^2
+    friction_coefficient: 0.2
+  ambient_system:
+    power: 25.0            # Watts (idle/compute consumption)
+  tool_system:
+    power: 0.0             # Watts
+  recharge_threshold: 0.20 # 20% battery triggers recharge
+  recharge_soc: 0.90       # 90% battery target for charging
+  publish_fleet_state: 10.0 # Hz
+  account_for_battery_drain: true
+  task_capabilities:
+    loop: true
+    delivery: true
+  actions: ["teleop"]
+  finishing_request: "park" # Options: park, charge, nothing
+  responsive_wait: true
+  reassign_task_interval: 60 # seconds
+
+  # Known robots (Pre-configured robots, optional. Dynamic robots can be added at runtime via MQTT)
+  robots:
+    tinyRobot1:
+      charger: "wp_1"
+
+# MQTT Broker Configuration
+mqtt:
+  broker_host: "127.0.0.1"
+  broker_port: 1883
+  keepalive: 30
+  topic_prefix: "rmf"
