@@ -852,7 +852,7 @@ export function App() {
           {mode === 'edit' && (
             <div className="h-10 bg-[#0d1222] border-b border-slate-800 px-3 flex items-center justify-between z-10 flex-shrink-0">
               {/* Left: Save Feedback Toast */}
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 min-w-0">
                 {saveToast && (
                   <span className="text-xs px-2.5 py-1 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center transition-all shadow-sm">
                     <Check className="w-3.5 h-3.5 mr-1 text-emerald-400" />
@@ -862,12 +862,12 @@ export function App() {
               </div>
 
               {/* Right: Action Buttons */}
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 overflow-x-auto no-scrollbar flex-shrink-0 ml-2">
                 <Button
                   size="sm"
                   variant={slamMap ? 'secondary' : 'outline'}
                   onClick={() => setImportModalOpen(true)}
-                  className="text-xs h-7 px-2.5"
+                  className="text-xs h-7 px-2.5 flex-shrink-0"
                   title="上傳並顯示 ROS SLAM 雷達地圖 (.pgm + map.yaml)"
                 >
                   <FileUp className="w-3.5 h-3.5 mr-1 text-primary" />
@@ -882,7 +882,7 @@ export function App() {
                     setLanes(INITIAL_LANES);
                     setRobots(INITIAL_ROBOTS);
                   }}
-                  className="text-xs h-7 px-2.5"
+                  className="text-xs h-7 px-2.5 flex-shrink-0"
                   title="重設為範例路網"
                 >
                   <RotateCcw className="w-3.5 h-3.5 mr-1" />
@@ -893,7 +893,7 @@ export function App() {
                   size="sm"
                   variant="secondary"
                   onClick={handleExportBuildingYaml}
-                  className="text-xs h-7 px-2.5"
+                  className="text-xs h-7 px-2.5 flex-shrink-0"
                   title="下載 Open-RMF 建築總圖 (building.yaml)"
                 >
                   <Download className="w-3.5 h-3.5 mr-1" />
@@ -904,7 +904,7 @@ export function App() {
                   size="sm"
                   variant="secondary"
                   onClick={handleExportActiveNavYaml}
-                  className="text-xs h-7 px-2.5"
+                  className="text-xs h-7 px-2.5 flex-shrink-0"
                   title={`下載 Open-RMF 車隊專用導航路網 (nav_graphs/${activeGraphIdx}.yaml)`}
                 >
                   <Download className="w-3.5 h-3.5 mr-1" />
@@ -913,7 +913,7 @@ export function App() {
 
                 <Button
                   size="sm"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50 text-xs h-7 px-2.5"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50 text-xs h-7 px-2.5 flex-shrink-0"
                   onClick={handleSaveMap}
                   disabled={isSaving}
                   title="儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)"
@@ -928,9 +928,16 @@ export function App() {
           {/* Top Graph Management Bar (Edit Mode Only) */}
           {mode === 'edit' && (
             <div className="h-10 bg-[#0b101d] border-b border-slate-800 px-3 flex items-center justify-between z-10 select-none flex-shrink-0">
-              {/* Left: Graphs tabs */}
-              <div className="flex items-center space-x-1.5 overflow-x-auto py-1 scrollbar-none">
-                <span className="text-[11px] font-semibold text-slate-400 flex items-center mr-1">
+              {/* Left: Graphs tabs - flex-1 min-w-0 enables overflow-x-auto, wheel scrolling supported */}
+              <div
+                className="flex-1 min-w-0 flex items-center space-x-1.5 overflow-x-auto py-1 no-scrollbar"
+                onWheel={(e) => {
+                  if (e.deltaY !== 0) {
+                    e.currentTarget.scrollLeft += e.deltaY;
+                  }
+                }}
+              >
+                <span className="text-[11px] font-semibold text-slate-400 flex items-center mr-1 flex-shrink-0">
                   <Layers className="w-3.5 h-3.5 mr-1 text-primary" />
                   路網分組:
                 </span>
@@ -941,7 +948,7 @@ export function App() {
                     <div
                       key={g.id}
                       onClick={() => handleSelectGraphTab(g.id)}
-                      className={`group flex items-center space-x-1.5 px-2.5 py-1 rounded-md text-xs cursor-pointer transition-all border ${
+                      className={`group flex items-center space-x-1.5 px-2.5 py-1 rounded-md text-xs cursor-pointer transition-all border flex-shrink-0 ${
                         isActive
                           ? 'bg-slate-800 border-slate-600 text-white font-medium shadow-sm'
                           : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
@@ -1013,7 +1020,7 @@ export function App() {
                 {/* + Add Graph button */}
                 <button
                   onClick={handleAddGraph}
-                  className="flex items-center space-x-1 px-2 py-1 rounded-md text-xs text-slate-400 hover:text-primary hover:bg-slate-800 border border-dashed border-slate-700 transition-all"
+                  className="flex items-center space-x-1 px-2 py-1 rounded-md text-xs text-slate-400 hover:text-primary hover:bg-slate-800 border border-dashed border-slate-700 transition-all flex-shrink-0"
                   title="新增一組全新的 Navigation Graph"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -1022,7 +1029,7 @@ export function App() {
               </div>
 
               {/* Right: Graph display filter */}
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 flex-shrink-0 ml-3">
                 <span className="text-[11px] text-slate-400 hidden xl:flex items-center">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5 inline-block" />
                   已鎖定範圍：僅選取當前路網 (Graph {activeGraphIdx})
