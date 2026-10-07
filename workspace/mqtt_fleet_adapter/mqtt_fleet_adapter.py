@@ -43,8 +43,10 @@ class ManagedRobot:
         battery_soc: float,
         update_handle: Any = None,
         charger_waypoint: str = "charger_1",
+        fleet_name: str = "tinyRobot",
     ):
         self.name = name
+        self.fleet_name = fleet_name
         self.map_name = map_name
         self.position = position  # [x, y, yaw]
         self.battery_soc = battery_soc  # 0.0 - 1.0
@@ -143,18 +145,13 @@ class MqttFleetAdapter:
     def _on_mqtt_connect(self, client, userdata, flags, rc):
         if rc == 0:
             print(f"[MQTT] Connected successfully to Broker at {self.mqtt_host}:{self.mqtt_port}")
-            # Subscribe to the 3 core robot topics + command_result + status
-            wildcard = f"{self.topic_prefix}/{self.fleet_name}/robot/+"
-            subscriptions = [
-                f"{wildcard}/register",
-                f"{wildcard}/heartbeat",
-                f"{wildcard}/deregister",
-                f"{wildcard}/status",
-                f"{wildcard}/command_result",
-            ]
-            for sub in subscriptions:
-                client.subscribe(sub, qos=1)
-                print(f"[MQTT] Subscribed to -> {sub}")
+            # Wildcard subscription to support both self.fleet_name and all other AMR fleets
+            client.subscribe(f"{self.topic_prefix}/+/robot/+/register", qos=1)
+            client.subscribe(f"{self.topic_prefix}/+/robot/+/heartbeat", qos=0)
+            client.subscribe(f"{self.topic_prefix}/+/robot/+/deregister", qos=1)
+            client.subscribe(f"{self.topic_prefix}/+/robot/+/status", qos=1)
+            client.subscribe(f"{self.topic_prefix}/+/robot/+/command_result", qos=1)
+            print(f"[MQTT] Subscribed to wildcard -> {self.topic_prefix}/+/robot/+/*")
         else:
             print(f"[MQTT] Connection failed with result code: {rc}")
 
@@ -170,32 +167,34 @@ class MqttFleetAdapter:
             print(f"[MQTT ERROR] Invalid JSON received on topic {topic}: {e}")
             return
 
-        # Extract robot_id from topic: rmf/{fleet_name}/robot/{robot_id}/{action}
+        # Extract fleet_name & robot_id from topic: rmf/{fleet_name}/robot/{robot_id}/{action}
         parts = topic.split("/")
         if len(parts) >= 5 and parts[2] == "robot":
+            fleet_name = parts[1]
             robot_id = parts[3]
             action = parts[4]
         else:
+            fleet_name = payload.get("fleet_name", self.fleet_name)
             robot_id = payload.get("robot_id") or payload.get("id", "unknown")
             action = parts[-1]
 
         # Dispatch to respective handlers
         if action == "register":
-            self._handle_register(robot_id, payload)
+            self._handle_register(robot_id, fleet_name, payload)
         elif action == "heartbeat":
-            self._handle_heartbeat(robot_id, payload)
+            self._handle_heartbeat(robot_id, fleet_name, payload)
         elif action == "deregister":
-            self._handle_deregister(robot_id, payload)
+            self._handle_deregister(robot_id, fleet_name, payload)
         elif action == "status":
-            self._handle_status(robot_id, payload)
+            self._handle_status(robot_id, fleet_name, payload)
         elif action == "command_result":
-            self._handle_command_result(robot_id, payload)
+            self._handle_command_result(robot_id, fleet_name, payload)
 
     # ==========================================================================
     # Handler 1: Robot Registration (開機註冊)
     # ==========================================================================
-    def _handle_register(self, robot_id: str, payload: Dict[str, Any]):
-        print(f"[REGISTER] Received registration request for robot '{robot_id}': {payload}")
+    def _handle_register(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
+        print(f"[REGISTER] Received registration request for robot '{robot_id}' in fleet '{fleet_name}': {payload}")
 
         loc = payload.get("initial_location", {})
         x = float(loc.get("x", 0.0))
@@ -210,7 +209,7 @@ class MqttFleetAdapter:
             # Check if already registered
             if robot_id in self.robots and self.robots[robot_id].is_online:
                 print(f"[REGISTER] Robot '{robot_id}' already registered. Acknowledging again.")
-                self._send_register_ack(robot_id, success=True, msg="Robot already registered")
+                self._send_register_ack(robot_id, success=True, msg="Robot already registered", fleet_name=fleet_name)
                 return
 
             # Live Open-RMF Registration
@@ -232,12 +231,13 @@ class MqttFleetAdapter:
                     print(f"[RMF] Successfully registered '{robot_id}' into Open-RMF fleet handle!")
                 except Exception as e:
                     print(f"[ERROR] Failed to add robot to RMF core: {e}")
-                    self._send_register_ack(robot_id, success=False, msg=str(e))
+                    self._send_register_ack(robot_id, success=False, msg=str(e), fleet_name=fleet_name)
                     return
 
             # Store in Managed Robots dictionary
             managed_robot = ManagedRobot(
                 name=robot_id,
+                fleet_name=fleet_name,
                 map_name=level_name,
                 position=initial_pos,
                 battery_soc=1.0,
@@ -247,32 +247,33 @@ class MqttFleetAdapter:
             self.robots[robot_id] = managed_robot
 
         # Send ACK back to AMR
-        self._send_register_ack(robot_id, success=True, msg="Registered successfully")
+        self._send_register_ack(robot_id, success=True, msg="Registered successfully", fleet_name=fleet_name)
 
-    def _send_register_ack(self, robot_id: str, success: bool, msg: str, status: Optional[str] = None):
-        ack_topic = f"{self.topic_prefix}/{self.fleet_name}/robot/{robot_id}/register_ack"
+    def _send_register_ack(self, robot_id: str, success: bool, msg: str, status: Optional[str] = None, fleet_name: Optional[str] = None):
+        target_fleet = fleet_name or self.fleet_name
+        ack_topic = f"{self.topic_prefix}/{target_fleet}/robot/{robot_id}/register_ack"
         final_status = status if status else ("success" if success else "error")
         ack_payload = {
             "robot_id": robot_id,
             "status": final_status,
             "message": msg,
-            "assigned_fleet": self.fleet_name,
+            "assigned_fleet": target_fleet,
             "server_time": time.time(),
         }
         self.mqtt_client.publish(ack_topic, json.dumps(ack_payload), qos=1)
-        print(f"[REGISTER] Sent ACK to '{robot_id}': {ack_payload}")
+        print(f"[REGISTER] Sent ACK to '{robot_id}' on {ack_topic}: {ack_payload}")
 
     # ==========================================================================
     # Handler 2: Periodic Heartbeat (週期性遙測心跳)
     # ==========================================================================
-    def _handle_heartbeat(self, robot_id: str, payload: Dict[str, Any]):
+    def _handle_heartbeat(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         robot_id = payload.get("robot_id") or robot_id
         with self.lock:
             robot = self.robots.get(robot_id)
             if not robot:
                 # Robot sent heartbeat without registering first (e.g. FA late startup or restart)
-                print(f"[WARN] Heartbeat from unregistered robot '{robot_id}'. Requesting re-registration...")
-                self._send_register_ack(robot_id, success=False, msg="Robot not recognized by FA, please re-register", status="require_register")
+                print(f"[WARN] Heartbeat from unregistered robot '{robot_id}' ({fleet_name}). Requesting re-registration...")
+                self._send_register_ack(robot_id, success=False, msg="Robot not recognized by FA, please re-register", status="require_register", fleet_name=fleet_name)
                 return
 
             # Update telemetry
@@ -324,8 +325,8 @@ class MqttFleetAdapter:
     # ==========================================================================
     # Handler 3: Deregister & Status (正常離線與異常斷線 LWT)
     # ==========================================================================
-    def _handle_deregister(self, robot_id: str, payload: Dict[str, Any]):
-        print(f"[DEREGISTER] Robot '{robot_id}' requested deregistration: {payload}")
+    def _handle_deregister(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
+        print(f"[DEREGISTER] Robot '{robot_id}' in '{fleet_name}' requested deregistration: {payload}")
         with self.lock:
             if robot_id in self.robots:
                 robot = self.robots[robot_id]
@@ -339,19 +340,19 @@ class MqttFleetAdapter:
                 del self.robots[robot_id]
                 print(f"[DEREGISTER] Robot '{robot_id}' cleanly removed from active fleet.")
 
-    def _handle_status(self, robot_id: str, payload: Dict[str, Any]):
+    def _handle_status(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         status = payload.get("status", "unknown")
-        print(f"[STATUS/LWT] Robot '{robot_id}' reported status: {status}")
+        print(f"[STATUS/LWT] Robot '{robot_id}' ({fleet_name}) reported status: {status}")
         if status in ["offline", "disconnected"]:
             with self.lock:
                 if robot_id in self.robots:
                     self.robots[robot_id].is_online = False
                     print(f"[ALERT] Robot '{robot_id}' marked OFFLINE due to status message.")
 
-    def _handle_command_result(self, robot_id: str, payload: Dict[str, Any]):
+    def _handle_command_result(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         cmd_id = payload.get("cmd_id")
         status = payload.get("status", "completed")
-        print(f"[CMD_RESULT] Robot '{robot_id}' reported cmd_id {cmd_id} status: {status}")
+        print(f"[CMD_RESULT] Robot '{robot_id}' ({fleet_name}) reported cmd_id {cmd_id} status: {status}")
 
         with self.lock:
             robot = self.robots.get(robot_id)
@@ -385,7 +386,7 @@ class MqttFleetAdapter:
             dock_name = getattr(destination, "dock", None)
             speed_limit = getattr(destination, "speed_limit", None)
 
-            cmd_topic = f"{self.topic_prefix}/{self.fleet_name}/robot/{robot_id}/command"
+            cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
                 "cmd_id": robot.cmd_id,
@@ -411,7 +412,7 @@ class MqttFleetAdapter:
                 return
 
             robot.cmd_id += 1
-            cmd_topic = f"{self.topic_prefix}/{self.fleet_name}/robot/{robot_id}/command"
+            cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
                 "cmd_id": robot.cmd_id,

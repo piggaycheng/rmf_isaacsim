@@ -10,6 +10,7 @@ import {
   isWaypointInGraph,
   getWaypointGraphIndices,
   GRAPH_PALETTE,
+  DiscoveredRobot,
 } from '@/types/rmf';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -41,6 +42,9 @@ import {
   Info,
   Bot,
   MapPin,
+  Wifi,
+  Sparkles,
+  RefreshCw,
 } from 'lucide-react';
 
 interface FleetAdapterManagerProps {
@@ -118,6 +122,11 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
     (w) => w.type === 'charger' && !isWaypointInGraph(w, currentModalGraphIdx, lanes)
   );
 
+  // Discovered Robots State (Auto-discovered via EMQX MQTT)
+  const [discoveredRobots, setDiscoveredRobots] = useState<DiscoveredRobot[]>([]);
+  const [isAdopting, setIsAdopting] = useState<boolean>(false);
+  const [mqttScanning, setMqttScanning] = useState<boolean>(true);
+
   // Fetch adapters from server
   const fetchAdapters = async () => {
     try {
@@ -133,8 +142,86 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
     }
   };
 
+  // Fetch auto-discovered robots from EMQX MQTT
+  const fetchDiscovered = async () => {
+    try {
+      const res = await fetch('/api/discovered-robots');
+      if (res.ok) {
+        const data = await res.json();
+        setDiscoveredRobots(data.discovered || []);
+        setMqttScanning(Boolean(data.mqtt_connected));
+      }
+    } catch (e) {
+      console.warn('Failed to fetch discovered robots:', e);
+    }
+  };
+
+  // One-click adopt single robot
+  const handleAdoptRobot = async (
+    robotId: string,
+    fleetName: string,
+    action: 'create_new_fleet' | 'adopt_to_existing',
+    adapterId?: string
+  ) => {
+    setIsAdopting(true);
+    try {
+      const res = await fetch('/api/discovered-robots/adopt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          robot_id: robotId,
+          fleet_name: fleetName,
+          action,
+          adapter_id: adapterId,
+          graph_idx: 0,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        showToast(data.message || `車輛 '${robotId}' 已成功納管！`);
+        fetchAdapters();
+        fetchDiscovered();
+      } else {
+        showToast(data.message || '納管操作失敗');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('發送納管請求失敗');
+    } finally {
+      setIsAdopting(false);
+    }
+  };
+
+  // One-click batch adopt all unassigned robots
+  const handleBatchAdoptAll = async () => {
+    setIsAdopting(true);
+    try {
+      const res = await fetch('/api/discovered-robots/batch-adopt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (res.ok && (data.status === 'success' || data.status === 'ok')) {
+        showToast(data.message || '批次納管完成！');
+        fetchAdapters();
+        fetchDiscovered();
+      } else {
+        showToast(data.message || '批次納管失敗');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('發送批次納管請求失敗');
+    } finally {
+      setIsAdopting(false);
+    }
+  };
+
   useEffect(() => {
     fetchAdapters();
+    fetchDiscovered();
+    // Poll discovered robots every 2 seconds for real-time responsiveness
+    const interval = setInterval(fetchDiscovered, 2000);
+    return () => clearInterval(interval);
   }, []);
 
   const showToast = (msg: string) => {
@@ -223,29 +310,55 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
     );
   };
 
-  // Quick import from detected live robots
+  // Quick import from detected live robots & auto-discovered robots
   const handleImportLiveRobots = () => {
     const fleetName = formData.fleet_name || '';
-    const matching = robots.filter(
-      (r) =>
-        (!fleetName || r.fleet === fleetName || r.fleet.toLowerCase().includes(fleetName.toLowerCase())) &&
-        !robotConfigs.some((c) => c.name === r.id)
-    );
-    if (matching.length === 0) return;
+    const candidateNames = new Set<string>();
+    const newConfigs: AdapterRobotConfig[] = [];
 
     const defPark = formData.default_parking || activeParkingWaypoints[0]?.name || 'parking_1';
     const defCharge = formData.default_charger || activeChargerWaypoints[0]?.name || 'charger_1';
 
-    const newConfigs: AdapterRobotConfig[] = matching.map((r, i) => {
-      const idx = robotConfigs.length + i;
-      return {
-        name: r.id,
-        parking_waypoint: activeParkingWaypoints[idx]?.name || defPark,
-        charger_waypoint: activeChargerWaypoints[idx]?.name || defCharge,
-      };
-    });
+    // 1. Check auto-discovered MQTT robots
+    discoveredRobots
+      .filter(
+        (r) =>
+          (!fleetName || r.fleet_name === fleetName || r.fleet_name.toLowerCase().includes(fleetName.toLowerCase())) &&
+          !robotConfigs.some((c) => c.name === r.robot_id)
+      )
+      .forEach((r) => {
+        if (!candidateNames.has(r.robot_id)) {
+          candidateNames.add(r.robot_id);
+          const idx = robotConfigs.length + newConfigs.length;
+          newConfigs.push({
+            name: r.robot_id,
+            parking_waypoint: activeParkingWaypoints[idx]?.name || r.default_parking || defPark,
+            charger_waypoint: activeChargerWaypoints[idx]?.name || r.default_charger || defCharge,
+          });
+        }
+      });
 
-    setRobotConfigs([...robotConfigs, ...newConfigs]);
+    // 2. Check live ROS2 robots
+    robots
+      .filter(
+        (r) =>
+          (!fleetName || r.fleet === fleetName || r.fleet.toLowerCase().includes(fleetName.toLowerCase())) &&
+          !robotConfigs.some((c) => c.name === r.id) &&
+          !candidateNames.has(r.id)
+      )
+      .forEach((r) => {
+        candidateNames.add(r.id);
+        const idx = robotConfigs.length + newConfigs.length;
+        newConfigs.push({
+          name: r.id,
+          parking_waypoint: activeParkingWaypoints[idx]?.name || defPark,
+          charger_waypoint: activeChargerWaypoints[idx]?.name || defCharge,
+        });
+      });
+
+    if (newConfigs.length > 0) {
+      setRobotConfigs([...robotConfigs, ...newConfigs]);
+    }
   };
 
   // Submit Create or Edit
@@ -539,6 +652,180 @@ ${
             Graph 0 ~ Graph {Math.max(0, graphs.length - 1)} 可供各車隊指派
           </p>
         </div>
+      </div>
+
+      {/* MQTT Real-time Auto-Discovery Radar */}
+      <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg backdrop-blur-sm relative overflow-hidden">
+        {/* Glow ambient background effect */}
+        <div className="absolute top-0 right-0 w-64 h-32 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none" />
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center space-x-2.5">
+              <div className="relative flex items-center justify-center">
+                <Radio className="w-5 h-5 text-cyan-400" />
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+              </div>
+              <h3 className="font-bold text-sm sm:text-base text-slate-100 flex items-center gap-2">
+                <span>MQTT 車輛自動探索 (Live Auto-Discovery)</span>
+                {discoveredRobots.filter((r) => !r.is_adopted).length > 0 && (
+                  <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[11px] font-semibold">
+                    發現 {discoveredRobots.filter((r) => !r.is_adopted).length} 台待納管 AMR
+                  </Badge>
+                )}
+              </h3>
+            </div>
+            <p className="text-xs text-slate-400">
+              即時掃描 EMQX Broker (<code className="text-slate-300 font-mono text-[11px]">1883</code>) 上廣播 <code className="text-cyan-300/80 font-mono text-[11px]">rmf/+/robot/+</code> 的車載系統，支援一鍵建立車隊或納管入網。
+            </p>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={fetchDiscovered}
+              className="h-8 text-xs bg-slate-950 border-slate-800 text-slate-300 hover:text-white"
+            >
+              <RefreshCw className="w-3.5 h-3.5 mr-1" />
+              重新掃描
+            </Button>
+
+            {discoveredRobots.filter((r) => !r.is_adopted).length > 0 && (
+              <Button
+                type="button"
+                size="sm"
+                disabled={isAdopting}
+                onClick={handleBatchAdoptAll}
+                className="h-8 text-xs bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-medium shadow-md shadow-cyan-950"
+              >
+                <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+                {isAdopting ? '正在納管...' : `一鍵全部納管 (${discoveredRobots.filter((r) => !r.is_adopted).length} 台)`}
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Discovered Robots Cards */}
+        {discoveredRobots.length === 0 ? (
+          <div className="py-6 px-4 rounded-xl border border-dashed border-slate-800/80 bg-slate-950/40 text-center space-y-1">
+            <p className="text-xs text-slate-400 font-medium">
+              目前尚未偵測到向 EMQX 發布 /register 的車載系統
+            </p>
+            <p className="text-[11px] text-slate-500">
+              當 AMR 或模擬車啟動時，系統將自動擷取其車隊名稱 (fleet_name)、座標與幾何規格。
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+            {discoveredRobots.map((robot) => {
+              const matchingAdapter = adapters.find((a) => a.fleet_name === robot.fleet_name);
+              const isAdopted = robot.is_adopted;
+
+              return (
+                <div
+                  key={`${robot.fleet_name}_${robot.robot_id}`}
+                  className={`rounded-xl border p-3.5 space-y-3 transition-all ${
+                    isAdopted
+                      ? 'bg-slate-950/60 border-slate-800/80 hover:border-slate-700'
+                      : 'bg-gradient-to-b from-slate-900 to-slate-950 border-amber-500/40 shadow-sm shadow-amber-950/20 hover:border-amber-500/70'
+                  }`}
+                >
+                  {/* Robot Header */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center space-x-2">
+                        <Bot className="w-4 h-4 text-cyan-400" />
+                        <span className="font-bold text-sm text-slate-100 font-mono">
+                          {robot.robot_id}
+                        </span>
+                      </div>
+                      <div className="flex items-center space-x-1.5 text-[11px]">
+                        <span className="text-slate-400">車隊標籤:</span>
+                        <span className="font-mono text-cyan-300 px-1.5 py-0.2 rounded bg-cyan-950/60 border border-cyan-800/50 text-[10px]">
+                          {robot.fleet_name}
+                        </span>
+                      </div>
+                    </div>
+
+                    {isAdopted ? (
+                      <Badge className="bg-emerald-500/15 text-emerald-300 border-emerald-500/30 text-[10px] flex items-center space-x-1">
+                        <Check className="w-3 h-3 mr-0.5" />
+                        <span>已納管</span>
+                      </Badge>
+                    ) : (
+                      <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[10px] flex items-center space-x-1 animate-pulse">
+                        <Zap className="w-3 h-3 mr-0.5" />
+                        <span>待納管</span>
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* Robot Specs & Telemetry */}
+                  <div className="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/70 rounded-lg p-2 border border-slate-800/60">
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">即時坐標</span>
+                      <span className="font-mono text-slate-200">
+                        ({robot.x.toFixed(2)}, {robot.y.toFixed(2)})
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">電池電量</span>
+                      <span className={`font-mono font-medium ${robot.battery > 30 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {robot.battery.toFixed(0)}%
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">朝向角 (Yaw)</span>
+                      <span className="font-mono text-slate-300">
+                        {(robot.yaw * 180 / Math.PI).toFixed(1)}°
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">連線信號</span>
+                      <span className="text-emerald-400 text-[10px] flex items-center">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse" />
+                        良好 (即時)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Actions / Adoption status */}
+                  <div className="pt-1">
+                    {isAdopted ? (
+                      <div className="text-[11px] text-slate-400 flex items-center justify-between">
+                        <span>所屬車隊：<strong className="text-slate-200">{robot.adopted_info?.adapter_name || robot.fleet_name}</strong></span>
+                      </div>
+                    ) : matchingAdapter ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={isAdopting}
+                        onClick={() => handleAdoptRobot(robot.robot_id, robot.fleet_name, 'adopt_to_existing', matchingAdapter.id)}
+                        className="w-full h-7 text-xs bg-cyan-900/80 hover:bg-cyan-800 border border-cyan-700 text-cyan-200"
+                      >
+                        <Plus className="w-3 h-3 mr-1" />
+                        加入現有車隊 ({matchingAdapter.name})
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={isAdopting}
+                        onClick={() => handleAdoptRobot(robot.robot_id, robot.fleet_name, 'create_new_fleet')}
+                        className="w-full h-7 text-xs bg-amber-600 hover:bg-amber-500 text-slate-950 font-semibold"
+                      >
+                        <Sparkles className="w-3 h-3 mr-1" />
+                        一鍵建立車隊「{robot.fleet_name}」並納管
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Filter and Search Bar */}
@@ -1169,22 +1456,29 @@ ${
               <div className="flex items-center space-x-1.5">
                 {(() => {
                   const fleetName = formData.fleet_name || '';
-                  const matching = robots.filter(
+                  const matchingLive = robots.filter(
                     (r) =>
                       (!fleetName || r.fleet === fleetName || r.fleet.toLowerCase().includes(fleetName.toLowerCase())) &&
                       !robotConfigs.some((c) => c.name === r.id)
                   );
-                  if (matching.length === 0) return null;
+                  const matchingDisc = discoveredRobots.filter(
+                    (r) =>
+                      (!fleetName || r.fleet_name === fleetName || r.fleet_name.toLowerCase().includes(fleetName.toLowerCase())) &&
+                      !robotConfigs.some((c) => c.name === r.robot_id)
+                  );
+                  const allCandidateIds = Array.from(new Set([...matchingLive.map(r => r.id), ...matchingDisc.map(r => r.robot_id)]));
+                  if (allCandidateIds.length === 0) return null;
                   return (
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       onClick={handleImportLiveRobots}
-                      className="h-7 text-xs bg-slate-900 border-slate-700 text-slate-300 hover:text-white"
-                      title="快速帶入目前連線中的車輛 ID"
+                      className="h-7 text-xs bg-slate-900 border-cyan-800/80 text-cyan-300 hover:text-white"
+                      title="快速帶入目前連線或 MQTT 探索到的車輛 ID"
                     >
-                      匯入在線車輛 ({matching.length})
+                      <Sparkles className="w-3 h-3 mr-1 text-cyan-400" />
+                      匯入在線車輛 ({allCandidateIds.length})
                     </Button>
                   );
                 })()}

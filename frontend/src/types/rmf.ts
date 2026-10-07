@@ -118,6 +118,38 @@ export interface FleetAdapter {
   logs?: string[];
 }
 
+export interface DiscoveredRobot {
+  robot_id: string;
+  fleet_name: string;
+  x: number;
+  y: number;
+  yaw: number;
+  battery: number;
+  status: string;
+  connection_status: 'online' | 'offline';
+  is_adopted: boolean;
+  adopted_info?: {
+    adapter_id: string;
+    adapter_name: string;
+    fleet_name: string;
+  } | null;
+  last_seen: number;
+  specs?: {
+    footprint_radius?: number;
+    max_linear_velocity?: number;
+    max_angular_velocity?: number;
+  };
+  initial_location?: {
+    x?: number;
+    y?: number;
+    yaw?: number;
+    level_name?: string;
+    waypoint_name?: string;
+  };
+  default_parking?: string;
+  default_charger?: string;
+}
+
 export interface Task {
   id: string;
   type: 'patrol' | 'delivery' | 'goto';

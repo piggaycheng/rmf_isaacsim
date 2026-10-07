@@ -9,6 +9,7 @@ from state import (
     active_connections,
     last_ros2_time,
     broadcast,
+    get_discovered_robots_list,
 )
 
 router = APIRouter(tags=["Fleet & Tasks"])
@@ -38,6 +39,10 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json({
             "type": "tasks",
             "tasks": current_tasks,
+        })
+        await websocket.send_json({
+            "type": "discovered_robots",
+            "discovered": get_discovered_robots_list(),
         })
         while True:
             data = await websocket.receive_text()

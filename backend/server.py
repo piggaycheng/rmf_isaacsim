@@ -15,6 +15,7 @@ from controller.fleet_controller import router as fleet_router, simulation_loop
 from controller.map_controller import router as map_router
 from controller.adapter_controller import router as adapter_router
 from controller.camera_controller import router as camera_router, mediamtx_watchdog_loop
+from controller.discovery_controller import router as discovery_router, discovery_watchdog_loop
 
 app = FastAPI(title="RMF Web Studio API Server")
 
@@ -31,12 +32,14 @@ app.include_router(fleet_router)
 app.include_router(map_router)
 app.include_router(adapter_router)
 app.include_router(camera_router)
+app.include_router(discovery_router)
 
 @app.on_event("startup")
 async def startup_event():
-    # 1. Background simulation and MediaMTX idle stream watchdog
+    # 1. Background simulation, MediaMTX watchdog, and MQTT robot auto-discovery
     asyncio.create_task(simulation_loop())
     asyncio.create_task(mediamtx_watchdog_loop())
+    asyncio.create_task(discovery_watchdog_loop())
 
     # 2. Start ROS 2 listener in background thread if available
     try:

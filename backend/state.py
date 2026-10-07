@@ -57,6 +57,9 @@ current_robots: Dict[str, Dict[str, Any]] = dict(DEFAULT_ROBOTS)
 
 current_tasks: List[Dict[str, Any]] = []
 
+# MQTT Auto-Discovered Robots (Live scanning from EMQX)
+discovered_robots: Dict[str, Dict[str, Any]] = {}
+
 active_connections: List[WebSocket] = []
 last_ros2_time: float = 0.0
 
@@ -66,6 +69,41 @@ async def broadcast(message: dict):
             await connection.send_json(message)
         except Exception:
             pass
+
+def get_discovered_robots_list() -> List[Dict[str, Any]]:
+    import time
+    adapters = load_fleet_adapters_data()
+    adopted_map: Dict[str, Dict[str, Any]] = {}
+    for a in adapters:
+        for r in a.get("robots", []):
+            r_name = r.get("name") if isinstance(r, dict) else str(r)
+            if r_name:
+                adopted_map[r_name] = {
+                    "adapter_id": a.get("id"),
+                    "adapter_name": a.get("name"),
+                    "fleet_name": a.get("fleet_name"),
+                }
+
+    wall_now = time.time()
+    result = []
+    for key, rob in list(discovered_robots.items()):
+        item = dict(rob)
+        r_id = item.get("robot_id", "")
+        if r_id in adopted_map:
+            item["is_adopted"] = True
+            item["adopted_info"] = adopted_map[r_id]
+        else:
+            item["is_adopted"] = False
+            item["adopted_info"] = None
+
+        last_seen = item.get("last_seen", 0)
+        if wall_now - last_seen > 15.0:
+            item["connection_status"] = "offline"
+        else:
+            item["connection_status"] = "online"
+
+        result.append(item)
+    return result
 
 # ==========================================
 # Helpers for SLAM Map
