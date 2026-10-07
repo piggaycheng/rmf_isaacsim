@@ -554,49 +554,26 @@ ${
 
   return (
     <div className="flex-1 flex flex-col bg-[#0b0f19] text-slate-100 overflow-y-auto p-6 space-y-6">
-      {/* Top Header & Actions */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-5">
-        <div>
-          <div className="flex items-center space-x-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-600 to-blue-500 flex items-center justify-center text-white shadow-lg shadow-cyan-950/50">
-              <Cpu className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center space-x-2">
-                <h1 className="text-xl font-bold tracking-tight text-slate-100">
-                  Fleet Adapter 車隊適配器管理
-                </h1>
-                <Badge className="bg-primary/20 text-primary border-primary/30 text-[10px]">
-                  Jazzy EasyFullControl
-                </Badge>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5">
-                管理與設定各 AMR/AGV 車隊的 Open-RMF 適配器，支援即時動態熱更換導航路網 (set_graph)
-              </p>
-            </div>
-          </div>
-        </div>
+      {/* Top Actions */}
+      <div className="flex items-center justify-end space-x-2.5 border-b border-slate-800 pb-4">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={fetchAdapters}
+          className="text-xs h-9 bg-slate-900 border-slate-800 hover:bg-slate-800 text-slate-300"
+        >
+          <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
+          重新整理由伺服器載入
+        </Button>
 
-        <div className="flex items-center space-x-2.5">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={fetchAdapters}
-            className="text-xs h-9 bg-slate-900 border-slate-800 hover:bg-slate-800 text-slate-300"
-          >
-            <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
-            重新整理由伺服器載入
-          </Button>
-
-          <Button
-            size="sm"
-            onClick={handleOpenCreate}
-            className="text-xs h-9 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-md shadow-primary/20"
-          >
-            <Plus className="w-3.5 h-3.5 mr-1.5" />
-            新增 Fleet Adapter
-          </Button>
-        </div>
+        <Button
+          size="sm"
+          onClick={handleOpenCreate}
+          className="text-xs h-9 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-md shadow-primary/20"
+        >
+          <Plus className="w-3.5 h-3.5 mr-1.5" />
+          新增 Fleet Adapter
+        </Button>
       </div>
 
       {/* Action Notification Toast */}

@@ -742,74 +742,6 @@ export function App() {
               </>
             )}
           </div>
-
-          {/* Save Status / Feedback */}
-          {saveToast && (
-            <span className="text-xs px-2.5 py-1 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center transition-all shadow-sm">
-              <Check className="w-3.5 h-3.5 mr-1 text-emerald-400" />
-              {saveToast}
-            </span>
-          )}
-
-          {/* Traffic Network Controls (Only shown in Edit Mode) */}
-          {mode === 'edit' && (
-            <>
-              <Button
-                size="sm"
-                className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50"
-                onClick={handleSaveMap}
-                disabled={isSaving}
-                title="儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)"
-              >
-                <Save className="w-3.5 h-3.5 mr-1" />
-                {isSaving ? '儲存中...' : '儲存路網'}
-              </Button>
-
-              <Button
-                size="sm"
-                variant={slamMap ? 'secondary' : 'outline'}
-                onClick={() => setImportModalOpen(true)}
-                title="上傳並顯示 ROS SLAM 雷達地圖 (.pgm + map.yaml)"
-              >
-                <FileUp className="w-3.5 h-3.5 mr-1 text-primary" />
-                {slamMap ? '已載入 SLAM 地圖' : '載入 SLAM 地圖'}
-              </Button>
-
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  setWaypoints(INITIAL_WAYPOINTS);
-                  setLanes(INITIAL_LANES);
-                  setRobots(INITIAL_ROBOTS);
-                }}
-                title="重設為範例路網"
-              >
-                <RotateCcw className="w-3.5 h-3.5 mr-1" />
-                範例路網
-              </Button>
-
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={handleExportBuildingYaml}
-                title="下載 Open-RMF 建築總圖 (building.yaml)"
-              >
-                <Download className="w-3.5 h-3.5 mr-1" />
-                building.yaml
-              </Button>
-
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={handleExportActiveNavYaml}
-                title={`下載 Open-RMF 車隊專用導航路網 (nav_graphs/${activeGraphIdx}.yaml)`}
-              >
-                <Download className="w-3.5 h-3.5 mr-1" />
-                Graph {activeGraphIdx}.yaml
-              </Button>
-            </>
-          )}
         </div>
       </header>
 
@@ -916,6 +848,83 @@ export function App() {
 
         {/* Center: Interactive Map Canvas */}
         <main className="flex-1 h-full relative flex flex-col">
+          {/* Top Actions Toolbar (Edit Mode Only - Above Graph Management Bar) */}
+          {mode === 'edit' && (
+            <div className="h-10 bg-[#0d1222] border-b border-slate-800 px-3 flex items-center justify-between z-10 flex-shrink-0">
+              {/* Left: Save Feedback Toast */}
+              <div className="flex items-center space-x-2">
+                {saveToast && (
+                  <span className="text-xs px-2.5 py-1 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center transition-all shadow-sm">
+                    <Check className="w-3.5 h-3.5 mr-1 text-emerald-400" />
+                    {saveToast}
+                  </span>
+                )}
+              </div>
+
+              {/* Right: Action Buttons */}
+              <div className="flex items-center space-x-2">
+                <Button
+                  size="sm"
+                  variant={slamMap ? 'secondary' : 'outline'}
+                  onClick={() => setImportModalOpen(true)}
+                  className="text-xs h-7 px-2.5"
+                  title="上傳並顯示 ROS SLAM 雷達地圖 (.pgm + map.yaml)"
+                >
+                  <FileUp className="w-3.5 h-3.5 mr-1 text-primary" />
+                  {slamMap ? '已載入 SLAM 地圖' : '載入 SLAM 地圖'}
+                </Button>
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setWaypoints(INITIAL_WAYPOINTS);
+                    setLanes(INITIAL_LANES);
+                    setRobots(INITIAL_ROBOTS);
+                  }}
+                  className="text-xs h-7 px-2.5"
+                  title="重設為範例路網"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 mr-1" />
+                  範例路網
+                </Button>
+
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={handleExportBuildingYaml}
+                  className="text-xs h-7 px-2.5"
+                  title="下載 Open-RMF 建築總圖 (building.yaml)"
+                >
+                  <Download className="w-3.5 h-3.5 mr-1" />
+                  building.yaml
+                </Button>
+
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={handleExportActiveNavYaml}
+                  className="text-xs h-7 px-2.5"
+                  title={`下載 Open-RMF 車隊專用導航路網 (nav_graphs/${activeGraphIdx}.yaml)`}
+                >
+                  <Download className="w-3.5 h-3.5 mr-1" />
+                  Graph {activeGraphIdx}.yaml
+                </Button>
+
+                <Button
+                  size="sm"
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50 text-xs h-7 px-2.5"
+                  onClick={handleSaveMap}
+                  disabled={isSaving}
+                  title="儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)"
+                >
+                  <Save className="w-3.5 h-3.5 mr-1" />
+                  {isSaving ? '儲存中...' : '儲存路網'}
+                </Button>
+              </div>
+            </div>
+          )}
+
           {/* Top Graph Management Bar (Edit Mode Only) */}
           {mode === 'edit' && (
             <div className="h-10 bg-[#0b101d] border-b border-slate-800 px-3 flex items-center justify-between z-10 select-none flex-shrink-0">
