@@ -145,7 +145,25 @@ class RMFService:
                 fleet_name = msg.name
                 for r in msg.robots:
                     r_id = r.name
-                    mode_str = "moving" if r.mode.mode == 2 else ("charging" if r.mode.mode == 3 else "idle")
+                    # Fuse Open-RMF task assignment and physical MQTT telemetry from discovered_robots
+                    disc = (
+                        state.discovered_robots.get(f"{fleet_name}_{r_id}")
+                        or state.discovered_robots.get(f"fleet1_{r_id}")
+                        or state.discovered_robots.get(f"fleet2_{r_id}")
+                        or state.discovered_robots.get(r_id)
+                    )
+                    phys_status = disc.get("status") if disc else None
+
+                    # If AMR reports moving physically, or RMF indicates mode 2, or has active task
+                    if phys_status == "moving" or r.mode.mode == 2 or (r.task_id and phys_status != "idle"):
+                        mode_str = "moving"
+                    elif phys_status == "charging" or r.mode.mode == 1 or r.mode.mode == 3:
+                        mode_str = "charging"
+                    elif r.task_id:
+                        mode_str = "moving"
+                    else:
+                        mode_str = "idle"
+
                     prev_robot = state.current_robots.get(r_id, {})
                     prev_task_id = prev_robot.get("task_id", "")
 

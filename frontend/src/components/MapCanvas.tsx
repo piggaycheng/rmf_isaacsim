@@ -448,11 +448,12 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.rotate(-robot.yaw); // Invert yaw due to screen Y inversion
 
         // Pulsing circle around robot
+        const isMoving = robot.status === 'moving';
         ctx.beginPath();
         ctx.arc(0, 0, 18, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(16, 185, 129, 0.2)'; // Emerald glow
+        ctx.fillStyle = isMoving ? 'rgba(6, 182, 212, 0.3)' : 'rgba(16, 185, 129, 0.2)';
         ctx.fill();
-        ctx.strokeStyle = '#10b981';
+        ctx.strokeStyle = isMoving ? '#06b6d4' : '#10b981';
         ctx.lineWidth = 2;
         ctx.stroke();
 
@@ -463,7 +464,7 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.lineTo(-6, 0);
         ctx.lineTo(-10, 9);
         ctx.closePath();
-        ctx.fillStyle = '#34d399';
+        ctx.fillStyle = isMoving ? '#22d3ee' : '#34d399';
         ctx.fill();
 
         ctx.restore();
@@ -475,10 +476,10 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.textAlign = 'center';
 
         // Background pill
-        const nameText = `${robot.name} (${Math.round(robot.battery)}%)`;
+        const nameText = `${robot.name} (${Math.round(robot.battery)}%) ${isMoving ? '▶ 運行中' : ''}`;
         const textWidth = ctx.measureText(nameText).width;
         ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-        ctx.strokeStyle = robot.battery > 30 ? '#10b981' : '#f43f5e';
+        ctx.strokeStyle = isMoving ? '#06b6d4' : (robot.battery > 30 ? '#10b981' : '#f43f5e');
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.roundRect(-textWidth / 2 - 6, -34, textWidth + 12, 16, 4);
