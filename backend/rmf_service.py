@@ -34,40 +34,41 @@ class RMFService:
     def start_background_processes(self):
         """Starts rmf_traffic_schedule, rmf_task_dispatcher and mqtt_fleet_adapter."""
         env = os.environ.copy()
-        
-        # 1. Start rmf_traffic_schedule if not already running
+
+        # Clean up any stale or defunct background processes first
         try:
-            check_schedule = subprocess.run(["pgrep", "-f", "rmf_traffic_schedule"], capture_output=True)
-            if check_schedule.returncode != 0:
-                print("[RMF Core] Starting rmf_traffic_schedule...")
-                self.schedule_process = subprocess.Popen(
-                    ["bash", "-c", "source /ros_entrypoint.sh && ros2 run rmf_traffic_ros2 rmf_traffic_schedule"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    env=env,
-                )
-                time.sleep(1.5)
-                print("[RMF Core] ✅ rmf_traffic_schedule started.")
-            else:
-                print("[RMF Core] rmf_traffic_schedule is already active.")
+            subprocess.run(["pkill", "-9", "-f", "rmf_traffic_schedule"], capture_output=True)
+            subprocess.run(["pkill", "-9", "-f", "rmf_task_dispatcher"], capture_output=True)
+            subprocess.run(["pkill", "-9", "-f", "mqtt_fleet_adapter.py"], capture_output=True)
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+        # 1. Start rmf_traffic_schedule
+        try:
+            print("[RMF Core] Starting rmf_traffic_schedule...")
+            self.schedule_process = subprocess.Popen(
+                ["bash", "-c", "source /ros_entrypoint.sh && ros2 run rmf_traffic_ros2 rmf_traffic_schedule"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            time.sleep(1.5)
+            print("[RMF Core] ✅ rmf_traffic_schedule started.")
         except Exception as e:
             print(f"[RMF Core ERROR] Failed to start rmf_traffic_schedule: {e}")
 
-        # 2. Start rmf_task_dispatcher if not already running
+        # 2. Start rmf_task_dispatcher
         try:
-            check_dispatcher = subprocess.run(["pgrep", "-f", "rmf_task_dispatcher"], capture_output=True)
-            if check_dispatcher.returncode != 0:
-                print("[RMF Core] Starting rmf_task_dispatcher...")
-                self.dispatcher_process = subprocess.Popen(
-                    ["bash", "-c", "source /ros_entrypoint.sh && ros2 run rmf_task_ros2 rmf_task_dispatcher"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    env=env,
-                )
-                time.sleep(1.5)
-                print("[RMF Core] ✅ rmf_task_dispatcher started.")
-            else:
-                print("[RMF Core] rmf_task_dispatcher is already active.")
+            print("[RMF Core] Starting rmf_task_dispatcher...")
+            self.dispatcher_process = subprocess.Popen(
+                ["bash", "-c", "source /ros_entrypoint.sh && ros2 run rmf_task_ros2 rmf_task_dispatcher"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            time.sleep(1.5)
+            print("[RMF Core] ✅ rmf_task_dispatcher started.")
         except Exception as e:
             print(f"[RMF Core ERROR] Failed to start rmf_task_dispatcher: {e}")
 

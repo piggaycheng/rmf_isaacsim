@@ -73,6 +73,8 @@ class ManagedRobot:
         self.current_execution = None
         self.target_position: Optional[np.ndarray] = None
         self.is_holding: bool = False
+        self.nav_retries: int = 0
+        self.last_cmd_payload: Optional[Dict[str, Any]] = None
 
 
 class MqttFleetAdapter:
@@ -116,6 +118,7 @@ class MqttFleetAdapter:
         # 2. Initialize Open-RMF EasyFullControl (if not in mock mode)
         self.adapter = None
         self.fleet_handle = None
+        self.fleet_handles: Dict[str, Any] = {}
         self.node = None
         if not self.mock_rmf:
             self._init_rmf()
@@ -246,15 +249,15 @@ class MqttFleetAdapter:
         y = float(loc.get("y", 0.0))
         yaw = float(loc.get("yaw", 0.0))
         level_name = loc.get("level_name", "L1")
-        fallback_charger = "wp_5" if fleet_name == "fleet2" else "wp_1"
+        fallback_charger = "wp_1"
         default_charger = payload.get("default_charger") or fallback_charger
         default_parking = payload.get("default_parking") or fallback_charger
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
         with self.lock:
             # Check if already registered
-            if robot_id in self.robots and self.robots[robot_id].is_online:
-                print(f"[REGISTER] Robot '{robot_id}' already registered. Acknowledging again.")
+            if robot_id in self.robots and self.robots[robot_id].is_online and (self.mock_rmf or self.robots[robot_id].update_handle is not None):
+                print(f"[REGISTER] Robot '{robot_id}' already registered with active RMF handle. Acknowledging again.")
                 self._send_register_ack(robot_id, success=True, msg="Robot already registered", fleet_name=fleet_name)
                 return
 
@@ -317,10 +320,10 @@ class MqttFleetAdapter:
         robot_id = payload.get("robot_id") or robot_id
         with self.lock:
             robot = self.robots.get(robot_id)
-            if not robot:
+            if not robot or (not self.mock_rmf and robot.update_handle is None):
                 # Robot sent heartbeat without registering first (e.g. FA late startup or restart)
-                print(f"[WARN] Heartbeat from unregistered robot '{robot_id}' ({fleet_name}). Requesting re-registration...")
-                self._send_register_ack(robot_id, success=False, msg="Robot not recognized by FA, please re-register", status="require_register", fleet_name=fleet_name)
+                print(f"[WARN] Heartbeat from robot '{robot_id}' without active RMF handle ({fleet_name}). Requesting registration...")
+                self._send_register_ack(robot_id, success=False, msg="Robot not registered in RMF, please register", status="require_register", fleet_name=fleet_name)
                 return
 
             # Update telemetry
@@ -345,9 +348,11 @@ class MqttFleetAdapter:
                 dy = robot.target_position[1] - y
                 dist = math.hypot(dx, dy)
 
-                # Arrived if within tolerance (<0.20m) or if robot transitioned to idle having finished this cmd
+                # Only mark completed via heartbeat if robot has stopped (status == 'idle') near destination.
+                # NEVER declare finished while status == 'moving', because that prematurely dispatches
+                # the next waypoint, interrupting active Nav2 execution and causing subsequent steps to abort!
                 cmd_matches = (reported_cmd_id is not None and reported_cmd_id == robot.cmd_id)
-                if (dist < 0.20) or (status == "idle" and cmd_matches):
+                if status == "idle" and (dist < 0.25 or (cmd_matches and dist < 0.40)):
                     print(f"[NAV] Robot '{robot_id}' completed cmd_id {robot.cmd_id} (dist: {dist:.3f}m, status: {status}). Finishing execution.")
                     try:
                         robot.current_execution.finished()
@@ -355,6 +360,8 @@ class MqttFleetAdapter:
                         print(f"[NAV NOTICE] Execution finish exception: {e}")
                     robot.current_execution = None
                     robot.target_position = None
+                    robot.last_cmd_payload = None
+                    robot.nav_retries = 0
 
             # Forward state update to Open-RMF core
             if not self.mock_rmf and robot.update_handle:
@@ -412,6 +419,22 @@ class MqttFleetAdapter:
                         print(f"[NOTICE] Finish callback notice: {e}")
                     robot.current_execution = None
                     robot.target_position = None
+                    robot.last_cmd_payload = None
+                    robot.nav_retries = 0
+                elif cmd_id == robot.cmd_id and status in ["failed", "aborted"]:
+                    print(f"[NAV WARN] Robot '{robot_id}' reported failure for cmd_id {cmd_id} (status: {status}).")
+                    if getattr(robot, "nav_retries", 0) < 2 and robot.last_cmd_payload:
+                        robot.nav_retries = getattr(robot, "nav_retries", 0) + 1
+                        print(f"[NAV RETRY] Scheduling retry for cmd_id {cmd_id} on '{robot_id}' (attempt {robot.nav_retries}/2) in 1.2s...")
+                        def retry_nav():
+                            with self.lock:
+                                if robot.current_execution and robot.cmd_id == cmd_id and robot.last_cmd_payload:
+                                    cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
+                                    payload_to_send = dict(robot.last_cmd_payload)
+                                    payload_to_send["timestamp"] = time.time()
+                                    self.mqtt_client.publish(cmd_topic, json.dumps(payload_to_send), qos=1)
+                                    print(f"[NAV RETRY] Re-dispatched cmd_id {cmd_id} to '{robot_id}'")
+                        threading.Timer(1.2, retry_nav).start()
 
     # ==========================================================================
     # RMF -> Robot Outbound Callbacks (調度下發指令)
@@ -430,18 +453,31 @@ class MqttFleetAdapter:
             dy = target_pos[1] - robot.position[1]
             dist = math.hypot(dx, dy)
 
-            # Filter in-place hold / responsive wait (< 0.20m):
-            # Do NOT dispatch downward MQTT command to AMR, and do NOT call finished() immediately.
-            # RMF EasyFullControl will safely hold the robot here until a new task is dispatched.
+            # If robot is already at destination (< 0.20m):
+            # Complete execution smoothly so Open-RMF knows this waypoint/step is fulfilled.
             if dist < 0.20:
-                print(f"[RMF -> AMR] In-place hold for '{robot_id}' at [{target_pos[0]:.2f}, {target_pos[1]:.2f}] (dist: {dist:.3f}m < 0.2m). Holding without downward MQTT command.")
+                print(f"[RMF -> AMR] Robot '{robot_id}' already at destination [{target_pos[0]:.2f}, {target_pos[1]:.2f}] (dist: {dist:.3f}m < 0.2m). Fulfilling in-place execution.")
                 robot.current_execution = execution
                 robot.target_position = target_pos
-                robot.is_holding = True
+                robot.is_holding = False
+
+                def finish_in_place():
+                    with self.lock:
+                        if robot.current_execution == execution:
+                            try:
+                                execution.finished()
+                                print(f"[NAV] Completed in-place navigation for '{robot_id}'.")
+                            except Exception as ex:
+                                print(f"[NAV NOTICE] In-place finish notice: {ex}")
+                            robot.current_execution = None
+                            robot.target_position = None
+
+                threading.Timer(0.3, finish_in_place).start()
                 return
 
             robot.is_holding = False
             robot.cmd_id += 1
+            robot.nav_retries = 0
             robot.current_execution = execution
             robot.target_position = target_pos
 
@@ -463,6 +499,7 @@ class MqttFleetAdapter:
                 "speed_limit": speed_limit,
                 "timestamp": time.time(),
             }
+            robot.last_cmd_payload = cmd_payload
 
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
             print(f"[RMF -> AMR] Dispatched NAVIGATE (cmd_id: {robot.cmd_id}) to '{robot_id}': target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}]")

@@ -11,7 +11,7 @@ rmf_fleet:
   profile:
     footprint: 0.35        # robot radius in meters
     vicinity: 0.65         # vicinity radius in meters
-  reversible: true         # whether robots can drive backwards
+  reversible: false        # whether robots can drive backwards
   battery_system:
     voltage: 24.0          # Volts
     capacity: 30.0         # Amp-hours
@@ -33,7 +33,7 @@ rmf_fleet:
     delivery: true
   actions: ["teleop"]
   finishing_request: "nothing" # Options: park, charge, nothing
-  responsive_wait: true
+  responsive_wait: false
   reassign_task_interval: 60 # seconds
 
   # Known robots (Pre-configured robots, optional. Dynamic robots can be added at runtime via MQTT)
