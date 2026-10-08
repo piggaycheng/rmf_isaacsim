@@ -40,6 +40,9 @@ services:
 
   # 2. RMF Web Studio 後端服務 (FastAPI + WebSocket + ROS 2 Bridge)
   backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: open-rmf:jazzy
     container_name: open_rmf_backend
     restart: unless-stopped
