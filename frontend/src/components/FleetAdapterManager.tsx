@@ -553,9 +553,9 @@ ${
   });
 
   return (
-    <div className="flex-1 flex flex-col bg-[#0b0f19] text-slate-100 overflow-y-auto p-6 space-y-6">
+    <div className="flex-1 min-h-0 bg-[#0b0f19] text-slate-100 overflow-y-auto p-4 sm:p-6 space-y-6">
       {/* Top Actions */}
-      <div className="flex items-center justify-end space-x-2.5 border-b border-slate-800 pb-4">
+      <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 border-b border-slate-800 pb-4">
         <Button
           size="sm"
           variant="outline"
@@ -636,28 +636,28 @@ ${
         {/* Glow ambient background effect */}
         <div className="absolute top-0 right-0 w-64 h-32 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none" />
 
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-1">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="space-y-1.5 min-w-0">
             <div className="flex items-center space-x-2.5">
-              <div className="relative flex items-center justify-center">
-                <Radio className="w-5 h-5 text-cyan-400" />
-                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+              <div className="relative flex items-center justify-center shrink-0 w-6 h-6">
+                <Radio className="w-5 h-5 text-cyan-400 relative z-10" />
+                <span className="absolute w-2.5 h-2.5 rounded-full bg-cyan-400/80 animate-ping pointer-events-none" />
               </div>
-              <h3 className="font-bold text-sm sm:text-base text-slate-100 flex items-center gap-2">
+              <h3 className="font-bold text-sm sm:text-base text-slate-100 flex flex-wrap items-center gap-2">
                 <span>MQTT 車輛自動探索 (Live Auto-Discovery)</span>
                 {discoveredRobots.filter((r) => !r.is_adopted).length > 0 && (
-                  <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[11px] font-semibold">
+                  <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[11px] font-semibold shrink-0">
                     發現 {discoveredRobots.filter((r) => !r.is_adopted).length} 台待納管 AMR
                   </Badge>
                 )}
               </h3>
             </div>
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-slate-400 break-words leading-relaxed">
               即時掃描 EMQX Broker (<code className="text-slate-300 font-mono text-[11px]">1883</code>) 上廣播 <code className="text-cyan-300/80 font-mono text-[11px]">rmf/+/robot/+</code> 的車載系統，支援一鍵建立車隊或納管入網。
             </p>
           </div>
 
-          <div className="flex items-center space-x-2">
+          <div className="flex flex-wrap items-center gap-2 lg:shrink-0 pt-1 lg:pt-0">
             <Button
               type="button"
               variant="outline"
@@ -703,36 +703,36 @@ ${
               return (
                 <div
                   key={`${robot.fleet_name}_${robot.robot_id}`}
-                  className={`rounded-xl border p-3.5 space-y-3 transition-all ${
+                  className={`rounded-xl border p-3.5 space-y-3 transition-all min-w-0 ${
                     isAdopted
                       ? 'bg-slate-950/60 border-slate-800/80 hover:border-slate-700'
                       : 'bg-gradient-to-b from-slate-900 to-slate-950 border-amber-500/40 shadow-sm shadow-amber-950/20 hover:border-amber-500/70'
                   }`}
                 >
                   {/* Robot Header */}
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center space-x-2">
-                        <Bot className="w-4 h-4 text-cyan-400" />
-                        <span className="font-bold text-sm text-slate-100 font-mono">
+                  <div className="flex items-start justify-between gap-2 min-w-0">
+                    <div className="space-y-0.5 min-w-0 flex-1">
+                      <div className="flex items-center space-x-2 min-w-0">
+                        <Bot className="w-4 h-4 text-cyan-400 shrink-0" />
+                        <span className="font-bold text-sm text-slate-100 font-mono truncate" title={robot.robot_id}>
                           {robot.robot_id}
                         </span>
                       </div>
-                      <div className="flex items-center space-x-1.5 text-[11px]">
-                        <span className="text-slate-400">車隊標籤:</span>
-                        <span className="font-mono text-cyan-300 px-1.5 py-0.2 rounded bg-cyan-950/60 border border-cyan-800/50 text-[10px]">
+                      <div className="flex items-center space-x-1.5 text-[11px] min-w-0">
+                        <span className="text-slate-400 shrink-0">車隊標籤:</span>
+                        <span className="font-mono text-cyan-300 px-1.5 py-0.5 rounded bg-cyan-950/60 border border-cyan-800/50 text-[10px] truncate max-w-[120px] sm:max-w-[160px]" title={robot.fleet_name}>
                           {robot.fleet_name}
                         </span>
                       </div>
                     </div>
 
                     {isAdopted ? (
-                      <Badge className="bg-emerald-500/15 text-emerald-300 border-emerald-500/30 text-[10px] flex items-center space-x-1">
+                      <Badge className="bg-emerald-500/15 text-emerald-300 border-emerald-500/30 text-[10px] flex items-center space-x-1 shrink-0">
                         <Check className="w-3 h-3 mr-0.5" />
                         <span>已納管</span>
                       </Badge>
                     ) : (
-                      <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[10px] flex items-center space-x-1 animate-pulse">
+                      <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[10px] flex items-center space-x-1 animate-pulse shrink-0">
                         <Zap className="w-3 h-3 mr-0.5" />
                         <span>待納管</span>
                       </Badge>
@@ -740,29 +740,29 @@ ${
                   </div>
 
                   {/* Robot Specs & Telemetry */}
-                  <div className="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/70 rounded-lg p-2 border border-slate-800/60">
-                    <div>
+                  <div className="grid grid-cols-2 gap-2 text-[11px] bg-slate-900/70 rounded-lg p-2.5 border border-slate-800/60">
+                    <div className="min-w-0">
                       <span className="text-slate-500 block text-[10px]">即時坐標</span>
-                      <span className="font-mono text-slate-200">
+                      <span className="font-mono text-slate-200 truncate block">
                         ({robot.x.toFixed(2)}, {robot.y.toFixed(2)})
                       </span>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <span className="text-slate-500 block text-[10px]">電池電量</span>
-                      <span className={`font-mono font-medium ${robot.battery > 30 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      <span className={`font-mono font-medium truncate block ${robot.battery > 30 ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {robot.battery.toFixed(0)}%
                       </span>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <span className="text-slate-500 block text-[10px]">朝向角 (Yaw)</span>
-                      <span className="font-mono text-slate-300">
+                      <span className="font-mono text-slate-300 truncate block">
                         {(robot.yaw * 180 / Math.PI).toFixed(1)}°
                       </span>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <span className="text-slate-500 block text-[10px]">連線信號</span>
-                      <span className="text-emerald-400 text-[10px] flex items-center">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse" />
+                      <span className="text-emerald-400 text-[10px] flex items-center truncate">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse shrink-0" />
                         良好 (即時)
                       </span>
                     </div>
@@ -771,8 +771,8 @@ ${
                   {/* Actions / Adoption status */}
                   <div className="pt-1">
                     {isAdopted ? (
-                      <div className="text-[11px] text-slate-400 flex items-center justify-between">
-                        <span>所屬車隊：<strong className="text-slate-200">{robot.adopted_info?.adapter_name || robot.fleet_name}</strong></span>
+                      <div className="text-[11px] text-slate-400 flex items-center justify-between min-w-0">
+                        <span className="truncate">所屬車隊：<strong className="text-slate-200">{robot.adopted_info?.adapter_name || robot.fleet_name}</strong></span>
                       </div>
                     ) : matchingAdapter ? (
                       <Button
@@ -780,10 +780,10 @@ ${
                         size="sm"
                         disabled={isAdopting}
                         onClick={() => handleAdoptRobot(robot.robot_id, robot.fleet_name, 'adopt_to_existing', matchingAdapter.id)}
-                        className="w-full h-7 text-xs bg-cyan-900/80 hover:bg-cyan-800 border border-cyan-700 text-cyan-200"
+                        className="w-full h-8 text-xs bg-cyan-900/80 hover:bg-cyan-800 border border-cyan-700 text-cyan-200 px-2"
                       >
-                        <Plus className="w-3 h-3 mr-1" />
-                        加入現有車隊 ({matchingAdapter.name})
+                        <Plus className="w-3 h-3 mr-1 shrink-0" />
+                        <span className="truncate">加入現有車隊 ({matchingAdapter.name})</span>
                       </Button>
                     ) : (
                       <Button
@@ -791,10 +791,10 @@ ${
                         size="sm"
                         disabled={isAdopting}
                         onClick={() => handleAdoptRobot(robot.robot_id, robot.fleet_name, 'create_new_fleet')}
-                        className="w-full h-7 text-xs bg-amber-600 hover:bg-amber-500 text-slate-950 font-semibold"
+                        className="w-full h-8 text-xs bg-amber-600 hover:bg-amber-500 text-slate-950 font-semibold px-2"
                       >
-                        <Sparkles className="w-3 h-3 mr-1" />
-                        一鍵建立車隊「{robot.fleet_name}」並納管
+                        <Sparkles className="w-3 h-3 mr-1 shrink-0" />
+                        <span className="truncate">一鍵建立車隊「{robot.fleet_name}」並納管</span>
                       </Button>
                     )}
                   </div>
