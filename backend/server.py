@@ -60,10 +60,11 @@ if os.path.exists(FRONTEND_DIST):
     app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="static")
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8088))
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         reload=True,
         reload_excludes=["saved_maps/*", "uploads/*", "*.png", "*.yaml", "*.json", "*.pgm"],
     )

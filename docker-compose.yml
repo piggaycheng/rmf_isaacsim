@@ -30,27 +30,26 @@ services:
       # X11 顯示傳發 (讓容器內的 Gazebo / RViz2 可以在本機螢幕顯示)
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-$HOME/.Xauthority}:/root/.Xauthority:rw
-      # 本機程式碼與前後端掛載 (主機修改，容器內即時生效)
+      # 本機自訂工作區與後端掛載 (主機修改，容器內即時生效)
       - ./workspace:/root/rmf_ws/src/custom_ws:rw
       - ./backend:/root/rmf_ws/backend:rw
-      - ./frontend:/root/rmf_ws/frontend:rw
 
     stdin_open: true
     tty: true
     command: bash
 
-  # 2. RMF Web Studio 前後端整合服務 (FastAPI + WebSocket + React Web)
-  web:
+  # 2. RMF Web Studio 後端服務 (FastAPI + WebSocket + ROS 2 Bridge)
+  backend:
     image: open-rmf:jazzy
-    container_name: open_rmf_web
+    container_name: open_rmf_backend
     restart: unless-stopped
     network_mode: host
     ipc: host
     environment:
       - ROS_DOMAIN_ID=0
+      - PORT=8088
     volumes:
       - ./backend:/root/rmf_ws/backend:rw
-      - ./frontend:/root/rmf_ws/frontend:rw
       - ./workspace:/root/rmf_ws/src/custom_ws:rw
     working_dir: /root/rmf_ws/backend
     command: python3 server.py
@@ -86,6 +85,19 @@ services:
     # - 1935: RTMP 串流
     # - 9997: MediaMTX API (http://localhost:9997/v3/paths/list)
     # - 8189/udp: WebRTC ICE 媒體數據傳輸
+
+  # 5. RMF Web Studio 前端開發服務 (Vite HMR)
+  frontend:
+    image: node:22-alpine
+    container_name: open_rmf_frontend
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - BACKEND_PORT=8088
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev"
 
 volumes:
   emqx_data:

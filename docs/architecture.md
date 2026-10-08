@@ -16,12 +16,15 @@ flowchart TD
         HostCode["本機專案目錄 (/home/yu/Documents/code/open_rmf)"]
     end
 
-    subgraph Docker ["Docker 環境 (open-rmf:jazzy / Ubuntu 24.04)"]
-        subgraph WebService ["Web 服務容器 (open_rmf_web)"]
-            FastAPI["FastAPI 伺服器 (Port 8000)"]
-            Static["React 前端靜態託管"]
-            WSServer["WebSocket 廣播 (/ws/fleet)"]
+    subgraph Docker ["Docker 環境"]
+        subgraph BackendService ["後端服務容器 (open_rmf_backend)"]
+            FastAPI["FastAPI 伺服器 (Port 8088)"]
+            WSServer["WebSocket 廣播 (/ws)"]
             ROS2Bridge["ROS 2 背景節點 (rclpy)"]
+        end
+
+        subgraph FrontendService ["前端開發容器 (open_rmf_frontend)"]
+            ViteDev["Vite Dev Server (Port 5173 / HMR)"]
         end
 
         subgraph CoreService ["RMF 核心容器 (open_rmf_jazzy)"]
@@ -31,9 +34,11 @@ flowchart TD
         end
     end
 
-    HostCode -->|"Volume 掛載 (./backend, ./frontend)"| FastAPI
+    HostCode -->|"Volume 掛載 (./backend)"| FastAPI
+    HostCode -->|"Volume 掛載 (./frontend)"| ViteDev
     HostCode -->|"Volume 掛載 (./workspace)"| RMFCore
-    Browser <-->|"HTTP / WebSocket (Port 8000)"| FastAPI
+    Browser <-->|"HTTP (Port 5173 / Vite HMR)"| ViteDev
+    ViteDev <-->|"反向代理 (/api, /ws)"| FastAPI
     Gazebo -->|"X11 顯示傳發 (/tmp/.X11-unix)"| Screen
     ROS2Bridge <-->|"ROS 2 Topics (/fleet_states)"| FleetAdapter
 ```
