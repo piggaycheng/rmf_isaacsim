@@ -144,21 +144,22 @@ def init_discovery_mqtt():
             discovered_robots[robot_key] = existing
 
             # Synchronize active robots to current_robots for real-time map canvas rendering
-            # Only update if ROS 2 /fleet_states is not actively driving the robot (prevent race condition)
             if existing.get("status") != "offline":
-                is_rmf_active = (time.time() - getattr(state, "last_ros2_time", 0.0)) < 2.5
-                if not is_rmf_active or robot_id not in current_robots:
-                    current_robots[robot_id] = {
-                        "id": robot_id,
-                        "name": robot_id,
-                        "fleet": fleet_name,
-                        "x": round(float(existing["x"]), 3),
-                        "y": round(float(existing["y"]), 3),
-                        "yaw": round(float(existing["yaw"]), 3),
-                        "battery": round(float(existing["battery"]), 1),
-                        "status": "moving" if existing.get("status") == "moving" else ("charging" if existing.get("status") == "charging" else "idle"),
-                        "current_task": "執行導航任務中" if existing.get("status") == "moving" else "在線待命中",
-                    }
+                prev_robot = current_robots.get(robot_id, {})
+                has_rmf_task = bool(prev_robot.get("task_id"))
+
+                current_robots[robot_id] = {
+                    "id": robot_id,
+                    "name": robot_id,
+                    "fleet": fleet_name,
+                    "x": round(float(existing["x"]), 3),
+                    "y": round(float(existing["y"]), 3),
+                    "yaw": round(float(existing["yaw"]), 3),
+                    "battery": round(float(existing["battery"]), 1),
+                    "status": "moving" if (existing.get("status") == "moving" or has_rmf_task) else ("charging" if existing.get("status") == "charging" else "idle"),
+                    "current_task": prev_robot.get("current_task") if has_rmf_task else ("執行導航任務中" if existing.get("status") == "moving" else "在線待命中"),
+                    "task_id": prev_robot.get("task_id", ""),
+                }
 
         except Exception as e:
             print(f"[DISCOVERY] Error parsing MQTT message: {e}")
