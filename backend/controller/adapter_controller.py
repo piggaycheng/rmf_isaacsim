@@ -145,6 +145,11 @@ async def fleet_adapter_action(adapter_id: str, payload: Dict[str, Any]):
 
     if action == "restart":
         adapter["status"] = "online"
+        try:
+            from rmf_service import rmf_service
+            rmf_service.restart_fleet_adapter()
+        except Exception as e:
+            print(f"[ERROR] Failed to restart fleet adapter process: {e}")
         append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' service reloaded.")
     elif action == "pause":
         adapter["status"] = "standby"

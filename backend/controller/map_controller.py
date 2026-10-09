@@ -183,6 +183,13 @@ async def save_map(req: MapSaveRequest):
             yaml.dump(g_data, f, allow_unicode=True, sort_keys=False)
         saved_graph_files.append(g_file)
 
+    if getattr(req, "restart_adapter", False):
+        try:
+            from rmf_service import rmf_service
+            rmf_service.restart_fleet_adapter()
+        except Exception as e:
+            print(f"[Map Save] Note: Fleet adapter reload: {e}")
+
     await broadcast({
         "type": "map_updated",
         "map": map_data

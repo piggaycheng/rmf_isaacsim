@@ -99,6 +99,38 @@ class RMFService:
         except Exception as e:
             print(f"[RMF FA ERROR] Failed to start mqtt_fleet_adapter: {e}")
 
+    def restart_fleet_adapter(self) -> bool:
+        """Kills and restarts mqtt_fleet_adapter to reload updated nav graphs from disk."""
+        env = os.environ.copy()
+        try:
+            print("[RMF FA] Restarting Open-RMF MQTT Fleet Adapter to reload nav graphs...")
+            subprocess.run(["pkill", "-9", "-f", "mqtt_fleet_adapter.py"], capture_output=True)
+            time.sleep(0.8)
+
+            adapter_script = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "../workspace/mqtt_fleet_adapter/mqtt_fleet_adapter.py")
+            )
+            if not os.path.exists(adapter_script):
+                adapter_script = "/root/rmf_ws/src/custom_ws/mqtt_fleet_adapter/mqtt_fleet_adapter.py"
+
+            if os.path.exists(adapter_script):
+                log_file = open("/tmp/adapter.log", "w")
+                self.adapter_process = subprocess.Popen(
+                    ["bash", "-c", f"source /ros_entrypoint.sh && python3 -u {adapter_script}"],
+                    stdout=log_file,
+                    stderr=log_file,
+                    env=env,
+                )
+                time.sleep(1.0)
+                print("[RMF FA] ✅ Open-RMF MQTT Fleet Adapter restarted successfully.")
+                append_adapter_log("system", "Fleet Adapter 重啟完成，已重新載入最新路網。")
+                return True
+        except Exception as e:
+            print(f"[RMF FA ERROR] Failed to restart mqtt_fleet_adapter: {e}")
+            append_adapter_log("system", f"Fleet Adapter 重啟失敗: {e}")
+            return False
+        return False
+
     def init_ros2_node(self):
         """Initializes ROS 2 node for /fleet_states and /task_api_requests."""
         try:

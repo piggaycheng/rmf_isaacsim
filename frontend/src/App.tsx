@@ -35,7 +35,6 @@ import {
   BoxSelect,
   Save,
   Check,
-  Globe,
   Video,
   Building2,
   Plus,
@@ -585,6 +584,7 @@ export function App() {
       waypoints,
       lanes,
       graphs,
+      restart_adapter: true,
     };
     try {
       // 1. Immediately cache in localStorage
@@ -598,7 +598,7 @@ export function App() {
       });
       const data = await res.json();
       if (res.ok) {
-        setSaveToast(`已儲存 (${waypoints.length} 點, ${lanes.length} 線, ${graphs.length} 路網)`);
+        setSaveToast(`已儲存並同步車隊路網 (${waypoints.length} 點, ${lanes.length} 線, ${graphs.length} 路網)`);
       } else {
         setSaveToast('儲存失敗');
       }
@@ -670,54 +670,50 @@ export function App() {
           {/* 1. World Map Tab (on the far left) */}
           <button
             onClick={() => handleSetMode('world')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
               mode === 'world'
                 ? 'bg-primary text-primary-foreground shadow'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Globe className="w-3.5 h-3.5" />
-            <span>🌐 全球廠區 (World Map)</span>
+            全球廠區 (World Map)
           </button>
 
           {/* 2. Monitor Mode (swapped to left of Edit) */}
           <button
             onClick={() => handleSetMode('monitor')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
               mode === 'monitor'
                 ? 'bg-primary text-primary-foreground shadow'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <Radio className="w-3.5 h-3.5" />
-            <span>📡 即時監控 (Monitor Mode)</span>
+            即時監控 (Monitor Mode)
           </button>
 
           {/* 3. Edit Mode (swapped to right of Monitor) */}
           <button
             onClick={() => handleSetMode('edit')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
               mode === 'edit'
                 ? 'bg-primary text-primary-foreground shadow'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <GitCommit className="w-3.5 h-3.5" />
-            <span>✏️ 編輯路網 (Edit Mode)</span>
+            編輯路網 (Edit Mode)
           </button>
 
           {/* 4. Fleet Adapter Management Tab */}
           <button
             onClick={() => handleSetMode('adapters')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
               mode === 'adapters'
                 ? 'bg-primary text-primary-foreground shadow'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
             title="管理與設定 Open-RMF 車隊適配器 (Fleet Adapters)"
           >
-            <Cpu className="w-3.5 h-3.5" />
-            <span>🤖 車隊適配器 (Adapters)</span>
+            車隊適配器 (Adapters)
           </button>
         </div>
 
@@ -1573,7 +1569,12 @@ export function App() {
             <div className="space-y-4">
               {/* Plant Cameras (MQTT Live On-Demand) */}
               {selectedPlant && selectedPlant.cameraTopic && (
-                <PlantCameraList plant={selectedPlant} defaultExpanded={false} />
+                <PlantCameraList
+                  plant={selectedPlant}
+                  compact={true}
+                  defaultExpanded={false}
+                  onClose={() => setSelectedPlant(null)}
+                />
               )}
 
               {/* Fleet Summary */}

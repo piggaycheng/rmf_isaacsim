@@ -12,18 +12,23 @@ import {
   Radio,
   ChevronDown,
   ChevronUp,
+  X,
 } from 'lucide-react';
 
 interface PlantCameraListProps {
   plant: PlantSite | null;
   className?: string;
   defaultExpanded?: boolean;
+  compact?: boolean;
+  onClose?: () => void;
 }
 
 export function PlantCameraList({
   plant,
   className = '',
   defaultExpanded = true,
+  compact = false,
+  onClose,
 }: PlantCameraListProps) {
   const {
     connectionStatus,
@@ -64,33 +69,33 @@ export function PlantCameraList({
   return (
     <div className={`bg-[#0d1424] border border-cyan-800/50 rounded-xl overflow-hidden shadow-lg ${className}`}>
       {/* Top Header / Bar */}
-      <div className="flex items-center justify-between px-3.5 py-2.5 bg-[#0f182c] border-b border-slate-800/80">
-        <div className="flex items-center space-x-2.5">
-          <div className="w-7 h-7 rounded-lg bg-cyan-500/20 text-cyan-400 flex items-center justify-center">
+      <div className={`flex items-center justify-between ${compact ? 'px-3 py-2 bg-[#0f182c]' : 'px-3.5 py-2.5 bg-[#0f182c]'} border-b border-slate-800/80`}>
+        <div className="flex items-center space-x-2.5 min-w-0 flex-1 mr-2">
+          <div className={`${compact ? 'w-6 h-6' : 'w-7 h-7'} rounded-lg bg-cyan-500/20 text-cyan-400 flex items-center justify-center shrink-0`}>
             <Video className="w-3.5 h-3.5" />
           </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className="text-xs font-bold text-slate-100">
-                廠區相機鏡頭列表
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-bold text-slate-100 truncate" title={plant.name}>
+                {compact ? (plant.name || '廠區相機鏡頭') : '廠區相機鏡頭列表'}
               </span>
-              <Badge variant="outline" className="text-[10px] border-cyan-600/40 text-cyan-400 font-mono">
-                {cameras.length} 支相機
+              <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-cyan-600/40 text-cyan-400 font-mono shrink-0">
+                {cameras.length} 支
               </Badge>
               {/* MQTT status badge */}
               <Badge
                 variant={connectionStatus === 'connected' ? 'success' : connectionStatus === 'connecting' ? 'warning' : 'secondary'}
-                className="text-[10px] flex items-center space-x-1"
+                className="text-[9px] px-1.5 py-0 flex items-center space-x-1 shrink-0"
               >
                 {connectionStatus === 'connected' ? (
                   <>
                     <Wifi className="w-3 h-3 mr-0.5 text-emerald-400" />
-                    <span>EMQX 已連線</span>
+                    <span>EMQX 連線</span>
                   </>
                 ) : connectionStatus === 'connecting' ? (
                   <>
                     <Radio className="w-3 h-3 mr-0.5 animate-pulse text-amber-400" />
-                    <span>連線中...</span>
+                    <span>連線中</span>
                   </>
                 ) : (
                   <>
@@ -101,11 +106,11 @@ export function PlantCameraList({
               </Badge>
             </div>
             {activeTopic && (
-              <p className="text-[10px] text-slate-400 font-mono mt-0.5">
-                訂閱主題: <span className="text-cyan-400 font-semibold">{activeTopic}</span>
-                {lastUpdated && (
+              <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
+                主題: <span className="text-cyan-400 font-semibold">{activeTopic}</span>
+                {lastUpdated && !compact && (
                   <span className="ml-2 text-slate-500">
-                    最後更新: {lastUpdated.toLocaleTimeString()}
+                    更新: {lastUpdated.toLocaleTimeString()}
                   </span>
                 )}
               </p>
@@ -113,38 +118,51 @@ export function PlantCameraList({
           </div>
         </div>
 
-        <button
-          onClick={() => setIsExpanded(!isExpanded)}
-          className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800 transition-colors"
-          title={isExpanded ? '收合相機列表' : '展開相機列表'}
-        >
-          {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-        </button>
+        <div className="flex items-center space-x-1 shrink-0">
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800 transition-colors"
+            title={isExpanded ? '收合相機列表' : '展開相機列表'}
+          >
+            {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="text-slate-400 hover:text-rose-400 p-1 rounded-md hover:bg-slate-800 transition-colors"
+              title="隱藏廠區相機"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Cameras Grid */}
       {isExpanded && (
-        <div className="p-3">
+        <div className={compact ? 'p-2.5' : 'p-3'}>
           {cameras.length === 0 ? (
-            <div className="text-center py-5 px-3 border border-dashed border-slate-800/80 rounded-lg">
-              <Radio className="w-5 h-5 mx-auto text-slate-500 animate-pulse mb-1.5" />
+            <div className={`text-center ${compact ? 'py-3.5 px-2' : 'py-5 px-3'} border border-dashed border-slate-800/80 rounded-lg`}>
+              <Radio className="w-4 h-4 mx-auto text-slate-500 animate-pulse mb-1" />
               <p className="text-xs text-slate-400 font-medium">
                 {connectionStatus === 'connected'
-                  ? '已訂閱主題，等待設備端發佈相機資訊...'
-                  : '正在連接 EMQX 訊息伺服器...'}
+                  ? '等待設備發佈相機資訊...'
+                  : '正在連接 EMQX...'}
               </p>
-              <p className="text-[11px] text-slate-500 mt-1">
-                （若設備已在該主題發佈 Retained Message，連線完成後將自動列出）
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                {compact
+                  ? '（發佈 Retained Message 後自動列出）'
+                  : '（若設備已在該主題發佈 Retained Message，連線完成後將自動列出）'}
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+            <div className={compact ? 'grid grid-cols-1 gap-2' : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5'}>
               {cameras.map((cam) => {
                 const displayName = cam.display_name || cam.name;
                 return (
                   <div
                     key={cam.name}
-                    className={`p-3 rounded-lg border transition-all flex flex-col justify-between ${
+                    className={`p-2.5 rounded-lg border transition-all flex flex-col justify-between ${
                       cam.enabled
                         ? 'bg-emerald-950/20 border-emerald-500/40 shadow-sm shadow-emerald-500/10'
                         : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
@@ -152,10 +170,10 @@ export function PlantCameraList({
                   >
                     <div>
                       {/* Title & Status */}
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center space-x-1.5">
+                      <div className="flex items-center justify-between mb-1.5 min-w-0">
+                        <div className="flex items-center space-x-1.5 min-w-0 flex-1 mr-2">
                           <span
-                            className={`w-2 h-2 rounded-full ${
+                            className={`w-2 h-2 rounded-full shrink-0 ${
                               cam.enabled ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'
                             }`}
                           />
@@ -165,9 +183,9 @@ export function PlantCameraList({
                         </div>
                         <Badge
                           variant={cam.enabled ? 'success' : 'outline'}
-                          className="text-[9px] px-1.5 py-0"
+                          className="text-[9px] px-1.5 py-0 shrink-0"
                         >
-                          {cam.enabled ? '串流中 (ON)' : '待機 (OFF)'}
+                          {cam.enabled ? '串流中' : '待機'}
                         </Badge>
                       </div>
 
@@ -195,8 +213,8 @@ export function PlantCameraList({
                         }`}
                         title="開啟即時畫面（自動啟動相機推流）"
                       >
-                        <Tv className="w-3.5 h-3.5 mr-1.5 text-cyan-200" />
-                        開啟即時畫面
+                        <Tv className="w-3.5 h-3.5 mr-1.5 text-cyan-200 shrink-0" />
+                        <span className="truncate">開啟即時畫面</span>
                       </Button>
                     </div>
                   </div>

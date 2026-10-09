@@ -559,11 +559,27 @@ ${
         <Button
           size="sm"
           variant="outline"
+          onClick={() => {
+            if (adapters.length > 0) {
+              handleAdapterAction(adapters[0].id, 'restart');
+            }
+          }}
+          className="text-xs h-9 bg-cyan-950/50 border-cyan-700/60 hover:bg-cyan-900/50 text-cyan-300 font-medium"
+          title="重新啟動 Open-RMF 車隊適配器進程以重新載入最新路網"
+        >
+          <RotateCcw className="w-3.5 h-3.5 mr-1.5 text-cyan-400" />
+          重載車隊服務 (同步最新路網)
+        </Button>
+
+        <Button
+          size="sm"
+          variant="outline"
           onClick={fetchAdapters}
           className="text-xs h-9 bg-slate-900 border-slate-800 hover:bg-slate-800 text-slate-300"
+          title="重新讀取目前車隊適配器設定"
         >
-          <RotateCcw className="w-3.5 h-3.5 mr-1.5" />
-          重新整理由伺服器載入
+          <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+          重新整理列表
         </Button>
 
         <Button
@@ -1098,6 +1114,17 @@ ${
                   </div>
 
                   <div className="flex items-center space-x-1.5">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs text-cyan-400 hover:text-cyan-300 hover:bg-cyan-950/30"
+                      onClick={() => handleAdapterAction(adapter.id, 'restart')}
+                      title="重啟車隊適配器（重新載入最新導航路網）"
+                    >
+                      <RotateCcw className="w-3 h-3 mr-1" />
+                      重啟服務
+                    </Button>
+
                     {adapter.status === 'online' ? (
                       <Button
                         size="sm"

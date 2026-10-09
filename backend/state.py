@@ -43,6 +43,7 @@ class MapSaveRequest(BaseModel):
     waypoints: List[Dict[str, Any]]
     lanes: List[Dict[str, Any]]
     graphs: Optional[List[Dict[str, Any]]] = None
+    restart_adapter: Optional[bool] = False
 
 class CameraDisableRequest(BaseModel):
     camera_name: str
