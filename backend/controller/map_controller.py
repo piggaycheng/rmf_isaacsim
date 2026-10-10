@@ -3,7 +3,8 @@ import json
 import io
 import yaml
 from typing import Dict, Any, Optional
-from fastapi import APIRouter, UploadFile, File
+from collections import Counter
+from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image
 
@@ -53,6 +54,12 @@ def get_available_graphs():
 
 @router.post("/api/map")
 async def save_map(req: MapSaveRequest):
+    # Open-RMF refuses to load a nav graph with duplicated waypoint names, which drops the adapter into mock mode.
+    name_counts = Counter(w.get("name", f"wp_{idx}") for idx, w in enumerate(req.waypoints))
+    duplicated = sorted(n for n, c in name_counts.items() if c > 1)
+    if duplicated:
+        raise HTTPException(status_code=400, detail=f"站點名稱重複：{', '.join(duplicated)}，請改名後再儲存")
+
     default_graphs = [{"id": 0, "name": "Graph 0 (預設車隊)", "color": "#38bdf8"}]
     graphs_list = req.graphs if req.graphs and len(req.graphs) > 0 else default_graphs
 

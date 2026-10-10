@@ -243,13 +243,18 @@ export function App() {
     // Debounced server auto-save
     const timer = setTimeout(async () => {
       try {
-        await fetch('/api/map', {
+        const res = await fetch('/api/map', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        setSaveToast('已自動存檔');
-        setTimeout(() => setSaveToast(null), 2000);
+        if (res.ok) {
+          setSaveToast('已自動存檔');
+        } else {
+          const data = await res.json().catch(() => ({}));
+          setSaveToast(`自動存檔失敗：${data.detail || res.status}`);
+        }
+        setTimeout(() => setSaveToast(null), res.ok ? 2000 : 4000);
       } catch (err) {
         // Fallback: local storage is already updated
       }
@@ -389,7 +394,11 @@ export function App() {
   // Editor Actions
   const handleAddWaypoint = (x: number, y: number, type: WaypointType) => {
     const id = `wp_${Date.now()}`;
-    const name = `${type === 'normal' ? 'wp' : type}_${waypoints.length + 1}`;
+    const prefix = `${type === 'normal' ? 'wp' : type}_`;
+    const usedNumbers = waypoints
+      .map((w) => (w.name.startsWith(prefix) ? Number(w.name.slice(prefix.length)) : NaN))
+      .filter((n) => Number.isInteger(n));
+    const name = `${prefix}${Math.max(0, ...usedNumbers) + 1}`;
     const newWp: Waypoint = {
       id,
       name,
@@ -607,7 +616,7 @@ export function App() {
       if (res.ok) {
         setSaveToast(`已儲存並同步車隊路網 (${waypoints.length} 點, ${lanes.length} 線, ${graphs.length} 路網)`);
       } else {
-        setSaveToast('儲存失敗');
+        setSaveToast(`儲存失敗：${data.detail || res.status}`);
       }
     } catch (e) {
       setSaveToast('已儲存至瀏覽器快取 (伺服器離線)');
