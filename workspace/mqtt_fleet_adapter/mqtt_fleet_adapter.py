@@ -70,9 +70,12 @@ class ManagedRobot:
 
         # Navigation & Activity Execution State
         self.cmd_id = 0
+        self.stop_cmd_id: Optional[int] = None
         self.current_execution = None
         self.target_position: Optional[np.ndarray] = None
         self.is_holding: bool = False
+        self.is_paused: bool = False
+        self.is_retrying: bool = False
         self.nav_retries: int = 0
         self.last_cmd_payload: Optional[Dict[str, Any]] = None
 
@@ -633,7 +636,7 @@ class MqttFleetAdapter:
                 return
 
             # Explicit check for STOP command confirmation (never complete previous navigation)
-            if cmd_id is not None and cmd_id == getattr(robot, "stop_cmd_id", None):
+            if cmd_id is not None and cmd_id == robot.stop_cmd_id:
                 print(f"[CMD_RESULT] Robot '{robot_id}' confirmed STOP execution (cmd_id: {cmd_id}, status: {status}).")
                 robot.status = "idle"
                 robot.stop_cmd_id = None
@@ -661,12 +664,12 @@ class MqttFleetAdapter:
                     robot.is_retrying = False
                 elif cmd_id == robot.cmd_id and status in ["failed", "aborted"]:
                     print(f"[NAV WARN] Robot '{robot_id}' reported failure for cmd_id {cmd_id} (status: {status}).")
-                    if getattr(robot, "is_retrying", False):
+                    if robot.is_retrying:
                         print(f"[NAV RETRY] Retry already in progress for '{robot_id}'. Ignoring duplicate failure report.")
                         return
 
-                    if getattr(robot, "nav_retries", 0) < 2 and robot.last_cmd_payload:
-                        robot.nav_retries = getattr(robot, "nav_retries", 0) + 1
+                    if robot.nav_retries < 2 and robot.last_cmd_payload:
+                        robot.nav_retries += 1
                         robot.is_retrying = True
                         print(f"[NAV RETRY] Scheduling retry for cmd_id {cmd_id} on '{robot_id}' (attempt {robot.nav_retries}/2) in 1.2s...")
                         def retry_nav():
@@ -680,13 +683,13 @@ class MqttFleetAdapter:
                                     print(f"[NAV RETRY] Re-dispatched cmd_id {cmd_id} to '{robot_id}'")
                         threading.Timer(1.2, retry_nav).start()
                     else:
-                        print(f"[NAV ERROR] Retries exhausted ({getattr(robot, 'nav_retries', 0)}/2) for cmd_id {cmd_id} on '{robot_id}'. Escalating failure to Open-RMF.")
+                        print(f"[NAV ERROR] Retries exhausted ({robot.nav_retries}/2) for cmd_id {cmd_id} on '{robot_id}'. Escalating failure to Open-RMF.")
                         robot.status = "failed"
                         robot.is_retrying = False
                         robot.last_cmd_payload = None
                         if not self.mock_rmf and robot.update_handle:
                             try:
-                                robot.update_handle.more().log_error(f"Navigation failed for cmd_id {cmd_id} after {getattr(robot, 'nav_retries', 0)} attempts.")
+                                robot.update_handle.more().log_error(f"Navigation failed for cmd_id {cmd_id} after {robot.nav_retries} attempts.")
                                 robot.update_handle.more().override_status("failed")
                                 robot.update_handle.more().replan()
                             except Exception as e:

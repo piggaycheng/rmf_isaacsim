@@ -29,7 +29,7 @@
 
 - [x] 執行中註銷或心跳逾時不會呼叫成功完成回呼。
 - [x] 任務及車輛狀態能明確反映中斷／離線，不會自動當成到站或進入下一動作。
-- [x] 重連恢復流程不會遺失、重複完成或無條件重送舊任務。
+- [ ] 重連恢復流程不會遺失、重複完成或無條件重送舊任務。（第二輪 review 未通過，見第 11 項 11.1）
 
 ## 2. 高優先級：LWT 失聯繞過 watchdog，離線車仍可能收到下派
 
@@ -48,21 +48,21 @@
 - `add_robot()` 回傳 `None`，或找不到 fleet handle 時，回 `error` ACK，不再誤報成功。
 - 已在運行環境確認重新註冊迴圈消失。
 
-**仍未完成：**
+**第一輪 review 列出的未完成項目（`fix/rmf-dispatch-issues` 已處理，殘留問題見第 11 項）：**
 
-- 重新註冊時固定呼叫 `update_handle.update(state, None)` 並把 `status` 設為 `idle`；若 MQTT 在執行中重連且 execution 仍有效，RMF 會短暫認為車輛沒有活動。應沿用 `current_execution.identifier`，並只在沒有 execution 時重設狀態。
-- 重新註冊沒有核對 fleet：同名車改用其他 fleet 時，會沿用舊 fleet 的 handle，卻把 `fleet_name` 改成新的（見第 10 項）。
-- `_on_rmf_navigate()`／`_on_rmf_action()` 仍未阻擋 offline 車輛；註銷後車仍在 RMF 核心，可能被派遣。
-- `_handle_deregister()` 仍呼叫 `current_execution.finished()`（見第 1 項）。
+- 重新註冊時保留有效 execution 的 activity：已修正。
+- 重新註冊依 `(fleet, robot_id)` 區分，不沿用其他 fleet 的 handle：已修正，但 `_get_robot()` 仍有跨 fleet fallback（11.2）。
+- 導航／動作回呼阻擋 offline 車輛：已加入，但拒絕時沒有回報 execution 結果（11.4）。
+- `_handle_deregister()` 不再呼叫 `finished()`：已修正，但保留的 execution 在車端重啟後無法收尾（11.1）。
 
 **驗收：**
 
 - [x] LWT 與心跳逾時產生一致的任務中斷結果，且不誤報成功。
 - [x] 重複 offline 訊息不會重複清理或觸發額外任務轉移。
-- [x] 離線車不能開始新命令；恢復連線後需有明確的狀態核對。
+- [ ] 離線車不能開始新命令；恢復連線後需有明確的狀態核對。（見第 11 項 11.1、11.4）
 - [x] 註銷後重新註冊沿用既有 RMF handle，不會因 `add_robot()` 被忽略而形成重新註冊迴圈。
 - [x] `add_robot()` 失敗或回傳 `None` 時回報錯誤，不誤報註冊成功。
-- [x] 執行中重連時保留目前 activity，不重設命令狀態。
+- [ ] 執行中重連時保留目前 activity，不重設命令狀態。（MQTT 重連已符合；車端重啟需改為中斷，見 11.1）
 
 ## 3. 高優先級：近距離導航忽略朝向、樓層與 docking
 
@@ -184,25 +184,99 @@
 - UI 的 pause／resume／restart／set-graph 只修改 JSON 與日誌，沒有控制運行中的 Adapter，卻回報已生效。
 - Adapter 啟動時各車隊共用同一份 YAML，主要只覆寫 fleet name 與 graph；不能假設 UI 儲存的個別速度、尺寸及其他參數已套用。
 
-**目前狀態（2026-10-10）：**
+**目前狀態（第二輪 review）：**
 
 - Adapter 啟動時已依各車隊的 `robot_radius`、`linear_velocity`、`angular_velocity` 產生 `/tmp/fleet_cfg_<fleet>.yaml`，覆寫 footprint、vicinity 與速度上限；其他參數仍共用基礎 YAML。
-- `_handle_register()` 找不到 fleet handle 時會回錯誤，但仍先執行 `self.fleet_handles.get(fleet_name) or self.fleet_handle`，未知 fleet 實際上仍會 fallback 到預設 handle。
-- 重新註冊時沿用既有 handle，但沒有核對 fleet 是否相同。
+- 註冊已先檢查 `configured_fleets`，且不再 fallback 到預設 fleet handle。
+- 車輛改以 `(fleet, robot_id)` 為 key，但 `_get_robot()` 仍有跨 fleet fallback（11.2）。
+- pause 沿用 `is_holding`，會吞掉完成回報（11.3）。
 
 **修正方向：** 導航、STOP、ACTION、遙測與結果統一使用正確 fleet／robot 身分；拒絕未配置的 fleet，而非靜默 fallback。管理操作需有真實執行與 ACK／錯誤回傳；若不能動態切圖，明確標示需重新載入，不要製造成功日誌。切圖或重啟需處理執行中的任務。
 
 **驗收：**
 
 - [x] fleet1／fleet2 的 ACTION 發往各自的 MQTT topic。
-- [x] 兩個 fleet 使用相同 robot ID 時仍完全隔離。
+- [ ] 兩個 fleet 使用相同 robot ID 時仍完全隔離。（見第 11 項 11.2）
 - [x] 未配置 fleet 不會被註冊到別的 fleet handle。
-- [x] pause 會影響實際可派遣性；resume／restart／set-graph 成功回應對應真實執行結果。
+- [ ] pause 會影響實際可派遣性；resume／restart／set-graph 成功回應對應真實執行結果。（pause 會吞掉完成回報，見 11.3）
 - [x] UI 車隊參數與 RMF 實際設定一致，或明確呈現尚未套用／不支援。
+
+## 11. 第二輪 review：`fix/rmf-dispatch-issues` 未修正完全與新問題
+
+檢查日期：2026-10-10。對象為分支 `fix/rmf-dispatch-issues`（至 `7adc512`）。`tests/test_rmf_dispatch_regression.py` 在 backend image 內 10 項全部通過，使用的 RMF API（`CommandExecution.okay()`、`more().override_status()`、`unstable_decommission()`／`unstable_recommission()`、`log_error()`、`replan()`）已確認存在；但下列情境未被測試涵蓋。
+
+### 11.1 高優先級：車端重啟後保留舊 execution，會卡單或誤報完成
+
+**位置：** `Adapter` 的 `_handle_deregister()`、`_handle_register()`（重新註冊分支）、`_handle_heartbeat()`。
+
+**問題：** 車端關閉時送出 `deregister`，Adapter 保留 `current_execution`。車端重啟後，原本的 Nav2 goal 已不存在，但重新註冊時 `execution.okay()` 仍為真，Adapter 沿用舊 activity 並把車標成 `moving`，也不重送命令：
+
+- 車不在目標 0.25 m 內：沒有任何結果會完成或中斷 execution，任務永久卡住。
+- 車剛好在目標 0.25 m 內：重啟後的心跳 `status=idle`、`current_cmd_id=None` 被視為有效，execution 被誤報成功。
+
+**修正方向：** 區分「車端重啟」與「MQTT 短暫斷線」。`deregister`（及可判斷為新 session 的註冊）代表車端命令狀態已遺失，應以非成功方式結束或交回 execution（例如 `replan()`／issue 回報，依實際 API），不可保留成 `moving`。單純 MQTT 重連才沿用原 execution；若車端無法提供 session 或目前命令資訊，需在 MQTT 協定中補上，並更新 `docs/amr_mqtt_interface_spec.md`。
+
+**驗收：**
+
+- [ ] 執行中 `deregister` → 重新註冊後，不會沿用舊 activity，也不會被心跳誤報完成。
+- [ ] 上述情境 RMF 會重規劃或呈現明確中斷狀態，不會永久卡單。
+- [ ] 單純 MQTT 斷線重連（未送 `deregister`）仍保留原 execution，不重送也不重複完成。
+
+### 11.2 中優先級：`_get_robot()` 跨 fleet fallback，破壞同名車隔離
+
+**位置：** `Adapter` 的 `_get_robot()`；呼叫者 `_handle_heartbeat()`、`_handle_deregister()`、`_handle_status()`、`_handle_command_result()` 及 RMF 回呼。
+
+**問題：** 找不到 `(fleet_name, robot_id)` 時，會回傳任一 fleet 中同名的車。例如未註冊的 fleet2/carter1 的心跳、`deregister` 或 `command_result`，會被套用到 fleet1/carter1，可能誤更新位置、誤標離線或誤完成命令。
+
+**修正方向：** 有 fleet 資訊時只做精確查找；移除跨 fleet fallback。找不到時心跳回 `require_register`，其他訊息忽略並記錄。
+
+**驗收：**
+
+- [ ] fleet2/carter1 未註冊時，其心跳、`deregister`、`status`、`command_result` 不會影響 fleet1/carter1。
+- [ ] 回歸測試涵蓋兩個 fleet 同名車同時存在與只存在一個的情境。
+
+### 11.3 中優先級：fleet pause 沿用 `is_holding`，吞掉完成回報
+
+**位置：** `Adapter` 的 `_handle_fleet_control()`、`_handle_register()`（paused fleet 分支）、`_handle_command_result()`、`_handle_heartbeat()`。
+
+**問題：** pause 把該 fleet 所有車的 `is_holding` 設為 `True`，但 `is_holding` 原本代表原地等待，`_handle_command_result()` 與心跳完成判定都會略過 `is_holding` 的車。pause 只 decommission（不再接新任務），進行中的命令仍可能完成；此時成功結果被忽略，resume 後也不會補完成，任務卡住。
+
+**修正方向：** pause 使用獨立旗標（如 `is_paused`），只影響新任務派遣，不影響既有命令的結果處理；`is_holding` 保留原語意。若 pause 需要讓車停下，應明確送 STOP 並依第 5 項處理。
+
+**驗收：**
+
+- [ ] pause 期間完成的命令仍能正確完成 execution。
+- [ ] pause 期間不接受新任務；resume 後恢復。
+- [ ] 原地等待（hold）行為不受影響。
+
+### 11.4 中優先級：拒絕 offline 車的導航／動作時沒有回報
+
+**位置：** `Adapter` 的 `_on_rmf_navigate()`、`_on_rmf_action()`。
+
+**問題：** 車離線時兩個回呼直接 `return`，既未保存也未結束 RMF 傳入的 execution；decommission 只阻擋新任務，進行中任務的下一步仍可能下派，此時 RMF 會永久等待該 execution。
+
+**修正方向：** 拒絕時以非成功方式明確回報（例如 `log_error`／`override_status`／`replan()`，或保存 execution 待恢復連線後再決定），不可靜默丟棄，也不可呼叫 `finished()`。
+
+**驗收：**
+
+- [ ] 離線時收到的導航／動作不會靜默遺失，RMF 端可觀察到中斷或等待原因。
+- [ ] 恢復連線後不會自動重送已被拒絕的命令，除非流程明確定義。
+
+### 11.5 低優先級：動態屬性未初始化
+
+**位置：** `ManagedRobot.__init__()`。
+
+**問題：** `is_retrying`、`stop_cmd_id` 只在執行中以動態方式加入，靠 `getattr(..., default)` 讀取，容易拼錯而不被發現。
+
+**修正方向：** 在 `ManagedRobot.__init__()` 初始化（`False`／`None`），並移除對應的 `getattr` 預設值。
+
+**驗收：**
+
+- [x] 所有狀態欄位都在 `__init__()` 宣告。
 
 ## 驗證與交付
 
-- [x] 為上述成功、失敗、取消、失聯、重連、新舊結果競態及多車隊情境加入隔離測試。
+- [ ] 為上述成功、失敗、取消、失聯、重連、新舊結果競態及多車隊情境加入隔離測試。（第 11 項情境尚未涵蓋）
 - [x] 優先使用 fake execution／MQTT publisher 驗證回呼，不要讓測試接觸實車。
 - [x] 協定變更同步更新 `docs/amr_mqtt_interface_spec.md` 與相關說明；不要只修 mock 而漏掉 Adapter 或後端。
 - [x] 需要端到端驗證的項目，使用明確隔離的模擬環境；未驗證的實車相容性需在交付時標示。
