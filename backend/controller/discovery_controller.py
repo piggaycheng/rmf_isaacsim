@@ -114,7 +114,27 @@ def init_discovery_mqtt():
                     existing["initial_location"] = init_loc
 
                 if "specs" in payload:
-                    existing["specs"] = payload.get("specs", {})
+                    specs = payload.get("specs", {})
+                    existing["specs"] = specs
+                    footprint = specs.get("footprint_radius")
+                    max_lin = specs.get("max_linear_velocity")
+                    max_ang = specs.get("max_angular_velocity")
+                    if footprint or max_lin:
+                        adapters = load_fleet_adapters_data()
+                        updated = False
+                        for a in adapters:
+                            if a.get("fleet_name") == fleet_name:
+                                if footprint and a.get("robot_radius") != footprint:
+                                    a["robot_radius"] = float(footprint)
+                                    updated = True
+                                if max_lin and a.get("linear_velocity") != max_lin:
+                                    a["linear_velocity"] = float(max_lin)
+                                    updated = True
+                                if max_ang and a.get("angular_velocity") != max_ang:
+                                    a["angular_velocity"] = float(max_ang)
+                                    updated = True
+                        if updated:
+                            save_fleet_adapters_data(adapters)
                 if "default_parking" in payload:
                     existing["default_parking"] = payload.get("default_parking")
                 if "default_charger" in payload:

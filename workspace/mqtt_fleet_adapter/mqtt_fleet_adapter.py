@@ -165,12 +165,37 @@ class MqttFleetAdapter:
                     nav_path = self.nav_graph_path
 
                 try:
-                    cfg = rmf_easy.FleetConfiguration.from_config_files(self.config_path, nav_path)
+                    fleet_cfg_path = self.config_path
+                    radius = 0.35
+                    lin_v = 1.2
+                    ang_v = 1.0
+                    if os.path.exists(self.config_path):
+                        with open(self.config_path, "r", encoding="utf-8") as f:
+                            base_cfg_dict = yaml.safe_load(f)
+
+                        radius = float(item.get("robot_radius") or base_cfg_dict.get("rmf_fleet", {}).get("profile", {}).get("footprint", 0.35))
+                        lin_v = float(item.get("linear_velocity") or base_cfg_dict.get("rmf_fleet", {}).get("limits", {}).get("linear", [1.2, 0.6])[0])
+                        ang_v = float(item.get("angular_velocity") or base_cfg_dict.get("rmf_fleet", {}).get("limits", {}).get("angular", [1.0, 0.5])[0])
+
+                        base_cfg_dict["rmf_fleet"]["name"] = f_name
+                        base_cfg_dict["rmf_fleet"]["limits"]["linear"] = [lin_v, round(lin_v * 0.6, 2)]
+                        base_cfg_dict["rmf_fleet"]["limits"]["angular"] = [ang_v, round(ang_v * 0.6, 2)]
+                        base_cfg_dict["rmf_fleet"]["profile"]["footprint"] = radius
+                        base_cfg_dict["rmf_fleet"]["profile"]["vicinity"] = round(radius + 0.3, 2)
+
+                        tmp_cfg_file = f"/tmp/fleet_cfg_{f_name}.yaml"
+                        with open(tmp_cfg_file, "w", encoding="utf-8") as f:
+                            yaml.dump(base_cfg_dict, f)
+                        fleet_cfg_path = tmp_cfg_file
+
+                    cfg = rmf_easy.FleetConfiguration.from_config_files(fleet_cfg_path, nav_path)
                     if cfg:
                         cfg.fleet_name = f_name
+                        cfg.default_max_merge_waypoint_distance = 5.0
+                        cfg.default_max_merge_lane_distance = 5.0
                         handle = self.adapter.add_easy_fleet(cfg)
                         self.fleet_handles[f_name] = handle
-                        print(f"[RMF] Successfully registered fleet [{f_name}] (Graph {g_idx}) into Open-RMF!")
+                        print(f"[RMF] Successfully registered fleet [{f_name}] (Footprint: {radius}m, LinVel: {lin_v}m/s, AngVel: {ang_v}rad/s, Graph {g_idx}) into Open-RMF!")
                 except Exception as e:
                     print(f"[ERROR] Failed to register fleet [{f_name}]: {e}")
 
@@ -255,16 +280,38 @@ class MqttFleetAdapter:
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
         with self.lock:
-            # Check if already registered
-            if robot_id in self.robots and self.robots[robot_id].is_online and (self.mock_rmf or self.robots[robot_id].update_handle is not None):
-                print(f"[REGISTER] Robot '{robot_id}' already registered with active RMF handle. Acknowledging again.")
-                self._send_register_ack(robot_id, success=True, msg="Robot already registered", fleet_name=fleet_name)
+            # Check if robot already exists with a valid handle (reuse existing handle on re-register)
+            existing_robot = self.robots.get(robot_id)
+            if existing_robot and (self.mock_rmf or existing_robot.update_handle is not None):
+                print(f"[REGISTER] Robot '{robot_id}' re-registered. Reusing existing update_handle and updating position to ({x:.3f}, {y:.3f}, {yaw:.3f}).")
+                existing_robot.is_online = True
+                existing_robot.status = "idle"
+                existing_robot.position = initial_pos
+                existing_robot.map_name = level_name
+                existing_robot.fleet_name = fleet_name
+                if default_charger:
+                    existing_robot.charger_waypoint = default_charger
+                existing_robot.last_heartbeat = time.time()
+
+                if not self.mock_rmf and existing_robot.update_handle:
+                    try:
+                        rmf_state = rmf_easy.RobotState(level_name, initial_pos, existing_robot.battery_soc)
+                        existing_robot.update_handle.update(rmf_state, None)
+                    except Exception as e:
+                        print(f"[WARN] Failed to update RMF state on re-register for '{robot_id}': {e}")
+
+                self._send_register_ack(robot_id, success=True, msg="Registered successfully", fleet_name=fleet_name)
                 return
 
             # Live Open-RMF Registration
             update_handle = None
             target_handle = self.fleet_handles.get(fleet_name) or self.fleet_handle
-            if not self.mock_rmf and target_handle:
+            if not self.mock_rmf:
+                if not target_handle:
+                    print(f"[ERROR] Cannot register '{robot_id}': No fleet handle found for fleet [{fleet_name}]!")
+                    self._send_register_ack(robot_id, success=False, msg=f"Fleet [{fleet_name}] handle not found", fleet_name=fleet_name)
+                    return
+
                 try:
                     initial_state = rmf_easy.RobotState(level_name, initial_pos, 1.0)
                     robot_config = rmf_easy.RobotConfiguration([default_charger])
@@ -278,11 +325,23 @@ class MqttFleetAdapter:
                     update_handle = target_handle.add_robot(
                         robot_id, initial_state, robot_config, callbacks
                     )
-                    print(f"[RMF] Successfully registered '{robot_id}' into Open-RMF fleet [{fleet_name}] handle!")
                 except Exception as e:
-                    print(f"[ERROR] Failed to add robot to RMF core: {e}")
+                    print(f"[ERROR] Failed to add robot '{robot_id}' to RMF core: {e}")
                     self._send_register_ack(robot_id, success=False, msg=str(e), fleet_name=fleet_name)
                     return
+
+                # add_robot() 回傳 None 時應回錯誤，不要回 success
+                if update_handle is None:
+                    print(f"[ERROR] target_handle.add_robot() returned None for '{robot_id}' in fleet [{fleet_name}]!")
+                    self._send_register_ack(
+                        robot_id,
+                        success=False,
+                        msg="Failed to add robot to Open-RMF: add_robot returned None",
+                        fleet_name=fleet_name,
+                    )
+                    return
+
+                print(f"[RMF] Successfully registered '{robot_id}' into Open-RMF fleet [{fleet_name}] handle!")
 
             # Store in Managed Robots dictionary
             managed_robot = ManagedRobot(
@@ -385,14 +444,15 @@ class MqttFleetAdapter:
             if robot_id in self.robots:
                 robot = self.robots[robot_id]
                 robot.is_online = False
+                robot.status = "offline"
                 if robot.current_execution:
                     try:
                         robot.current_execution.finished()
                     except Exception:
                         pass
                     robot.current_execution = None
-                del self.robots[robot_id]
-                print(f"[DEREGISTER] Robot '{robot_id}' cleanly removed from active fleet.")
+                # 收到 deregister 時保留 update_handle，只把車標成離線，不要刪除
+                print(f"[DEREGISTER] Robot '{robot_id}' marked offline (retaining update_handle, not deleted).")
 
     def _handle_status(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         status = payload.get("status", "unknown")
