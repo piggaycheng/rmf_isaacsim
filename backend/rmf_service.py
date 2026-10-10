@@ -376,10 +376,105 @@ class RMFService:
         """
         req_id = generate_task_id()
         
-        # Build places sequence
-        places = [target_waypoint]
-        if destination_waypoint and destination_waypoint != target_waypoint:
-            places.append(destination_waypoint)
+        # 1. Validate task_type
+        valid_types = {"goto", "patrol", "delivery"}
+        if task_type not in valid_types:
+            return {
+                "status": "error",
+                "task_id": None,
+                "request_id": None,
+                "message": f"未知任務類型: '{task_type}'，支援類型為: {', '.join(sorted(valid_types))}",
+            }
+
+        # 2. Validate target_waypoint
+        if not target_waypoint or not isinstance(target_waypoint, str) or not target_waypoint.strip():
+            return {
+                "status": "error",
+                "task_id": None,
+                "request_id": None,
+                "message": "任務缺少必要目標站點 (target_waypoint)",
+            }
+        target_waypoint = target_waypoint.strip()
+
+        # 3. Validate destination_waypoint for delivery
+        if destination_waypoint:
+            destination_waypoint = destination_waypoint.strip()
+            if not destination_waypoint:
+                destination_waypoint = None
+
+        if task_type == "delivery":
+            if not destination_waypoint:
+                return {
+                    "status": "error",
+                    "task_id": None,
+                    "request_id": None,
+                    "message": "物料配送 (delivery) 任務必須指定卸貨站點 (destination_waypoint)",
+                }
+            if destination_waypoint == target_waypoint:
+                return {
+                    "status": "error",
+                    "task_id": None,
+                    "request_id": None,
+                    "message": "物料配送 (delivery) 取貨站點與卸貨站點不能相同",
+                }
+
+        # 4. Validate waypoints against active navigation graph if available
+        if os.path.exists(state.ACTIVE_MAP_FILE):
+            try:
+                with open(state.ACTIVE_MAP_FILE, "r", encoding="utf-8") as mf:
+                    map_json = json.load(mf)
+                    wps = map_json.get("waypoints", [])
+                    if wps:
+                        valid_names = {w.get("name") for w in wps if w.get("name")} | {w.get("id") for w in wps if w.get("id")}
+                        if target_waypoint not in valid_names:
+                            return {
+                                "status": "error",
+                                "task_id": None,
+                                "request_id": None,
+                                "message": f"無效站點: 目標站點 '{target_waypoint}' 不存在於目前導航地圖中",
+                            }
+                        if destination_waypoint and destination_waypoint not in valid_names:
+                            return {
+                                "status": "error",
+                                "task_id": None,
+                                "request_id": None,
+                                "message": f"無效站點: 目的站點 '{destination_waypoint}' 不存在於目前導航地圖中",
+                            }
+            except Exception as e:
+                print(f"[RMF Dispatcher WARN] Map waypoint validation warning: {e}")
+
+        # 5. Format payload category and description according to verified semantics
+        if task_type == "delivery":
+            category = "delivery"
+            description = {
+                "pickup": {
+                    "place": target_waypoint,
+                    "handler": f"dispenser_{target_waypoint}",
+                    "payload": [],
+                },
+                "dropoff": {
+                    "place": destination_waypoint,
+                    "handler": f"ingestor_{destination_waypoint}",
+                    "payload": [],
+                },
+            }
+            places = [target_waypoint, destination_waypoint]
+        elif task_type == "patrol":
+            category = "patrol"
+            places = [target_waypoint]
+            if destination_waypoint and destination_waypoint != target_waypoint:
+                places.append(destination_waypoint)
+            description = {
+                "places": places,
+                "rounds": 1,
+            }
+        else: # goto
+            category = "patrol"
+            places = [target_waypoint]
+            description = {
+                "places": places,
+                "rounds": 1,
+            }
 
         # Determine target fleet if robot_id specified
         target_fleet = None
@@ -393,14 +488,6 @@ class RMFService:
                     target_fleet = disc.get("fleet_name")
             if not target_fleet:
                 target_fleet = "fleet1" if "1" in robot_id else ("fleet2" if "2" in robot_id else "tinyRobot")
-
-        # Map UI task types to Open-RMF category
-        # Open-RMF standard accepts "patrol" (which works for single-place goto as well as multi-point patrol/loop)
-        category = "patrol"
-        description: Dict[str, Any] = {
-            "places": places,
-            "rounds": 1,
-        }
 
         # Format Request JSON
         if robot_id and robot_id != "any" and target_fleet:

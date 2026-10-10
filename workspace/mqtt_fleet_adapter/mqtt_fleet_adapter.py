@@ -434,8 +434,8 @@ class MqttFleetAdapter:
             # Check if active navigation command reached its destination (ignore if in-place holding)
             reported_cmd_id = payload.get("current_cmd_id")
             if robot.current_execution and robot.target_position is not None and not robot.is_holding:
-                # 1. Heartbeat must NEVER complete docking or actions (docking requires explicit command_result)
-                is_docking = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") == "dock")
+                # 1. Heartbeat must NEVER complete docking or actions (docking and actions require explicit command_result)
+                is_docking_or_action = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") in ["dock", "action"])
 
                 # 2. Check floor / level matches target
                 target_level = robot.last_cmd_payload.get("target", {}).get("level_name") if robot.last_cmd_payload else robot.map_name
@@ -462,7 +462,7 @@ class MqttFleetAdapter:
                 # Only mark completed via heartbeat if robot has stopped (status == 'idle') at destination.
                 # NEVER declare finished while status == 'moving'!
                 if (
-                    not is_docking
+                    not is_docking_or_action
                     and level_matches
                     and cmd_valid
                     and status == "idle"
@@ -754,7 +754,9 @@ class MqttFleetAdapter:
 
             robot.cmd_id += 1
             robot.current_execution = execution
-            cmd_topic = f"{self.topic_prefix}/{self.fleet_name}/robot/{robot_id}/command"
+            robot.target_position = None  # Clear navigation target so heartbeat cannot false-match arrival
+            fleet = robot.fleet_name or self.fleet_name
+            cmd_topic = f"{self.topic_prefix}/{fleet}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
                 "cmd_id": robot.cmd_id,
@@ -763,8 +765,9 @@ class MqttFleetAdapter:
                 "description": description,
                 "timestamp": time.time(),
             }
+            robot.last_cmd_payload = cmd_payload
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
-            print(f"[RMF -> AMR] Dispatched ACTION '{category}' to '{robot_id}'")
+            print(f"[RMF -> AMR] Dispatched ACTION '{category}' (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}")
 
     # ==========================================================================
     # Background Watchdog & Main Loop
