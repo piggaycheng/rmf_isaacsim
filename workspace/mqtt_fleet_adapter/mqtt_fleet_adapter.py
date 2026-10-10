@@ -285,7 +285,6 @@ class MqttFleetAdapter:
             if existing_robot and (self.mock_rmf or existing_robot.update_handle is not None):
                 print(f"[REGISTER] Robot '{robot_id}' re-registered. Reusing existing update_handle and updating position to ({x:.3f}, {y:.3f}, {yaw:.3f}).")
                 existing_robot.is_online = True
-                existing_robot.status = "idle"
                 existing_robot.position = initial_pos
                 existing_robot.map_name = level_name
                 existing_robot.fleet_name = fleet_name
@@ -295,8 +294,27 @@ class MqttFleetAdapter:
 
                 if not self.mock_rmf and existing_robot.update_handle:
                     try:
+                        existing_robot.update_handle.more().override_status(None)
+                        existing_robot.update_handle.more().unstable_recommission()
+                    except Exception as e:
+                        print(f"[RMF WARN] Error recommissioning '{robot_id}' on re-register: {e}")
+
+                # Retain active execution activity identifier if execution is still valid, else reset to idle
+                has_active_exec = existing_robot.current_execution is not None and existing_robot.current_execution.okay()
+                if has_active_exec:
+                    activity_id = existing_robot.current_execution.identifier
+                    existing_robot.status = "moving"
+                    print(f"[REGISTER] Retaining active execution (identifier: {activity_id}) for '{robot_id}' on reconnect.")
+                else:
+                    activity_id = None
+                    existing_robot.status = "idle"
+                    existing_robot.current_execution = None
+                    existing_robot.target_position = None
+
+                if not self.mock_rmf and existing_robot.update_handle:
+                    try:
                         rmf_state = rmf_easy.RobotState(level_name, initial_pos, existing_robot.battery_soc)
-                        existing_robot.update_handle.update(rmf_state, None)
+                        existing_robot.update_handle.update(rmf_state, activity_id)
                     except Exception as e:
                         print(f"[WARN] Failed to update RMF state on re-register for '{robot_id}': {e}")
 
@@ -393,12 +411,22 @@ class MqttFleetAdapter:
             level_name = payload.get("level_name", robot.map_name)
             status = payload.get("status", "idle")
 
+            was_offline = not robot.is_online
             robot.position = np.array([x, y, yaw], dtype=np.float64)
             robot.battery_soc = max(0.0, min(1.0, battery / 100.0))
             robot.map_name = level_name
             robot.status = status
             robot.last_heartbeat = time.time()
             robot.is_online = True
+
+            if was_offline:
+                print(f"[HEARTBEAT] Robot '{robot_id}' came back online via heartbeat. Recommissioning in RMF.")
+                if not self.mock_rmf and robot.update_handle:
+                    try:
+                        robot.update_handle.more().override_status(None)
+                        robot.update_handle.more().unstable_recommission()
+                    except Exception as e:
+                        print(f"[RMF WARN] Error recommissioning '{robot_id}' on heartbeat recovery: {e}")
 
             # Check if active navigation command reached its destination (ignore if in-place holding)
             reported_cmd_id = payload.get("current_cmd_id")
@@ -425,10 +453,15 @@ class MqttFleetAdapter:
             # Forward state update to Open-RMF core
             if not self.mock_rmf and robot.update_handle:
                 try:
+                    if robot.current_execution and not robot.current_execution.okay():
+                        print(f"[NAV] Current execution for '{robot_id}' is no longer okay. Clearing execution.")
+                        robot.current_execution = None
+                        robot.target_position = None
+
                     rmf_state = rmf_easy.RobotState(robot.map_name, robot.position, robot.battery_soc)
                     activity_id = (
                         robot.current_execution.identifier
-                        if robot.current_execution
+                        if robot.current_execution and robot.current_execution.okay()
                         else None
                     )
                     robot.update_handle.update(rmf_state, activity_id)
@@ -446,12 +479,13 @@ class MqttFleetAdapter:
                 robot.is_online = False
                 robot.status = "offline"
                 if robot.current_execution:
+                    print(f"[DEREGISTER] Robot '{robot_id}' deregistered during active execution (cmd_id: {robot.cmd_id}). Preserving execution without falsely marking finished.")
+                if not self.mock_rmf and robot.update_handle:
                     try:
-                        robot.current_execution.finished()
-                    except Exception:
-                        pass
-                    robot.current_execution = None
-                # 收到 deregister 時保留 update_handle，只把車標成離線，不要刪除
+                        robot.update_handle.more().override_status("offline")
+                        robot.update_handle.more().unstable_decommission()
+                    except Exception as e:
+                        print(f"[RMF WARN] Error updating RMF offline state for '{robot_id}': {e}")
                 print(f"[DEREGISTER] Robot '{robot_id}' marked offline (retaining update_handle, not deleted).")
 
     def _handle_status(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
@@ -460,7 +494,15 @@ class MqttFleetAdapter:
         if status in ["offline", "disconnected"]:
             with self.lock:
                 if robot_id in self.robots:
-                    self.robots[robot_id].is_online = False
+                    robot = self.robots[robot_id]
+                    robot.is_online = False
+                    robot.status = "offline"
+                    if not self.mock_rmf and robot.update_handle:
+                        try:
+                            robot.update_handle.more().override_status("offline")
+                            robot.update_handle.more().unstable_decommission()
+                        except Exception as e:
+                            print(f"[RMF WARN] Error decommissioning '{robot_id}': {e}")
                     print(f"[ALERT] Robot '{robot_id}' marked OFFLINE due to status message.")
 
     def _handle_command_result(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
@@ -624,12 +666,15 @@ class MqttFleetAdapter:
                     if robot.is_online and (now - robot.last_heartbeat > 10.0):
                         print(f"[WATCHDOG WARN] Robot '{r_id}' missed heartbeats for {now - robot.last_heartbeat:.1f}s! Marking Offline.")
                         robot.is_online = False
+                        robot.status = "offline"
                         if robot.current_execution:
+                            print(f"[WATCHDOG WARN] Robot '{r_id}' timed out during execution (cmd_id: {robot.cmd_id}). Preserving execution without falsely marking finished.")
+                        if not self.mock_rmf and robot.update_handle:
                             try:
-                                robot.current_execution.finished()
-                            except Exception:
-                                pass
-                            robot.current_execution = None
+                                robot.update_handle.more().override_status("offline")
+                                robot.update_handle.more().unstable_decommission()
+                            except Exception as e:
+                                print(f"[RMF WARN] Error decommissioning '{r_id}': {e}")
 
     def start(self):
         """Starts MQTT connection, background threads, and spins ROS 2."""
