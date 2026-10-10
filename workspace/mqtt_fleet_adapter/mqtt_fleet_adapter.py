@@ -311,7 +311,7 @@ class MqttFleetAdapter:
                 self.paused_fleets.add(fleet_name)
                 for (f_name, r_id), robot in self.robots.items():
                     if f_name == fleet_name:
-                        robot.is_holding = True
+                        robot.is_paused = True
                         if not self.mock_rmf and robot.update_handle:
                             try:
                                 robot.update_handle.more().override_status("paused")
@@ -323,7 +323,7 @@ class MqttFleetAdapter:
                 self.paused_fleets.discard(fleet_name)
                 for (f_name, r_id), robot in self.robots.items():
                     if f_name == fleet_name:
-                        robot.is_holding = False
+                        robot.is_paused = False
                         if not self.mock_rmf and robot.update_handle:
                             try:
                                 robot.update_handle.more().override_status(None)
@@ -457,7 +457,7 @@ class MqttFleetAdapter:
 
             # If fleet is currently paused, mark new robot paused
             if fleet_name in self.paused_fleets:
-                managed_robot.is_holding = True
+                managed_robot.is_paused = True
                 if not self.mock_rmf and update_handle:
                     try:
                         update_handle.more().override_status("paused")

@@ -198,7 +198,7 @@
 - [x] fleet1／fleet2 的 ACTION 發往各自的 MQTT topic。
 - [ ] 兩個 fleet 使用相同 robot ID 時仍完全隔離。（見第 11 項 11.2）
 - [x] 未配置 fleet 不會被註冊到別的 fleet handle。
-- [ ] pause 會影響實際可派遣性；resume／restart／set-graph 成功回應對應真實執行結果。（pause 會吞掉完成回報，見 11.3）
+- [x] pause 會影響實際可派遣性；resume／restart／set-graph 成功回應對應真實執行結果。（pause 會吞掉完成回報，見 11.3）
 - [x] UI 車隊參數與 RMF 實際設定一致，或明確呈現尚未套用／不支援。
 
 ## 11. 第二輪 review：`fix/rmf-dispatch-issues` 未修正完全與新問題
@@ -245,9 +245,9 @@
 
 **驗收：**
 
-- [ ] pause 期間完成的命令仍能正確完成 execution。
-- [ ] pause 期間不接受新任務；resume 後恢復。
-- [ ] 原地等待（hold）行為不受影響。
+- [x] pause 期間完成的命令仍能正確完成 execution。
+- [x] pause 期間不接受新任務；resume 後恢復。
+- [x] 原地等待（hold）行為不受影響。
 
 ### 11.4 中優先級：拒絕 offline 車的導航／動作時沒有回報
 

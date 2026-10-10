@@ -327,6 +327,24 @@ class TestRMFDispatchRegression(unittest.TestCase):
         self.assertEqual(res_pause["status"], "error")
         self.assertIn("暫停狀態", res_pause["message"])
 
+    def test_issue11_3_pause_does_not_swallow_command_completion(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        robot = adapter.robots[("fleet1", "carter1")]
+        mock_exec = MagicMock()
+        robot.current_execution = mock_exec
+        robot.cmd_id = 99
+
+        # Pause fleet1
+        adapter._handle_fleet_control("fleet1", {"action": "pause"})
+        self.assertTrue(robot.is_paused)
+        self.assertFalse(robot.is_holding)  # must NOT be holding
+
+        # Robot sends completed command_result while fleet is paused
+        adapter._handle_command_result("carter1", "fleet1", {"cmd_id": 99, "status": "completed"})
+        mock_exec.finished.assert_called_once()
+        self.assertIsNone(robot.current_execution)
+
 
 if __name__ == "__main__":
     unittest.main()
