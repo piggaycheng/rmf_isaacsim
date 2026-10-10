@@ -368,6 +368,7 @@ class RMFService:
         target_waypoint: str,
         destination_waypoint: Optional[str] = None,
         robot_id: Optional[str] = None,
+        fleet_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Dispatches a task to Open-RMF Task Dispatcher via ROS 2 ApiRequest.
@@ -476,9 +477,9 @@ class RMFService:
                 "rounds": 1,
             }
 
-        # Determine target fleet if robot_id specified
-        target_fleet = None
-        if robot_id and robot_id != "any":
+        # Determine target fleet
+        target_fleet = fleet_name
+        if not target_fleet and robot_id and robot_id != "any":
             rob = state.current_robots.get(robot_id)
             if rob:
                 target_fleet = rob.get("fleet")
@@ -488,6 +489,16 @@ class RMFService:
                     target_fleet = disc.get("fleet_name")
             if not target_fleet:
                 target_fleet = "fleet1" if "1" in robot_id else ("fleet2" if "2" in robot_id else "tinyRobot")
+
+        # Check if target fleet is paused
+        if target_fleet and target_fleet in state.paused_fleets:
+            print(f"[RMF Dispatcher WARN] Fleet [{target_fleet}] is paused, rejecting task dispatch.")
+            return {
+                "status": "error",
+                "task_id": None,
+                "request_id": None,
+                "message": f"車隊 '{target_fleet}' 目前處於暫停狀態 (paused)，無法受理調度任務。請先至車隊管理介面恢復車隊。",
+            }
 
         # Format Request JSON
         if robot_id and robot_id != "any" and target_fleet:

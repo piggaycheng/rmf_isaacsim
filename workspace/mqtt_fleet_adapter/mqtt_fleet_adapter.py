@@ -11,7 +11,7 @@ import os
 import sys
 import threading
 import time
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Set, Tuple
 
 import numpy as np
 import paho.mqtt.client as mqtt
@@ -103,9 +103,26 @@ class MqttFleetAdapter:
         self.topic_prefix = mqtt_cfg.get("topic_prefix", "rmf")
         self.keepalive = mqtt_cfg.get("keepalive", 30)
 
-        self.robots: Dict[str, ManagedRobot] = {}
+        self.robots: Dict[Tuple[str, str], ManagedRobot] = {}
         self.lock = threading.Lock()
         self.running = True
+        self.configured_fleets: Set[str] = set()
+        self.paused_fleets: Set[str] = set()
+
+        # Pre-populate configured_fleets from fleet_adapters.json or fallback
+        adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
+        adapters_data = []
+        if os.path.exists(adapters_file):
+            try:
+                with open(adapters_file, "r", encoding="utf-8") as f:
+                    adapters_data = json.load(f)
+            except Exception as e:
+                print(f"[WARN] Failed to read fleet_adapters.json: {e}")
+
+        if not adapters_data:
+            adapters_data = [{"fleet_name": self.fleet_name, "graph_idx": 0}]
+
+        self.configured_fleets = {item.get("fleet_name") or self.fleet_name for item in adapters_data}
 
         print(f"==================================================")
         print(f"🚀 Initializing MQTT Fleet Adapter: [{self.fleet_name}]")
@@ -113,6 +130,7 @@ class MqttFleetAdapter:
         print(f"   Nav Graph: {self.nav_graph_path}")
         print(f"   MQTT:      {self.mqtt_host}:{self.mqtt_port}")
         print(f"   Mode:      {'MOCK / STANDALONE' if self.mock_rmf else 'LIVE OPEN-RMF'}")
+        print(f"   Configured Fleets: {list(self.configured_fleets)}")
         print(f"==================================================")
 
         # 2. Initialize Open-RMF EasyFullControl (if not in mock mode)
@@ -129,6 +147,16 @@ class MqttFleetAdapter:
         self.mqtt_client.on_connect = self._on_mqtt_connect
         self.mqtt_client.on_message = self._on_mqtt_message
         self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
+
+    def _get_robot(self, fleet_name: Optional[str], robot_id: str) -> Optional[ManagedRobot]:
+        if fleet_name:
+            robot = self.robots.get((fleet_name, robot_id))
+            if robot:
+                return robot
+        for (f, r), robot in self.robots.items():
+            if r == robot_id:
+                return robot
+        return None
 
     def _init_rmf(self):
         """Initializes ROS 2 and Open-RMF Adapter."""
@@ -201,10 +229,12 @@ class MqttFleetAdapter:
 
             if self.fleet_handles:
                 self.fleet_handle = list(self.fleet_handles.values())[0]
+                self.configured_fleets = set(self.fleet_handles.keys())
             else:
                 self.fleet_config = rmf_easy.FleetConfiguration.from_config_files(self.config_path, self.nav_graph_path)
                 self.fleet_handle = self.adapter.add_easy_fleet(self.fleet_config)
                 self.fleet_handles[self.fleet_name] = self.fleet_handle
+                self.configured_fleets = {self.fleet_name}
 
             print(f"[INFO] Open-RMF EasyFullControl Adapter ready for fleets: {list(self.fleet_handles.keys())}")
         except Exception as e:
@@ -224,7 +254,8 @@ class MqttFleetAdapter:
             client.subscribe(f"{self.topic_prefix}/+/robot/+/deregister", qos=1)
             client.subscribe(f"{self.topic_prefix}/+/robot/+/status", qos=1)
             client.subscribe(f"{self.topic_prefix}/+/robot/+/command_result", qos=1)
-            print(f"[MQTT] Subscribed to wildcard -> {self.topic_prefix}/+/robot/+/*")
+            client.subscribe(f"{self.topic_prefix}/+/control", qos=1)
+            print(f"[MQTT] Subscribed to wildcard -> {self.topic_prefix}/+/robot/+/* and {self.topic_prefix}/+/control")
         else:
             print(f"[MQTT] Connection failed with result code: {rc}")
 
@@ -240,8 +271,14 @@ class MqttFleetAdapter:
             print(f"[MQTT ERROR] Invalid JSON received on topic {topic}: {e}")
             return
 
-        # Extract fleet_name & robot_id from topic: rmf/{fleet_name}/robot/{robot_id}/{action}
         parts = topic.split("/")
+        # Fleet-level control action: rmf/{fleet_name}/control
+        if len(parts) == 3 and parts[2] == "control":
+            fleet_name = parts[1]
+            self._handle_fleet_control(fleet_name, payload)
+            return
+
+        # Extract fleet_name & robot_id from topic: rmf/{fleet_name}/robot/{robot_id}/{action}
         if len(parts) >= 5 and parts[2] == "robot":
             fleet_name = parts[1]
             robot_id = parts[3]
@@ -263,6 +300,35 @@ class MqttFleetAdapter:
         elif action == "command_result":
             self._handle_command_result(robot_id, fleet_name, payload)
 
+    def _handle_fleet_control(self, fleet_name: str, payload: Dict[str, Any]):
+        action = payload.get("action")
+        print(f"[FLEET CONTROL] Received control action '{action}' for fleet [{fleet_name}]")
+        with self.lock:
+            if action == "pause":
+                self.paused_fleets.add(fleet_name)
+                for (f_name, r_id), robot in self.robots.items():
+                    if f_name == fleet_name:
+                        robot.is_holding = True
+                        if not self.mock_rmf and robot.update_handle:
+                            try:
+                                robot.update_handle.more().override_status("paused")
+                                robot.update_handle.more().unstable_decommission()
+                            except Exception as e:
+                                print(f"[RMF WARN] Error pausing robot '{r_id}' in fleet '{f_name}': {e}")
+                print(f"[FLEET CONTROL] Fleet [{fleet_name}] paused in Fleet Adapter.")
+            elif action == "resume":
+                self.paused_fleets.discard(fleet_name)
+                for (f_name, r_id), robot in self.robots.items():
+                    if f_name == fleet_name:
+                        robot.is_holding = False
+                        if not self.mock_rmf and robot.update_handle:
+                            try:
+                                robot.update_handle.more().override_status(None)
+                                robot.update_handle.more().unstable_recommission()
+                            except Exception as e:
+                                print(f"[RMF WARN] Error resuming robot '{r_id}' in fleet '{f_name}': {e}")
+                print(f"[FLEET CONTROL] Fleet [{fleet_name}] resumed in Fleet Adapter.")
+
     # ==========================================================================
     # Handler 1: Robot Registration (開機註冊)
     # ==========================================================================
@@ -279,14 +345,24 @@ class MqttFleetAdapter:
         default_parking = payload.get("default_parking") or fallback_charger
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
+        # 1. Reject unconfigured fleets explicitly (no silent fallback!)
+        if fleet_name not in self.configured_fleets:
+            print(f"[REGISTER ERROR] Cannot register '{robot_id}': Fleet [{fleet_name}] is not configured in Open-RMF! Configured fleets: {list(self.configured_fleets)}")
+            self._send_register_ack(
+                robot_id,
+                success=False,
+                msg=f"Fleet [{fleet_name}] is not configured in Open-RMF",
+                fleet_name=fleet_name,
+            )
+            return
+
         with self.lock:
             # Check if robot already exists with a valid handle in the SAME fleet (reuse existing handle on re-register)
-            existing_robot = self.robots.get(robot_id)
-            if existing_robot and existing_robot.fleet_name != fleet_name:
-                print(f"[REGISTER WARN] Robot '{robot_id}' requested registration for fleet '{fleet_name}', but exists in fleet '{existing_robot.fleet_name}'. Cannot cross-reuse handle.")
+            robot_key = (fleet_name, robot_id)
+            existing_robot = self.robots.get(robot_key)
 
-            if existing_robot and existing_robot.fleet_name == fleet_name and (self.mock_rmf or existing_robot.update_handle is not None):
-                print(f"[REGISTER] Robot '{robot_id}' re-registered. Reusing existing update_handle and updating position to ({x:.3f}, {y:.3f}, {yaw:.3f}).")
+            if existing_robot and (self.mock_rmf or existing_robot.update_handle is not None):
+                print(f"[REGISTER] Robot '{robot_id}' ({fleet_name}) re-registered. Reusing existing update_handle and updating position to ({x:.3f}, {y:.3f}, {yaw:.3f}).")
                 existing_robot.is_online = True
                 existing_robot.position = initial_pos
                 existing_robot.map_name = level_name
@@ -326,7 +402,7 @@ class MqttFleetAdapter:
 
             # Live Open-RMF Registration
             update_handle = None
-            target_handle = self.fleet_handles.get(fleet_name) or self.fleet_handle
+            target_handle = self.fleet_handles.get(fleet_name)
             if not self.mock_rmf:
                 if not target_handle:
                     print(f"[ERROR] Cannot register '{robot_id}': No fleet handle found for fleet [{fleet_name}]!")
@@ -338,9 +414,9 @@ class MqttFleetAdapter:
                     robot_config = rmf_easy.RobotConfiguration([default_charger])
 
                     callbacks = rmf_easy.RobotCallbacks(
-                        lambda dest, execution: self._on_rmf_navigate(robot_id, dest, execution),
-                        lambda act_id: self._on_rmf_stop(robot_id, act_id),
-                        lambda cat, desc, exec_h: self._on_rmf_action(robot_id, cat, desc, exec_h),
+                        lambda dest, execution, fid=fleet_name, rid=robot_id: self._on_rmf_navigate(fid, rid, dest, execution),
+                        lambda act_id, fid=fleet_name, rid=robot_id: self._on_rmf_stop(fid, rid, act_id),
+                        lambda cat, desc, exec_h, fid=fleet_name, rid=robot_id: self._on_rmf_action(fid, rid, cat, desc, exec_h),
                     )
 
                     update_handle = target_handle.add_robot(
@@ -364,7 +440,7 @@ class MqttFleetAdapter:
 
                 print(f"[RMF] Successfully registered '{robot_id}' into Open-RMF fleet [{fleet_name}] handle!")
 
-            # Store in Managed Robots dictionary
+            # Store in Managed Robots dictionary keyed by (fleet_name, robot_id)
             managed_robot = ManagedRobot(
                 name=robot_id,
                 fleet_name=fleet_name,
@@ -374,7 +450,17 @@ class MqttFleetAdapter:
                 update_handle=update_handle,
                 charger_waypoint=default_charger,
             )
-            self.robots[robot_id] = managed_robot
+            self.robots[robot_key] = managed_robot
+
+            # If fleet is currently paused, mark new robot paused
+            if fleet_name in self.paused_fleets:
+                managed_robot.is_holding = True
+                if not self.mock_rmf and update_handle:
+                    try:
+                        update_handle.more().override_status("paused")
+                        update_handle.more().unstable_decommission()
+                    except Exception as e:
+                        print(f"[RMF WARN] Error setting paused status for '{robot_id}': {e}")
 
         # Send ACK back to AMR
         self._send_register_ack(robot_id, success=True, msg="Registered successfully", fleet_name=fleet_name)
@@ -399,7 +485,7 @@ class MqttFleetAdapter:
     def _handle_heartbeat(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         robot_id = payload.get("robot_id") or robot_id
         with self.lock:
-            robot = self.robots.get(robot_id)
+            robot = self._get_robot(fleet_name, robot_id)
             if not robot or (not self.mock_rmf and robot.update_handle is None):
                 # Robot sent heartbeat without registering first (e.g. FA late startup or restart)
                 print(f"[WARN] Heartbeat from robot '{robot_id}' without active RMF handle ({fleet_name}). Requesting registration...")
@@ -503,8 +589,8 @@ class MqttFleetAdapter:
     def _handle_deregister(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         print(f"[DEREGISTER] Robot '{robot_id}' in '{fleet_name}' requested deregistration: {payload}")
         with self.lock:
-            if robot_id in self.robots:
-                robot = self.robots[robot_id]
+            robot = self._get_robot(fleet_name, robot_id)
+            if robot:
                 robot.is_online = False
                 robot.status = "offline"
                 if robot.current_execution:
@@ -522,8 +608,8 @@ class MqttFleetAdapter:
         print(f"[STATUS/LWT] Robot '{robot_id}' ({fleet_name}) reported status: {status}")
         if status in ["offline", "disconnected"]:
             with self.lock:
-                if robot_id in self.robots:
-                    robot = self.robots[robot_id]
+                robot = self._get_robot(fleet_name, robot_id)
+                if robot:
                     if not robot.is_online and robot.status == "offline":
                         return
                     robot.is_online = False
@@ -542,7 +628,7 @@ class MqttFleetAdapter:
         print(f"[CMD_RESULT] Robot '{robot_id}' ({fleet_name}) reported cmd_id {cmd_id} status: {status}")
 
         with self.lock:
-            robot = self.robots.get(robot_id)
+            robot = self._get_robot(fleet_name, robot_id)
             if not robot:
                 return
 
@@ -609,11 +695,11 @@ class MqttFleetAdapter:
     # ==========================================================================
     # RMF -> Robot Outbound Callbacks (調度下發指令)
     # ==========================================================================
-    def _on_rmf_navigate(self, robot_id: str, destination: Any, execution: Any):
+    def _on_rmf_navigate(self, fleet_name: str, robot_id: str, destination: Any, execution: Any):
         with self.lock:
-            robot = self.robots.get(robot_id)
+            robot = self._get_robot(fleet_name, robot_id)
             if not robot or not robot.is_online:
-                print(f"[RMF -> AMR WARN] Robot '{robot_id}' is offline or not found. Rejecting NAVIGATE command.")
+                print(f"[RMF -> AMR WARN] Robot '{robot_id}' in fleet '{fleet_name}' is offline or not found. Rejecting NAVIGATE command.")
                 return
 
             target_pos = np.array(
@@ -681,7 +767,7 @@ class MqttFleetAdapter:
             robot.current_execution = execution
             robot.target_position = target_pos
 
-            cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
+            cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
                 "cmd_id": robot.cmd_id,
@@ -700,11 +786,11 @@ class MqttFleetAdapter:
 
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
             action_label = f"DOCK ({dock_name})" if dock_name else "NAVIGATE"
-            print(f"[RMF -> AMR] Dispatched {action_label} (cmd_id: {robot.cmd_id}) to '{robot_id}': target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}], map='{target_map}'")
+            print(f"[RMF -> AMR] Dispatched {action_label} (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}: target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}], map='{target_map}'")
 
-    def _on_rmf_stop(self, robot_id: str, activity_id: Any):
+    def _on_rmf_stop(self, fleet_name: str, robot_id: str, activity_id: Any):
         with self.lock:
-            robot = self.robots.get(robot_id)
+            robot = self._get_robot(fleet_name, robot_id)
             if not robot:
                 return
 
@@ -733,7 +819,7 @@ class MqttFleetAdapter:
 
             robot.cmd_id += 1
             robot.stop_cmd_id = robot.cmd_id
-            cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
+            cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
                 "cmd_id": robot.cmd_id,
@@ -742,21 +828,20 @@ class MqttFleetAdapter:
                 "timestamp": time.time(),
             }
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
-            print(f"[RMF -> AMR] Dispatched STOP (cmd_id: {robot.cmd_id}) to '{robot_id}'")
+            print(f"[RMF -> AMR] Dispatched STOP (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}")
 
 
-    def _on_rmf_action(self, robot_id: str, category: str, description: Any, execution: Any):
+    def _on_rmf_action(self, fleet_name: str, robot_id: str, category: str, description: Any, execution: Any):
         with self.lock:
-            robot = self.robots.get(robot_id)
+            robot = self._get_robot(fleet_name, robot_id)
             if not robot or not robot.is_online:
-                print(f"[RMF -> AMR WARN] Robot '{robot_id}' is offline or not found. Rejecting ACTION command.")
+                print(f"[RMF -> AMR WARN] Robot '{robot_id}' in fleet '{fleet_name}' is offline or not found. Rejecting ACTION command.")
                 return
 
             robot.cmd_id += 1
             robot.current_execution = execution
             robot.target_position = None  # Clear navigation target so heartbeat cannot false-match arrival
-            fleet = robot.fleet_name or self.fleet_name
-            cmd_topic = f"{self.topic_prefix}/{fleet}/robot/{robot_id}/command"
+            cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
                 "cmd_id": robot.cmd_id,
@@ -778,9 +863,9 @@ class MqttFleetAdapter:
             time.sleep(2.0)
             now = time.time()
             with self.lock:
-                for r_id, robot in list(self.robots.items()):
+                for (f_name, r_id), robot in list(self.robots.items()):
                     if robot.is_online and (now - robot.last_heartbeat > 10.0):
-                        print(f"[WATCHDOG WARN] Robot '{r_id}' missed heartbeats for {now - robot.last_heartbeat:.1f}s! Marking Offline.")
+                        print(f"[WATCHDOG WARN] Robot '{r_id}' ({f_name}) missed heartbeats for {now - robot.last_heartbeat:.1f}s! Marking Offline.")
                         robot.is_online = False
                         robot.status = "offline"
                         if robot.current_execution:

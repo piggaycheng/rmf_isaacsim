@@ -1,8 +1,10 @@
 import asyncio
 import datetime
+import json
 from collections import defaultdict, deque
 from typing import Dict, Any, List
 from fastapi import APIRouter
+import state
 from state import (
     load_fleet_adapters_data,
     save_fleet_adapters_data,
@@ -69,6 +71,14 @@ async def save_or_update_fleet_adapter(adapter: Dict[str, Any]):
         append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter_clean.get('name')}' created.")
 
     save_fleet_adapters_data(adapters)
+
+    # Real execution: reload fleet adapter so newly configured kinematics/graphs take effect in Open-RMF
+    try:
+        from rmf_service import rmf_service
+        rmf_service.restart_fleet_adapter()
+        append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter reloaded to apply updated parameters.")
+    except Exception as e:
+        print(f"[WARN] Failed to reload adapter on save: {e}")
     
     # Broadcast with runtime logs attached
     broadcast_adapters = []
@@ -93,6 +103,12 @@ async def delete_fleet_adapter(adapter_id: str):
     if adapter_id in adapter_logs:
         del adapter_logs[adapter_id]
 
+    try:
+        from rmf_service import rmf_service
+        rmf_service.restart_fleet_adapter()
+    except Exception as e:
+        print(f"[WARN] Failed to reload adapter on delete: {e}")
+
     await broadcast({
         "type": "fleet_adapters_updated",
         "adapters": adapters
@@ -109,12 +125,16 @@ async def set_fleet_adapter_graph(adapter_id: str, payload: Dict[str, Any]):
 
     old_idx = adapter.get("graph_idx", 0)
     adapter["graph_idx"] = new_graph_idx
-    
-    # Append log to in-memory buffer (NOT to disk JSON!)
-    log_msg = f"[INFO] [easy_full_control]: Executed dynamic set_graph({new_graph_idx}) from Graph {old_idx} -> Success (0 restart needed)"
-    append_adapter_log(adapter_id, log_msg)
-    
     save_fleet_adapters_data(adapters)
+
+    # Real execution: reload fleet adapter process to apply the new graph configuration
+    try:
+        from rmf_service import rmf_service
+        rmf_service.restart_fleet_adapter()
+        log_msg = f"[INFO] [easy_full_control]: Fleet '{adapter.get('fleet_name')}' switched to Graph {new_graph_idx}. Adapter process reloaded successfully."
+    except Exception as e:
+        log_msg = f"[ERROR] Failed to reload adapter on set_graph: {e}"
+    append_adapter_log(adapter_id, log_msg)
 
     broadcast_adapters = []
     for a in adapters:
@@ -131,7 +151,7 @@ async def set_fleet_adapter_graph(adapter_id: str, payload: Dict[str, Any]):
     response_adapter["logs"] = get_adapter_logs(adapter_id)
     return {
         "status": "success",
-        "message": f"車隊 '{adapter.get('fleet_name')}' 已成功動態切換至 Graph {new_graph_idx}！",
+        "message": f"車隊 '{adapter.get('fleet_name')}' 已切換至 Graph {new_graph_idx}，Fleet Adapter 已重新載入以生效新路網！",
         "adapter": response_adapter
     }
 
@@ -143,8 +163,11 @@ async def fleet_adapter_action(adapter_id: str, payload: Dict[str, Any]):
     if not adapter:
         return {"status": "error", "message": "Adapter not found"}
 
+    fleet_name = adapter.get("fleet_name", "")
+
     if action == "restart":
         adapter["status"] = "online"
+        state.paused_fleets.discard(fleet_name)
         try:
             from rmf_service import rmf_service
             rmf_service.restart_fleet_adapter()
@@ -153,10 +176,34 @@ async def fleet_adapter_action(adapter_id: str, payload: Dict[str, Any]):
         append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' service reloaded.")
     elif action == "pause":
         adapter["status"] = "standby"
-        append_adapter_log(adapter_id, f"[WARN] [system]: Fleet Adapter '{adapter.get('name')}' paused.")
+        state.paused_fleets.add(fleet_name)
+        try:
+            import paho.mqtt.publish as mqtt_publish
+            mqtt_publish.single(
+                f"rmf/{fleet_name}/control",
+                payload=json.dumps({"action": "pause", "fleet": fleet_name}),
+                hostname="127.0.0.1",
+                port=1883,
+                qos=1
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to publish MQTT pause control: {e}")
+        append_adapter_log(adapter_id, f"[WARN] [system]: Fleet Adapter '{adapter.get('name')}' paused. Decommissioned in Open-RMF.")
     elif action == "resume":
         adapter["status"] = "online"
-        append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' resumed online.")
+        state.paused_fleets.discard(fleet_name)
+        try:
+            import paho.mqtt.publish as mqtt_publish
+            mqtt_publish.single(
+                f"rmf/{fleet_name}/control",
+                payload=json.dumps({"action": "resume", "fleet": fleet_name}),
+                hostname="127.0.0.1",
+                port=1883,
+                qos=1
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to publish MQTT resume control: {e}")
+        append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' resumed online. Recommissioned in Open-RMF.")
 
     save_fleet_adapters_data(adapters)
 

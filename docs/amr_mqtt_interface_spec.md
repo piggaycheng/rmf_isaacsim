@@ -63,6 +63,7 @@
 | `rmf/{fleet_name}/robot/{robot_id}/command_result` | 車端 $\rightarrow$ FA | **1** | 動作完成或異常時 | 車端回報指定 `cmd_id` 之執行結果 |
 | `rmf/{fleet_name}/robot/{robot_id}/deregister` | 車端 $\rightarrow$ FA | **1** | 正常關機或維護時 | 主動註銷並釋放預約路權與站點 |
 | `rmf/{fleet_name}/robot/{robot_id}/status` | 車端 $\rightarrow$ FA | **1** | 斷線時 (LWT 遺囑) | 遺囑訊息：非預期失聯時由 Broker 代發 |
+| `rmf/{fleet_name}/control` | 後端 $\rightarrow$ FA | **1** | 車隊管理控制 (暫停/恢復) | 控制指定車隊暫停或恢復可派遣狀態 |
 
 ---
 
@@ -306,6 +307,22 @@
   "status": "offline",
   "reason": "Unexpected connection loss (LWT triggered)",
   "timestamp": 1728312200.000
+}
+```
+
+---
+
+### 4.8 車隊管理控制 (`control`)
+- **Topic**：`rmf/{fleet_name}/control`
+- **方向**：後端管理系統 $\rightarrow$ Fleet Adapter
+- **QoS**：`1`
+- **說明**：用於動態暫停 (`pause`) 或恢復 (`resume`) 指定車隊的調度。車隊暫停期間，RMF 與 Fleet Adapter 會將該車隊所有機器人退役 (decommission)，且拒絕新調度任務指派；恢復時重新上線 (recommission)。
+
+#### Payload 格式範例：
+```json
+{
+  "action": "pause",
+  "fleet": "fleet1"
 }
 ```
 
