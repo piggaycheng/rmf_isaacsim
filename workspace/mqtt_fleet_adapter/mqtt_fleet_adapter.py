@@ -702,7 +702,15 @@ class MqttFleetAdapter:
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
             if not robot or not robot.is_online:
-                print(f"[RMF -> AMR WARN] Robot '{robot_id}' in fleet '{fleet_name}' is offline or not found. Rejecting NAVIGATE command.")
+                err_msg = f"Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' is offline or not found."
+                print(f"[RMF -> AMR WARN] {err_msg}")
+                if robot and robot.update_handle:
+                    try:
+                        robot.update_handle.more().log_error(err_msg)
+                        robot.update_handle.more().override_status("offline")
+                        robot.update_handle.more().replan()
+                    except Exception as e:
+                        print(f"[RMF ERROR] Error reporting offline NAVIGATE rejection to RMF: {e}")
                 return
 
             target_pos = np.array(
@@ -839,7 +847,15 @@ class MqttFleetAdapter:
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
             if not robot or not robot.is_online:
-                print(f"[RMF -> AMR WARN] Robot '{robot_id}' in fleet '{fleet_name}' is offline or not found. Rejecting ACTION command.")
+                err_msg = f"Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' is offline or not found."
+                print(f"[RMF -> AMR WARN] {err_msg}")
+                if robot and robot.update_handle:
+                    try:
+                        robot.update_handle.more().log_error(err_msg)
+                        robot.update_handle.more().override_status("offline")
+                        robot.update_handle.more().replan()
+                    except Exception as e:
+                        print(f"[RMF ERROR] Error reporting offline ACTION rejection to RMF: {e}")
                 return
 
             robot.cmd_id += 1

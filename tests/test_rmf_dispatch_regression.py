@@ -397,7 +397,61 @@ class TestRMFDispatchRegression(unittest.TestCase):
         self.assertFalse(r2.is_online)
         self.assertTrue(r1.is_online)
 
+    def test_issue11_4_offline_command_rejection_reported_to_rmf(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1", "initial_location": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
+        robot = adapter.robots[("fleet1", "carter1")]
+        mock_handle = MagicMock()
+        robot.update_handle = mock_handle
+
+        # Robot goes offline
+        robot.is_online = False
+        robot.status = "offline"
+
+        adapter.mqtt_client.publish.reset_mock()
+        mock_handle.reset_mock()
+
+        # 1. RMF attempts to dispatch NAVIGATE to offline robot
+        dest = MagicMock()
+        dest.position = [10.0, 10.0, 0.0]
+        dest.map = "L1"
+        dest.dock = None
+        mock_nav_exec = MagicMock()
+
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, mock_nav_exec)
+
+        # Must NOT finish, must NOT accept execution, must NOT publish MQTT command
+        mock_nav_exec.finished.assert_not_called()
+        self.assertIsNone(robot.current_execution)
+        adapter.mqtt_client.publish.assert_not_called()
+        # Must report to RMF via log_error, override_status, and replan
+        mock_handle.more().log_error.assert_called_once()
+        self.assertIn("offline", mock_handle.more().log_error.call_args[0][0])
+        mock_handle.more().override_status.assert_called_with("offline")
+        mock_handle.more().replan.assert_called_once()
+
+        mock_handle.reset_mock()
+
+        # 2. RMF attempts to dispatch ACTION to offline robot
+        mock_act_exec = MagicMock()
+        adapter._on_rmf_action("fleet1", "carter1", "teleop", {}, mock_act_exec)
+
+        mock_act_exec.finished.assert_not_called()
+        self.assertIsNone(robot.current_execution)
+        adapter.mqtt_client.publish.assert_not_called()
+        mock_handle.more().log_error.assert_called_once()
+        mock_handle.more().replan.assert_called_once()
+
+        # 3. Robot reconnects via heartbeat - verify rejected command is NOT re-sent
+        adapter.mqtt_client.publish.reset_mock()
+        adapter._handle_heartbeat("carter1", "fleet1", {"x": 0.0, "y": 0.0, "yaw": 0.0, "status": "idle"})
+        self.assertTrue(robot.is_online)
+        # Verify no commands were published to robot
+        cmd_pubs = [c for c in adapter.mqtt_client.publish.call_args_list if "command" in c[0][0]]
+        self.assertEqual(len(cmd_pubs), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
