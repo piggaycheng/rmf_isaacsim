@@ -77,6 +77,7 @@
   1. **開機首次發送**：車輛系統啟動完成且定位成功後立即發送。
   2. **3 秒自動重試機制（晚開機應對）**：發送後**若超過 3 秒未收到 `register_ack`**（例如 Fleet Adapter 較晚啟動或重啟中），車端**必須以 3 秒為間隔持續自動重發**，直到收到 `status: "success"` 的 ACK 為止。
   3. **逆向要求重註冊**：若車輛運行中收到 `register_ack` 帶有 `status: "require_register"`（代表 FA 剛重啟遺失了名冊），車端**必須立即重新發送**此註冊封包。
+  4. **MQTT 重連不得重新註冊**：`register` 代表新的車端 session，FA 收到後會中斷前一 session 已下發但未完成的命令。同一程序內僅 MQTT／網路斷線重連時，車端**不得**重送 `register`（除非收到 `require_register`），只需恢復 `heartbeat`，進行中的命令照常回報 `command_result`。
 - **說明**：告知 FA 該車輛的物理幾何形狀與預設站點。未完成註冊前，車輛不可切換至 `idle` 亦不可接受調度指令。
 
 #### JSON Schema 與欄位定義
@@ -299,6 +300,8 @@
 - **QoS**：`1`
 - **Retained**：`False`
 - **說明**：車載端在建立 MQTT 連線時，**必須**向 Broker 設定遺囑訊息 (Will Message)。若車輛遭遇異常斷電或無線訊號中斷，EMQX Broker 會立即自動發布此訊息給 FA。
+- **FA 離線處理**（LWT、`deregister` 或心跳逾時 10 秒）：車輛標為 `offline` 並 decommission（不接新任務），已下發的命令保留不結束。離線期間 RMF 下派的導航／動作**不會發送**，FA 以 `log_error` 回報並暫存（同一車只保留最新一筆，不呼叫 `replan` 以免循環）。車輛恢復（心跳或註冊成功後）時，暫存命令以新的 `cmd_id` 下發一次；若 RMF 已取消該 activity 則丟棄。恢復後的可派遣狀態依「離線 > 車隊暫停 > 可用」決定，暫停中的車隊不會因重連而恢復接單。
+- **遺失命令重送**：MQTT 使用 clean session，斷線期間（FA 尚未判定離線前）下發的命令可能遺失。已下發命令若超過 5 秒心跳仍未回報該 `cmd_id`，FA 會以**相同 `cmd_id`** 重送；車端收到與執行中命令相同 `cmd_id` 時**必須**去重，不得重新開始。
 
 #### 車端建立 MQTT 連線時設定之 LWT 內容：
 ```json
@@ -316,7 +319,7 @@
 - **Topic**：`rmf/{fleet_name}/control`
 - **方向**：後端管理系統 $\rightarrow$ Fleet Adapter
 - **QoS**：`1`
-- **說明**：用於動態暫停 (`pause`) 或恢復 (`resume`) 指定車隊的調度。車隊暫停期間，RMF 與 Fleet Adapter 會將該車隊所有機器人退役 (decommission)，且拒絕新調度任務指派；恢復時重新上線 (recommission)。
+- **說明**：用於動態暫停 (`pause`) 或恢復 (`resume`) 指定車隊的調度。車隊暫停期間，RMF 與 Fleet Adapter 會將該車隊所有機器人退役 (decommission)，且拒絕新調度任務指派；恢復時重新上線 (recommission)，但仍離線的車維持 decommission 直到恢復連線。暫停不影響進行中命令的完成回報。
 
 #### Payload 格式範例：
 ```json

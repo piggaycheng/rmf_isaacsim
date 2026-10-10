@@ -44,6 +44,10 @@ def find_backend_path(subpath: str) -> str:
     return candidates[0]
 
 
+# Grace period before a dispatched command not reflected in heartbeats is considered lost.
+LOST_CMD_RESEND_S = 5.0
+
+
 class ManagedRobot:
     """Tracks state and command execution handles for a single robot."""
 
@@ -78,6 +82,9 @@ class ManagedRobot:
         self.is_retrying: bool = False
         self.nav_retries: int = 0
         self.last_cmd_payload: Optional[Dict[str, Any]] = None
+        # RMF command received while offline; held (not sent) until the robot is back online.
+        self.deferred_cmd_payload: Optional[Dict[str, Any]] = None
+        self.last_dispatch_time: float = 0.0
 
 
 class MqttFleetAdapter:
@@ -154,6 +161,87 @@ class MqttFleetAdapter:
     def _get_robot(self, fleet_name: Optional[str], robot_id: str) -> Optional[ManagedRobot]:
         target_fleet = fleet_name or self.fleet_name
         return self.robots.get((target_fleet, robot_id))
+
+    def _sync_rmf_availability(self, robot: ManagedRobot):
+        """Single source of truth for RMF status/commission: offline > paused > available."""
+        if not robot.update_handle:
+            return
+        try:
+            more = robot.update_handle.more()
+            if not robot.is_online:
+                more.override_status("offline")
+                more.unstable_decommission()
+            elif robot.is_paused:
+                # "paused" is not a valid robot_state.json status; decommission alone blocks new bids.
+                more.override_status(None)
+                more.unstable_decommission()
+            else:
+                more.override_status(None)
+                more.unstable_recommission()
+        except Exception as e:
+            print(f"[RMF WARN] Error syncing RMF availability for '{robot.name}' ({robot.fleet_name}): {e}")
+
+    def _defer_command(self, robot: ManagedRobot, execution: Any, cmd_payload: Dict[str, Any], err_msg: str):
+        """Hold an RMF command for an offline robot instead of rejecting/replanning (avoids replan loops)."""
+        print(f"[RMF -> AMR WARN] {err_msg} Deferring until robot is back online.")
+        robot.is_holding = False
+        robot.cmd_id += 1  # invalidate late results from earlier commands
+        robot.nav_retries = 0
+        robot.is_retrying = False
+        robot.current_execution = execution
+        robot.target_position = None
+        robot.last_cmd_payload = None
+        robot.deferred_cmd_payload = cmd_payload
+        if robot.update_handle:
+            try:
+                robot.update_handle.more().log_error(f"{err_msg} Command deferred until robot reconnects.")
+            except Exception as e:
+                print(f"[RMF WARN] Error logging deferred command for '{robot.name}': {e}")
+        self._sync_rmf_availability(robot)
+
+    def _resend_if_lost(self, robot: ManagedRobot, reported_cmd_id: Any):
+        """Commands published while the robot's MQTT link was down (before the FA noticed) are lost
+        with a clean session. If heartbeats still do not show the active cmd_id after a grace period,
+        resend it with the same cmd_id (robots must ignore a duplicate of the running cmd_id)."""
+        payload = robot.last_cmd_payload
+        if (
+            robot.current_execution is None
+            or payload is None
+            or robot.deferred_cmd_payload is not None
+            or robot.is_retrying
+            or payload.get("cmd_id") != robot.cmd_id
+            or reported_cmd_id == robot.cmd_id
+        ):
+            return
+        now = time.time()
+        if now - robot.last_dispatch_time < LOST_CMD_RESEND_S:
+            return
+        robot.last_dispatch_time = now
+        cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
+        self.mqtt_client.publish(cmd_topic, json.dumps(dict(payload, timestamp=now)), qos=1)
+        print(f"[RMF -> AMR] Robot '{robot.name}' does not report cmd_id {robot.cmd_id} (reports {reported_cmd_id}); resent {payload.get('action')} via {cmd_topic}")
+
+    def _dispatch_deferred_command(self, robot: ManagedRobot):
+        payload = robot.deferred_cmd_payload
+        if payload is None:
+            return
+        robot.deferred_cmd_payload = None
+        execution = robot.current_execution
+        if execution is None or not execution.okay():
+            print(f"[RMF -> AMR] Dropping deferred command for '{robot.name}': RMF execution no longer active.")
+            robot.current_execution = None
+            return
+        robot.cmd_id += 1
+        payload = dict(payload, cmd_id=robot.cmd_id, timestamp=time.time())
+        target = payload.get("target")
+        if payload.get("action") in ("navigate", "dock") and target:
+            robot.target_position = np.array(
+                [target["x"], target["y"], target["yaw"]], dtype=np.float64)
+        robot.last_cmd_payload = payload
+        robot.last_dispatch_time = time.time()
+        cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
+        self.mqtt_client.publish(cmd_topic, json.dumps(payload), qos=1)
+        print(f"[RMF -> AMR] Dispatched deferred {payload.get('action')} (cmd_id: {robot.cmd_id}) to '{robot.name}' via {cmd_topic}")
 
 
     def _init_rmf(self):
@@ -307,24 +395,14 @@ class MqttFleetAdapter:
                 for (f_name, r_id), robot in self.robots.items():
                     if f_name == fleet_name:
                         robot.is_paused = True
-                        if not self.mock_rmf and robot.update_handle:
-                            try:
-                                robot.update_handle.more().override_status("paused")
-                                robot.update_handle.more().unstable_decommission()
-                            except Exception as e:
-                                print(f"[RMF WARN] Error pausing robot '{r_id}' in fleet '{f_name}': {e}")
+                        self._sync_rmf_availability(robot)
                 print(f"[FLEET CONTROL] Fleet [{fleet_name}] paused in Fleet Adapter.")
             elif action == "resume":
                 self.paused_fleets.discard(fleet_name)
                 for (f_name, r_id), robot in self.robots.items():
                     if f_name == fleet_name:
                         robot.is_paused = False
-                        if not self.mock_rmf and robot.update_handle:
-                            try:
-                                robot.update_handle.more().override_status(None)
-                                robot.update_handle.more().unstable_recommission()
-                            except Exception as e:
-                                print(f"[RMF WARN] Error resuming robot '{r_id}' in fleet '{f_name}': {e}")
+                        self._sync_rmf_availability(robot)
                 print(f"[FLEET CONTROL] Fleet [{fleet_name}] resumed in Fleet Adapter.")
 
     # ==========================================================================
@@ -368,16 +446,12 @@ class MqttFleetAdapter:
                 if default_charger:
                     existing_robot.charger_waypoint = default_charger
                 existing_robot.last_heartbeat = time.time()
+                existing_robot.is_paused = fleet_name in self.paused_fleets
+                self._sync_rmf_availability(existing_robot)
 
-                if existing_robot.update_handle:
-                    try:
-                        existing_robot.update_handle.more().override_status(None)
-                        existing_robot.update_handle.more().unstable_recommission()
-                    except Exception as e:
-                        print(f"[RMF WARN] Error recommissioning '{robot_id}' on re-register: {e}")
-
-                # Fresh registration signifies a new session/boot: abort any stale execution from prior session
-                if existing_robot.current_execution:
+                # Fresh registration signifies a new session/boot: abort any stale execution from prior session.
+                # A deferred command was never sent to the robot, so it is not stale: dispatch it below.
+                if existing_robot.current_execution and existing_robot.deferred_cmd_payload is None:
                     print(f"[REGISTER WARN] Aborting stale execution for '{robot_id}' from prior session (cmd_id: {existing_robot.cmd_id}).")
                     if existing_robot.update_handle:
                         try:
@@ -393,7 +467,6 @@ class MqttFleetAdapter:
                     existing_robot.stop_cmd_id = None
 
                 existing_robot.status = "idle"
-                activity_id = None
 
                 if not self.mock_rmf and existing_robot.update_handle:
                     try:
@@ -403,6 +476,8 @@ class MqttFleetAdapter:
                         print(f"[WARN] Failed to update RMF state on re-register for '{robot_id}': {e}")
 
                 self._send_register_ack(robot_id, success=True, msg="Registered successfully", fleet_name=fleet_name)
+                # After the ACK, because the robot ignores commands until it is registered.
+                self._dispatch_deferred_command(existing_robot)
                 return
 
             # Live Open-RMF Registration
@@ -460,12 +535,7 @@ class MqttFleetAdapter:
             # If fleet is currently paused, mark new robot paused
             if fleet_name in self.paused_fleets:
                 managed_robot.is_paused = True
-                if not self.mock_rmf and update_handle:
-                    try:
-                        update_handle.more().override_status("paused")
-                        update_handle.more().unstable_decommission()
-                    except Exception as e:
-                        print(f"[RMF WARN] Error setting paused status for '{robot_id}': {e}")
+                self._sync_rmf_availability(managed_robot)
 
         # Send ACK back to AMR
         self._send_register_ack(robot_id, success=True, msg="Registered successfully", fleet_name=fleet_name)
@@ -514,16 +584,13 @@ class MqttFleetAdapter:
             robot.is_online = True
 
             if was_offline:
-                print(f"[HEARTBEAT] Robot '{robot_id}' came back online via heartbeat. Recommissioning in RMF.")
-                if not self.mock_rmf and robot.update_handle:
-                    try:
-                        robot.update_handle.more().override_status(None)
-                        robot.update_handle.more().unstable_recommission()
-                    except Exception as e:
-                        print(f"[RMF WARN] Error recommissioning '{robot_id}' on heartbeat recovery: {e}")
+                print(f"[HEARTBEAT] Robot '{robot_id}' came back online via heartbeat. Restoring RMF availability.")
+                self._sync_rmf_availability(robot)
+                self._dispatch_deferred_command(robot)
 
             # Check if active navigation command reached its destination (ignore if in-place holding)
             reported_cmd_id = payload.get("current_cmd_id")
+            self._resend_if_lost(robot, reported_cmd_id)
             if robot.current_execution and robot.target_position is not None and not robot.is_holding:
                 # 1. Heartbeat must NEVER complete docking or actions (docking and actions require explicit command_result)
                 is_docking_or_action = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") in ["dock", "action"])
@@ -577,6 +644,7 @@ class MqttFleetAdapter:
                         print(f"[NAV] Current execution for '{robot_id}' is no longer okay. Clearing execution.")
                         robot.current_execution = None
                         robot.target_position = None
+                        robot.deferred_cmd_payload = None
 
                     rmf_state = rmf_easy.RobotState(robot.map_name, robot.position, robot.battery_soc)
                     activity_id = (
@@ -598,28 +666,29 @@ class MqttFleetAdapter:
             if robot:
                 robot.is_online = False
                 robot.status = "offline"
-                if robot.current_execution:
+                if robot.current_execution and robot.deferred_cmd_payload is None:
                     print(f"[DEREGISTER] Robot '{robot_id}' deregistered during active execution (cmd_id: {robot.cmd_id}). Aborting execution and requesting RMF replan.")
                     if robot.update_handle:
                         try:
                             robot.update_handle.more().log_error(f"Robot '{robot_id}' deregistered during active execution (cmd_id: {robot.cmd_id}).")
-                            robot.update_handle.more().override_status("offline")
-                            robot.update_handle.more().replan()
                         except Exception as e:
-                            print(f"[RMF WARN] Error aborting execution on deregister for '{robot_id}': {e}")
+                            print(f"[RMF WARN] Error logging deregister abort for '{robot_id}': {e}")
                     robot.current_execution = None
                     robot.target_position = None
                     robot.last_cmd_payload = None
                     robot.nav_retries = 0
                     robot.is_retrying = False
                     robot.stop_cmd_id = None
-                else:
+                    robot.cmd_id += 1  # late results from the ended session must not match
+                    self._sync_rmf_availability(robot)
+                    # While offline, the re-issued command is deferred (see _defer_command), so no replan loop.
                     if robot.update_handle:
                         try:
-                            robot.update_handle.more().override_status("offline")
-                            robot.update_handle.more().unstable_decommission()
+                            robot.update_handle.more().replan()
                         except Exception as e:
-                            print(f"[RMF WARN] Error updating RMF offline state for '{robot_id}': {e}")
+                            print(f"[RMF WARN] Error requesting replan on deregister for '{robot_id}': {e}")
+                else:
+                    self._sync_rmf_availability(robot)
                 print(f"[DEREGISTER] Robot '{robot_id}' marked offline (retaining update_handle, not deleted).")
             else:
                 print(f"[DEREGISTER WARN] Cannot deregister '{robot_id}': robot not found in fleet '{fleet_name}'. Ignoring.")
@@ -635,12 +704,7 @@ class MqttFleetAdapter:
                         return
                     robot.is_online = False
                     robot.status = "offline"
-                    if not self.mock_rmf and robot.update_handle:
-                        try:
-                            robot.update_handle.more().override_status("offline")
-                            robot.update_handle.more().unstable_decommission()
-                        except Exception as e:
-                            print(f"[RMF WARN] Error decommissioning '{robot_id}': {e}")
+                    self._sync_rmf_availability(robot)
                     print(f"[ALERT] Robot '{robot_id}' marked OFFLINE due to status message.")
                 else:
                     print(f"[STATUS WARN] Cannot update status for '{robot_id}': robot not found in fleet '{fleet_name}'. Ignoring.")
@@ -700,6 +764,7 @@ class MqttFleetAdapter:
                                     cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
                                     payload_to_send = dict(robot.last_cmd_payload)
                                     payload_to_send["timestamp"] = time.time()
+                                    robot.last_dispatch_time = time.time()
                                     self.mqtt_client.publish(cmd_topic, json.dumps(payload_to_send), qos=1)
                                     print(f"[NAV RETRY] Re-dispatched cmd_id {cmd_id} to '{robot_id}'")
                         threading.Timer(1.2, retry_nav).start()
@@ -719,19 +784,28 @@ class MqttFleetAdapter:
     # ==========================================================================
     # RMF -> Robot Outbound Callbacks (調度下發指令)
     # ==========================================================================
+    @staticmethod
+    def _navigate_payload(robot_id, cmd_id, target_pos, target_map, dock_name, speed_limit) -> Dict[str, Any]:
+        return {
+            "robot_id": robot_id,
+            "cmd_id": cmd_id,
+            "action": "dock" if dock_name else "navigate",
+            "target": {
+                "x": float(target_pos[0]),
+                "y": float(target_pos[1]),
+                "yaw": float(target_pos[2]),
+                "level_name": target_map,
+            },
+            "dock_name": dock_name,
+            "speed_limit": speed_limit,
+            "timestamp": time.time(),
+        }
+
     def _on_rmf_navigate(self, fleet_name: str, robot_id: str, destination: Any, execution: Any):
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
-            if not robot or not robot.is_online:
-                err_msg = f"Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' is offline or not found."
-                print(f"[RMF -> AMR WARN] {err_msg}")
-                if robot and robot.update_handle:
-                    try:
-                        robot.update_handle.more().log_error(err_msg)
-                        robot.update_handle.more().override_status("offline")
-                        robot.update_handle.more().replan()
-                    except Exception as e:
-                        print(f"[RMF ERROR] Error reporting offline NAVIGATE rejection to RMF: {e}")
+            if not robot:
+                print(f"[RMF -> AMR WARN] Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' not found.")
                 return
 
             target_pos = np.array(
@@ -746,6 +820,13 @@ class MqttFleetAdapter:
             same_map = (target_map == robot.map_name)
             dock_name = getattr(destination, "dock", None)
             speed_limit = getattr(destination, "speed_limit", None)
+
+            if not robot.is_online:
+                self._defer_command(
+                    robot, execution,
+                    self._navigate_payload(robot_id, None, target_pos, target_map, dock_name, speed_limit),
+                    f"Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' is offline.")
+                return
 
             # Check yaw alignment with [-pi, pi] wrap-around
             target_yaw = float(target_pos[2])
@@ -778,6 +859,7 @@ class MqttFleetAdapter:
                 robot.current_execution = execution
                 robot.target_position = target_pos
                 robot.is_holding = False
+                robot.deferred_cmd_payload = None
 
                 def finish_in_place():
                     with self.lock:
@@ -798,23 +880,12 @@ class MqttFleetAdapter:
             robot.nav_retries = 0
             robot.current_execution = execution
             robot.target_position = target_pos
+            robot.deferred_cmd_payload = None
 
             cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
-            cmd_payload = {
-                "robot_id": robot_id,
-                "cmd_id": robot.cmd_id,
-                "action": "dock" if dock_name else "navigate",
-                "target": {
-                    "x": float(target_pos[0]),
-                    "y": float(target_pos[1]),
-                    "yaw": float(target_pos[2]),
-                    "level_name": target_map,
-                },
-                "dock_name": dock_name,
-                "speed_limit": speed_limit,
-                "timestamp": time.time(),
-            }
+            cmd_payload = self._navigate_payload(robot_id, robot.cmd_id, target_pos, target_map, dock_name, speed_limit)
             robot.last_cmd_payload = cmd_payload
+            robot.last_dispatch_time = time.time()
 
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
             action_label = f"DOCK ({dock_name})" if dock_name else "NAVIGATE"
@@ -839,15 +910,17 @@ class MqttFleetAdapter:
                         print(f"[RMF STOP] is_same check warning: {e}")
 
             was_holding = robot.is_holding
+            was_deferred = robot.deferred_cmd_payload is not None
             robot.is_holding = False
+            robot.deferred_cmd_payload = None
             # Invalidate current execution, target position, and any pending retry payloads
             robot.current_execution = None
             robot.target_position = None
             robot.last_cmd_payload = None
             robot.nav_retries = 0
 
-            if was_holding:
-                print(f"[RMF -> AMR] Released in-place hold for '{robot_id}' without downward STOP command.")
+            if was_holding or was_deferred:
+                print(f"[RMF -> AMR] Released in-place hold / deferred command for '{robot_id}' without downward STOP command.")
                 return
 
             robot.cmd_id += 1
@@ -867,31 +940,32 @@ class MqttFleetAdapter:
     def _on_rmf_action(self, fleet_name: str, robot_id: str, category: str, description: Any, execution: Any):
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
-            if not robot or not robot.is_online:
-                err_msg = f"Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' is offline or not found."
-                print(f"[RMF -> AMR WARN] {err_msg}")
-                if robot and robot.update_handle:
-                    try:
-                        robot.update_handle.more().log_error(err_msg)
-                        robot.update_handle.more().override_status("offline")
-                        robot.update_handle.more().replan()
-                    except Exception as e:
-                        print(f"[RMF ERROR] Error reporting offline ACTION rejection to RMF: {e}")
+            if not robot:
+                print(f"[RMF -> AMR WARN] Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' not found.")
                 return
 
-            robot.cmd_id += 1
-            robot.current_execution = execution
-            robot.target_position = None  # Clear navigation target so heartbeat cannot false-match arrival
-            cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
-                "cmd_id": robot.cmd_id,
+                "cmd_id": None,
                 "action": "action",
                 "category": category,
                 "description": description,
                 "timestamp": time.time(),
             }
+            if not robot.is_online:
+                self._defer_command(
+                    robot, execution, cmd_payload,
+                    f"Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' is offline.")
+                return
+
+            robot.cmd_id += 1
+            cmd_payload["cmd_id"] = robot.cmd_id
+            robot.current_execution = execution
+            robot.target_position = None  # Clear navigation target so heartbeat cannot false-match arrival
+            robot.deferred_cmd_payload = None
+            cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
             robot.last_cmd_payload = cmd_payload
+            robot.last_dispatch_time = time.time()
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
             print(f"[RMF -> AMR] Dispatched ACTION '{category}' (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}")
 
@@ -911,12 +985,7 @@ class MqttFleetAdapter:
                         robot.status = "offline"
                         if robot.current_execution:
                             print(f"[WATCHDOG WARN] Robot '{r_id}' timed out during execution (cmd_id: {robot.cmd_id}). Preserving execution without falsely marking finished.")
-                        if not self.mock_rmf and robot.update_handle:
-                            try:
-                                robot.update_handle.more().override_status("offline")
-                                robot.update_handle.more().unstable_decommission()
-                            except Exception as e:
-                                print(f"[RMF WARN] Error decommissioning '{r_id}': {e}")
+                        self._sync_rmf_availability(robot)
 
     def start(self):
         """Starts MQTT connection, background threads, and spins ROS 2."""

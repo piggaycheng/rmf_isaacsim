@@ -420,35 +420,155 @@ class TestRMFDispatchRegression(unittest.TestCase):
 
         adapter._on_rmf_navigate("fleet1", "carter1", dest, mock_nav_exec)
 
-        # Must NOT finish, must NOT accept execution, must NOT publish MQTT command
+        # Must NOT finish, must NOT publish MQTT command, must NOT replan (avoids replan loop)
         mock_nav_exec.finished.assert_not_called()
-        self.assertIsNone(robot.current_execution)
+        self.assertIs(robot.current_execution, mock_nav_exec)
+        self.assertIsNotNone(robot.deferred_cmd_payload)
+        self.assertIsNone(robot.target_position)
         adapter.mqtt_client.publish.assert_not_called()
-        # Must report to RMF via log_error, override_status, and replan
         mock_handle.more().log_error.assert_called_once()
         self.assertIn("offline", mock_handle.more().log_error.call_args[0][0])
         mock_handle.more().override_status.assert_called_with("offline")
-        mock_handle.more().replan.assert_called_once()
+        mock_handle.more().unstable_decommission.assert_called()
+        mock_handle.more().replan.assert_not_called()
+
+        # Repeated callbacks while offline must not snowball into replans
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, mock_nav_exec)
+        mock_handle.more().replan.assert_not_called()
 
         mock_handle.reset_mock()
 
-        # 2. RMF attempts to dispatch ACTION to offline robot
+        # 2. RMF attempts to dispatch ACTION to offline robot -> replaces the deferred command
         mock_act_exec = MagicMock()
         adapter._on_rmf_action("fleet1", "carter1", "teleop", {}, mock_act_exec)
 
         mock_act_exec.finished.assert_not_called()
-        self.assertIsNone(robot.current_execution)
+        self.assertIs(robot.current_execution, mock_act_exec)
+        self.assertEqual(robot.deferred_cmd_payload["action"], "action")
         adapter.mqtt_client.publish.assert_not_called()
         mock_handle.more().log_error.assert_called_once()
-        mock_handle.more().replan.assert_called_once()
+        mock_handle.more().replan.assert_not_called()
 
-        # 3. Robot reconnects via heartbeat - verify rejected command is NOT re-sent
+        # 3. Robot reconnects via heartbeat -> deferred command dispatched exactly once with a fresh cmd_id
         adapter.mqtt_client.publish.reset_mock()
         adapter._handle_heartbeat("carter1", "fleet1", {"x": 0.0, "y": 0.0, "yaw": 0.0, "status": "idle"})
         self.assertTrue(robot.is_online)
-        # Verify no commands were published to robot
-        cmd_pubs = [c for c in adapter.mqtt_client.publish.call_args_list if "command" in c[0][0]]
+        mock_handle.more().unstable_recommission.assert_called()
+        cmd_pubs = [c for c in adapter.mqtt_client.publish.call_args_list if c[0][0].endswith("/command")]
+        self.assertEqual(len(cmd_pubs), 1)
+        sent = json.loads(cmd_pubs[0][0][1])
+        self.assertEqual(sent["action"], "action")
+        self.assertEqual(sent["cmd_id"], robot.cmd_id)
+        self.assertIsNone(robot.deferred_cmd_payload)
+
+        adapter.mqtt_client.publish.reset_mock()
+        adapter._handle_heartbeat("carter1", "fleet1", {"x": 0.0, "y": 0.0, "yaw": 0.0, "status": "moving"})
+        cmd_pubs = [c for c in adapter.mqtt_client.publish.call_args_list if c[0][0].endswith("/command")]
         self.assertEqual(len(cmd_pubs), 0)
+
+        # Completion of the dispatched deferred command finishes the execution
+        adapter._handle_command_result("carter1", "fleet1", {"cmd_id": robot.cmd_id, "status": "completed"})
+        mock_act_exec.finished.assert_called_once()
+
+    def test_issue11_4_deferred_command_dropped_if_rmf_moved_on(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        robot = adapter.robots[("fleet1", "carter1")]
+        robot.update_handle = MagicMock()
+        adapter._handle_status("carter1", "fleet1", {"status": "offline"})
+
+        dest = MagicMock()
+        dest.position = [3.0, 0.0, 0.0]
+        dest.map = "L1"
+        dest.dock = None
+        dest.speed_limit = None
+        execution = MagicMock()
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, execution)
+
+        # RMF stops the deferred activity -> no STOP sent to the offline robot
+        adapter.mqtt_client.publish.reset_mock()
+        adapter._on_rmf_stop("fleet1", "carter1", None)
+        self.assertIsNone(robot.deferred_cmd_payload)
+        self.assertIsNone(robot.current_execution)
+        adapter.mqtt_client.publish.assert_not_called()
+
+        # Execution no longer okay at recovery -> dropped, not sent
+        adapter._handle_status("carter1", "fleet1", {"status": "offline"})
+        execution2 = MagicMock()
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, execution2)
+        execution2.okay.return_value = False
+        adapter._handle_heartbeat("carter1", "fleet1", {"x": 0.0, "y": 0.0, "yaw": 0.0, "status": "idle"})
+        cmd_pubs = [c for c in adapter.mqtt_client.publish.call_args_list if c[0][0].endswith("/command")]
+        self.assertEqual(len(cmd_pubs), 0)
+        self.assertIsNone(robot.current_execution)
+
+    def test_lost_command_resent_with_same_cmd_id(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        robot = adapter.robots[("fleet1", "carter1")]
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = "L1"
+        dest.dock = None
+        dest.speed_limit = None
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, MagicMock())
+        cmd_id = robot.cmd_id
+
+        def cmd_pubs():
+            return [json.loads(c[0][1]) for c in adapter.mqtt_client.publish.call_args_list if c[0][0].endswith("/command")]
+
+        adapter.mqtt_client.publish.reset_mock()
+        hb = {"x": 0.0, "y": 0.0, "yaw": 0.0, "status": "idle", "current_cmd_id": None}
+        # Within the grace period: no resend
+        adapter._handle_heartbeat("carter1", "fleet1", hb)
+        self.assertEqual(cmd_pubs(), [])
+        # Robot reports the command: no resend even after the grace period
+        robot.last_dispatch_time -= 10
+        adapter._handle_heartbeat("carter1", "fleet1", dict(hb, status="moving", current_cmd_id=cmd_id))
+        self.assertEqual(cmd_pubs(), [])
+        # Robot does not report it after the grace period: resent once with the same cmd_id
+        adapter._handle_heartbeat("carter1", "fleet1", hb)
+        adapter._handle_heartbeat("carter1", "fleet1", hb)
+        sent = cmd_pubs()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["cmd_id"], cmd_id)
+        self.assertEqual(sent[0]["action"], "navigate")
+
+    def test_pause_survives_reconnect_and_reregister(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        robot = adapter.robots[("fleet1", "carter1")]
+        handle = MagicMock()
+        robot.update_handle = handle
+        adapter._handle_fleet_control("fleet1", {"action": "pause"})
+
+        # Heartbeat recovery while paused
+        adapter._handle_status("carter1", "fleet1", {"status": "offline"})
+        handle.reset_mock()
+        adapter._handle_heartbeat("carter1", "fleet1", {"x": 0.0, "y": 0.0, "yaw": 0.0, "status": "idle"})
+        handle.more().unstable_recommission.assert_not_called()
+        handle.more().unstable_decommission.assert_called()
+        handle.more().override_status.assert_called_with(None)
+
+        # Re-register while paused
+        handle.reset_mock()
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        self.assertTrue(robot.is_paused)
+        handle.more().unstable_recommission.assert_not_called()
+        handle.more().unstable_decommission.assert_called()
+
+        # Resume while offline keeps the robot decommissioned
+        adapter._handle_status("carter1", "fleet1", {"status": "offline"})
+        handle.reset_mock()
+        adapter._handle_fleet_control("fleet1", {"action": "resume"})
+        handle.more().unstable_recommission.assert_not_called()
+        handle.more().override_status.assert_called_with("offline")
+
+        # Back online after resume -> available again
+        handle.reset_mock()
+        adapter._handle_heartbeat("carter1", "fleet1", {"x": 0.0, "y": 0.0, "yaw": 0.0, "status": "idle"})
+        handle.more().unstable_recommission.assert_called_once()
+        handle.more().override_status.assert_called_with(None)
 
     def test_issue11_1_deregister_and_reboot_invalidation(self):
         adapter = self._create_mock_adapter(["fleet1"])
@@ -476,9 +596,35 @@ class TestRMFDispatchRegression(unittest.TestCase):
         self.assertIsNone(robot.target_position)
         self.assertFalse(robot.is_online)
         self.assertEqual(robot.status, "offline")
-        # Must report to RMF and trigger replan
+        # Must report to RMF, stop new task assignment, and trigger replan
         mock_handle.more().log_error.assert_called_once()
+        mock_handle.more().unstable_decommission.assert_called()
         mock_handle.more().replan.assert_called_once()
+        # Late result from the ended session must not match
+        adapter._handle_command_result("carter1", "fleet1", {"cmd_id": 10, "status": "completed"})
+        mock_exec1.finished.assert_not_called()
+
+        # RMF re-issues the step while offline -> deferred, then sent after re-register ACK
+        dest = MagicMock()
+        dest.position = [2.0, 2.0, 0.0]
+        dest.map = "L1"
+        dest.dock = None
+        dest.speed_limit = None
+        mock_exec_replanned = MagicMock()
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, mock_exec_replanned)
+        self.assertIsNotNone(robot.deferred_cmd_payload)
+        mock_handle.more().replan.assert_called_once()
+        adapter.mqtt_client.publish.reset_mock()
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1", "initial_location": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
+        cmd_pubs = [c for c in adapter.mqtt_client.publish.call_args_list if c[0][0].endswith("/command")]
+        self.assertEqual(len(cmd_pubs), 1)
+        self.assertEqual(json.loads(cmd_pubs[0][0][1])["action"], "navigate")
+        self.assertIs(robot.current_execution, mock_exec_replanned)
+        mock_handle.more().replan.assert_called_once()  # not aborted as stale
+
+        # Simulate that step being cancelled so the original flow below starts clean
+        adapter._on_rmf_stop("fleet1", "carter1", None)
+        adapter._handle_deregister("carter1", "fleet1", {"reason": "rebooting"})
 
         # Robot boots up and re-registers
         mock_handle.reset_mock()

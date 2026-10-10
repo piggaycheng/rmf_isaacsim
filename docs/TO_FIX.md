@@ -220,7 +220,7 @@
 
 - [x] 執行中 `deregister` → 重新註冊後，不會沿用舊 activity，也不會被心跳誤報完成。
 - [x] 上述情境 RMF 會重規劃或呈現明確中斷狀態，不會永久卡單。
-- [x] 單純 MQTT 斷線重連（未送 `deregister`）仍保留原 execution，不重送也不重複完成。
+- [x] 單純 MQTT 斷線重連（未送 `deregister`）仍保留原 execution，不重送也不重複完成。（需配合車端重連不重新註冊，見 11.6）
 
 ### 11.2 中優先級：`_get_robot()` 跨 fleet fallback，破壞同名車隔離
 
@@ -273,6 +273,38 @@
 **驗收：**
 
 - [x] 所有狀態欄位都在 `__init__()` 宣告。
+
+### 11.6 第三輪 review（至 `068f311`）發現並已修正的問題
+
+1. **MQTT 重連也會中斷任務（高）**：Adapter 收到 `register` 一律中斷 execution，但 slam `fleet_bridge_node.py` 每次 MQTT 連線都重新註冊，導航中網路瞬斷就會被中斷重規劃。
+   - 修正：bridge 只在新程序或收到 `require_register` 時註冊（slam repo）；spec §4.1 加入「MQTT 重連不得重新註冊」。
+2. **離線時 replan 循環（中高）**：`_on_rmf_navigate()`／`_on_rmf_action()` 離線時呼叫 `replan()`，RMF 會再下派同一步，形成循環；執行中 `deregister` 沒有 decommission，離線車仍可接新任務；action 階段 `replan()` 無效，execution 被丟掉後會卡住。
+   - 修正：離線收到的命令改為暫存（`deferred_cmd_payload`），只 `log_error`、不 `replan`；恢復上線時以新 `cmd_id` 下發一次，RMF 已取消或 `okay()` 為假則丟棄；`_on_rmf_stop()` 對暫存命令不下發 STOP。`deregister` 一律 decommission，並遞增 `cmd_id` 讓舊 session 的遲到結果不會配對。
+3. **重連或重新註冊會解除 pause（中）**：重新註冊與心跳恢復都無條件 `unstable_recommission()`。
+   - 修正：新增 `_sync_rmf_availability()`，所有地方依「離線 > 暫停 > 可用」設定 status 與 commission；resume 時仍離線的車維持 decommission。
+4. **斷線但尚未判定離線時下發的命令遺失（高，模擬驗證時發現）**：斷線未滿 10 秒時 FA 仍視車輛在線；RMF 因車端無回應自行 replan，送出的 STOP／NAVIGATE 因 clean session 遺失。重連後車端補報的是舊 `cmd_id` 結果被忽略，心跳 yaw 判定（0.20 rad）也達不到，任務卡住。
+   - 修正：`_resend_if_lost()`：已下發命令超過 `LOST_CMD_RESEND_S`（5 秒）心跳仍未回報該 `cmd_id`，以**相同 `cmd_id`** 重送；車端須對重複 `cmd_id` 去重（spec §4.7）。
+5. **`override_status("paused")` 不合 schema（低，既有）**：`paused` 不在 `robot_state.json` 的 status enum，每次 pause 都報錯。
+   - 修正：暫停時 `override_status(None)`，只靠 decommission 阻擋新任務。
+
+**驗收：**
+
+- [x] 離線期間重複下派不會觸發 `replan()`；恢復後暫存命令只下發一次，完成回報可結束 execution。
+- [x] 暫存命令被 RMF 停止或失效時不下發。
+- [x] 執行中 `deregister` 會 decommission，舊 session 的 `command_result` 不會完成 execution；重新註冊後下發的是離線期間 RMF 重新規劃的命令。
+- [x] 暫停中的車隊在心跳恢復、重新註冊後仍為 paused；resume 時離線車維持 offline。
+- [x] 已下發命令遺失時以相同 `cmd_id` 重送，完成回報可結束 execution。
+- [x] 回歸測試 17 項通過（backend image 內）。
+- [x] 模擬驗證（Isaac Sim，carter2 wp_7）：踢除 MQTT 連線後未重新註冊、任務繼續；封鎖 15 秒期間 RMF 下發的 STOP／NAVIGATE 遺失，重連後 FA 以相同 `cmd_id` 重送，車輛抵達、任務完成。
+- [x] 模擬驗證：暫停 fleet2 後斷線 15 秒再恢復，仍維持 decommission。
+- [ ] 確認 RMF 對 action 階段長時間等待暫存命令的行為（逾時、任務狀態顯示）。
+
+**其他觀察（未修，非本分支範圍）：**
+
+- [ ] pause 只 decommission，指定車輛的 direct request（`robot_task_request`）仍會被執行（模擬中暫停時直接下派 wp_5 仍下發）；需要的話由後端或 FA 擋下。
+- [ ] 心跳完成判定 yaw 門檻 0.20 rad 比 Nav2 停止誤差嚴格（實測 0.21），只能依賴 `command_result`。
+- [ ] fleet2 nav graph（graph 1）只有 wp_5～wp_8，派 carter2 去 wp_2 無路徑。
+- [ ] slam carter1 啟動時 `wait_for_costmap_tf.py` 等 TF 逾時，launch 關閉整個 carter1（含 bridge）。
 
 ## 驗證與交付
 
