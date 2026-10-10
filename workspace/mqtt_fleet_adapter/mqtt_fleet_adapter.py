@@ -543,7 +543,17 @@ class MqttFleetAdapter:
 
         with self.lock:
             robot = self.robots.get(robot_id)
-            if robot and robot.current_execution and not robot.is_holding:
+            if not robot:
+                return
+
+            # Explicit check for STOP command confirmation (never complete previous navigation)
+            if cmd_id is not None and cmd_id == getattr(robot, "stop_cmd_id", None):
+                print(f"[CMD_RESULT] Robot '{robot_id}' confirmed STOP execution (cmd_id: {cmd_id}, status: {status}).")
+                robot.status = "idle"
+                robot.stop_cmd_id = None
+                return
+
+            if robot.current_execution and not robot.is_holding:
                 if cmd_id == robot.cmd_id and status in ["completed", "success"]:
                     print(f"[NAV] Verified completion of cmd_id {cmd_id} for '{robot_id}'.")
                     try:
@@ -671,15 +681,31 @@ class MqttFleetAdapter:
             if not robot:
                 return
 
+            # Verify that activity_id matches the active execution to avoid stopping newer commands
+            if robot.current_execution and hasattr(robot.current_execution, "identifier"):
+                curr_id = robot.current_execution.identifier
+                if curr_id is not None and activity_id is not None:
+                    try:
+                        if hasattr(activity_id, "is_same") and not activity_id.is_same(curr_id):
+                            print(f"[RMF STOP IGNORE] Activity '{activity_id}' does not match current execution for '{robot_id}'. Ignoring stale STOP.")
+                            return
+                    except Exception as e:
+                        print(f"[RMF STOP] is_same check warning: {e}")
+
             was_holding = robot.is_holding
             robot.is_holding = False
+            # Invalidate current execution, target position, and any pending retry payloads
+            robot.current_execution = None
+            robot.target_position = None
+            robot.last_cmd_payload = None
+            robot.nav_retries = 0
+
             if was_holding:
-                robot.current_execution = None
-                robot.target_position = None
                 print(f"[RMF -> AMR] Released in-place hold for '{robot_id}' without downward STOP command.")
                 return
 
             robot.cmd_id += 1
+            robot.stop_cmd_id = robot.cmd_id
             cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
@@ -689,7 +715,7 @@ class MqttFleetAdapter:
                 "timestamp": time.time(),
             }
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
-            print(f"[RMF -> AMR] Dispatched STOP to '{robot_id}'")
+            print(f"[RMF -> AMR] Dispatched STOP (cmd_id: {robot.cmd_id}) to '{robot_id}'")
 
 
     def _on_rmf_action(self, robot_id: str, category: str, description: Any, execution: Any):
