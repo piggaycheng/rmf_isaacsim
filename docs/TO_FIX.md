@@ -89,10 +89,10 @@
 
 **驗收：**
 
-- [ ] 延遲的舊心跳、舊成功結果與重複 QoS 1 訊息不能完成新 execution。
-- [ ] 近距離 execution 不會沿用舊命令的 retry payload。
-- [ ] idle 且 `current_cmd_id=null` 的合法車端行為不會造成永久卡單。
-- [ ] 心跳不能替代 docking／自訂動作的實際完成確認。
+- [x] 延遲的舊心跳、舊成功結果與重複 QoS 1 訊息不能完成新 execution。
+- [x] 近距離 execution 不會沿用舊命令的 retry payload。
+- [x] idle 且 `current_cmd_id=null` 的合法車端行為不會造成永久卡單。
+- [x] 心跳不能替代 docking／自訂動作的實際完成確認。
 
 ## 5. 高優先級：STOP 忽略 activity，可能誤停或誤完成導航
 

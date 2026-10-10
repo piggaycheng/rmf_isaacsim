@@ -434,16 +434,42 @@ class MqttFleetAdapter:
             # Check if active navigation command reached its destination (ignore if in-place holding)
             reported_cmd_id = payload.get("current_cmd_id")
             if robot.current_execution and robot.target_position is not None and not robot.is_holding:
+                # 1. Heartbeat must NEVER complete docking or actions (docking requires explicit command_result)
+                is_docking = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") == "dock")
+
+                # 2. Check floor / level matches target
+                target_level = robot.last_cmd_payload.get("target", {}).get("level_name") if robot.last_cmd_payload else robot.map_name
+                level_matches = (target_level == level_name)
+
+                # 3. Check distance
                 dx = robot.target_position[0] - x
                 dy = robot.target_position[1] - y
                 dist = math.hypot(dx, dy)
 
-                # Only mark completed via heartbeat if robot has stopped (status == 'idle') near destination.
-                # NEVER declare finished while status == 'moving', because that prematurely dispatches
-                # the next waypoint, interrupting active Nav2 execution and causing subsequent steps to abort!
-                cmd_matches = (reported_cmd_id is not None and reported_cmd_id == robot.cmd_id)
-                if status == "idle" and (dist < 0.25 or (cmd_matches and dist < 0.40)):
-                    print(f"[NAV] Robot '{robot_id}' completed cmd_id {robot.cmd_id} (dist: {dist:.3f}m, status: {status}). Finishing execution.")
+                # 4. Check yaw alignment
+                target_yaw = robot.target_position[2]
+                has_yaw_constraint = not math.isnan(target_yaw)
+                yaw_diff = 0.0
+                if has_yaw_constraint:
+                    yaw_diff = abs((target_yaw - yaw + math.pi) % (2 * math.pi) - math.pi)
+                yaw_matches = (not has_yaw_constraint) or (yaw_diff < 0.20)
+
+                # 5. Command ID correlation:
+                # If reported_cmd_id is provided, it MUST match robot.cmd_id (cannot be a stale old cmd_id).
+                # If reported_cmd_id is None / omitted, robot must be idle and strictly within arrival thresholds.
+                cmd_valid = (reported_cmd_id == robot.cmd_id) if reported_cmd_id is not None else True
+
+                # Only mark completed via heartbeat if robot has stopped (status == 'idle') at destination.
+                # NEVER declare finished while status == 'moving'!
+                if (
+                    not is_docking
+                    and level_matches
+                    and cmd_valid
+                    and status == "idle"
+                    and dist < 0.25
+                    and yaw_matches
+                ):
+                    print(f"[NAV] Robot '{robot_id}' completed cmd_id {robot.cmd_id} via heartbeat (dist: {dist:.3f}m, yaw_diff: {yaw_diff:.3f}rad, status: {status}). Finishing execution.")
                     try:
                         robot.current_execution.finished()
                     except Exception as e:
@@ -591,6 +617,9 @@ class MqttFleetAdapter:
 
             if can_finish_in_place:
                 print(f"[RMF -> AMR] Robot '{robot_id}' already at destination [{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_yaw:.2f}] (dist: {dist:.3f}m, yaw_diff: {yaw_diff:.3f}rad, map: '{target_map}', status: '{robot.status}'). Fulfilling in-place execution.")
+                robot.cmd_id += 1
+                robot.nav_retries = 0
+                robot.last_cmd_payload = None
                 robot.current_execution = execution
                 robot.target_position = target_pos
                 robot.is_holding = False
