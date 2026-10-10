@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import time
+import uuid
+import itertools
 import asyncio
 import subprocess
 import threading
@@ -15,6 +17,25 @@ from rmf_task_msgs.msg import ApiRequest, ApiResponse, DispatchStates
 
 import state
 from controller.adapter_controller import append_adapter_log
+
+_task_counter = itertools.count(1)
+
+def generate_task_id() -> str:
+    """Generates guaranteed collision-free task ID: task_<timestamp_ms>_<counter>_<hex8>."""
+    ts = int(time.time() * 1000)
+    cnt = next(_task_counter)
+    uid = uuid.uuid4().hex[:8]
+    return f"task_{ts}_{cnt}_{uid}"
+
+def task_matches(task: Dict[str, Any], identifier: str) -> bool:
+    """Matches task by booking_id, request_id, or local id."""
+    if not identifier:
+        return False
+    return (
+        task.get("booking_id") == identifier
+        or task.get("request_id") == identifier
+        or task.get("id") == identifier
+    )
 
 class RMFService:
     """
@@ -164,7 +185,7 @@ class RMFService:
                             err_str = "Task request rejected by Open-RMF dispatcher"
                         print(f"[RMF Task API] Request [{req_id}] REJECTED: {err_str}")
                         for t in state.current_tasks:
-                            if t.get("id") == req_id or t.get("booking_id") == req_id:
+                            if task_matches(t, req_id):
                                 t["status"] = "failed"
                                 t["error"] = err_str
                                 t["detail"] = err_str
@@ -190,8 +211,9 @@ class RMFService:
                             }
                             mapped_status = status_map.get(rmf_status, "queued")
                             for t in state.current_tasks:
-                                if t.get("id") == req_id or t.get("booking_id") == req_id:
-                                    t["booking_id"] = booking_id
+                                if task_matches(t, req_id):
+                                    if booking_id:
+                                        t["booking_id"] = booking_id
                                     # Terminal state protection: do not let non-terminal override terminal
                                     if t.get("status") not in state.TERMINAL_STATES or mapped_status in state.TERMINAL_STATES:
                                         t["status"] = mapped_status
@@ -213,7 +235,7 @@ class RMFService:
                         if ds.status == 4:
                             err_msg = "; ".join(ds.errors) if ds.errors else "Open-RMF 派車失敗 (無可用車輛或無解)"
                             for t in state.current_tasks:
-                                if (t.get("id") == tid or t.get("booking_id") == tid):
+                                if task_matches(t, tid):
                                     if t.get("status") not in state.TERMINAL_STATES:
                                         t["status"] = "failed"
                                         t["error"] = err_msg
@@ -224,7 +246,7 @@ class RMFService:
                                         )
                         elif ds.status == 5:
                             for t in state.current_tasks:
-                                if (t.get("id") == tid or t.get("booking_id") == tid):
+                                if task_matches(t, tid):
                                     if t.get("status") not in state.TERMINAL_STATES:
                                         t["status"] = "canceled"
                                         append_adapter_log(
@@ -233,7 +255,7 @@ class RMFService:
                                         )
                         elif ds.assignment and ds.assignment.is_assigned:
                             for t in state.current_tasks:
-                                if t.get("id") == tid or t.get("booking_id") == tid:
+                                if task_matches(t, tid):
                                     if ds.assignment.expected_robot_name:
                                         t["robot_id"] = ds.assignment.expected_robot_name
                                     if ds.assignment.fleet_name:
@@ -283,7 +305,7 @@ class RMFService:
                     # Update tasks lifecycle in state.current_tasks
                     if r.task_id:
                         for t in state.current_tasks:
-                            if t.get("id") == r.task_id or t.get("booking_id") == r.task_id:
+                            if task_matches(t, r.task_id):
                                 # Terminal state protection: never revert terminated task back to active
                                 if t.get("status") not in state.TERMINAL_STATES:
                                     t["status"] = "active"
@@ -312,7 +334,7 @@ class RMFService:
                     }
                     stat = status_map.get(ts.state, "active")
                     for t in state.current_tasks:
-                        if t.get("id") == t_id or t.get("booking_id") == t_id:
+                        if task_matches(t, t_id):
                             # Terminal state protection
                             if t.get("status") in state.TERMINAL_STATES and stat not in state.TERMINAL_STATES:
                                 break
@@ -352,7 +374,7 @@ class RMFService:
         Open-RMF will evaluate bids, assign to winning fleet adapter,
         and fleet adapter will dispatch down to AMR via MQTT.
         """
-        req_id = f"task_{int(time.time() * 1000) % 100000:05d}"
+        req_id = generate_task_id()
         
         # Build places sequence
         places = [target_waypoint]
@@ -408,12 +430,15 @@ class RMFService:
             return {
                 "status": "error",
                 "task_id": req_id,
+                "request_id": req_id,
                 "message": "ROS 2 Task Publisher 尚未就緒，無法受理調度請求。請確認 RMF 核心服務已啟動。",
             }
 
         # Add to state.current_tasks immediately
         new_task = {
             "id": req_id,
+            "request_id": req_id,
+            "booking_id": None,
             "type": task_type,
             "target_waypoint": target_waypoint,
             "destination_waypoint": destination_waypoint,
@@ -438,6 +463,7 @@ class RMFService:
         return {
             "status": "success",
             "task_id": req_id,
+            "request_id": req_id,
             "payload": payload_json,
             "message": f"任務 [{req_id}] 已成功提交至 Open-RMF 調度器！",
         }

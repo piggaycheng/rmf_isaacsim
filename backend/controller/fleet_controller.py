@@ -89,6 +89,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "dispatch_response",
                     "status": res.get("status"),
                     "task_id": res.get("task_id"),
+                    "request_id": res.get("request_id"),
                     "message": res.get("message"),
                 })
 

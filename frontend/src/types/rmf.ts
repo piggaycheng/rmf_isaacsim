@@ -152,13 +152,17 @@ export interface DiscoveredRobot {
 
 export interface Task {
   id: string;
+  request_id?: string;
+  booking_id?: string;
   type: 'patrol' | 'delivery' | 'goto';
   target_waypoint: string;
   destination_waypoint?: string;
   robot_id?: string;
-  status: 'queued' | 'active' | 'completed' | 'failed';
+  fleet_name?: string;
+  status: 'queued' | 'active' | 'completed' | 'failed' | 'canceled';
   progress: number; // 0 - 100
   created_at: string;
+  error?: string;
 }
 
 export interface SlamMap {

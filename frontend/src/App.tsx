@@ -556,7 +556,7 @@ export function App() {
     } else {
       // Fallback only for standalone offline preview
       const newTask: Task = {
-        id: `task_${Date.now().toString().slice(-4)}`,
+        id: `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         type: taskReq.type,
         target_waypoint: taskReq.target_waypoint,
         destination_waypoint: taskReq.destination_waypoint,
