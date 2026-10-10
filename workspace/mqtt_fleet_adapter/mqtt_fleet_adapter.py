@@ -564,13 +564,28 @@ class MqttFleetAdapter:
                     robot.target_position = None
                     robot.last_cmd_payload = None
                     robot.nav_retries = 0
+                    robot.is_retrying = False
+                elif cmd_id == robot.cmd_id and status in ["canceled", "cancelled"]:
+                    print(f"[NAV] Robot '{robot_id}' reported command {cmd_id} was canceled.")
+                    robot.status = "idle"
+                    robot.current_execution = None
+                    robot.target_position = None
+                    robot.last_cmd_payload = None
+                    robot.nav_retries = 0
+                    robot.is_retrying = False
                 elif cmd_id == robot.cmd_id and status in ["failed", "aborted"]:
                     print(f"[NAV WARN] Robot '{robot_id}' reported failure for cmd_id {cmd_id} (status: {status}).")
+                    if getattr(robot, "is_retrying", False):
+                        print(f"[NAV RETRY] Retry already in progress for '{robot_id}'. Ignoring duplicate failure report.")
+                        return
+
                     if getattr(robot, "nav_retries", 0) < 2 and robot.last_cmd_payload:
                         robot.nav_retries = getattr(robot, "nav_retries", 0) + 1
+                        robot.is_retrying = True
                         print(f"[NAV RETRY] Scheduling retry for cmd_id {cmd_id} on '{robot_id}' (attempt {robot.nav_retries}/2) in 1.2s...")
                         def retry_nav():
                             with self.lock:
+                                robot.is_retrying = False
                                 if robot.current_execution and robot.cmd_id == cmd_id and robot.last_cmd_payload:
                                     cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
                                     payload_to_send = dict(robot.last_cmd_payload)
@@ -578,6 +593,18 @@ class MqttFleetAdapter:
                                     self.mqtt_client.publish(cmd_topic, json.dumps(payload_to_send), qos=1)
                                     print(f"[NAV RETRY] Re-dispatched cmd_id {cmd_id} to '{robot_id}'")
                         threading.Timer(1.2, retry_nav).start()
+                    else:
+                        print(f"[NAV ERROR] Retries exhausted ({getattr(robot, 'nav_retries', 0)}/2) for cmd_id {cmd_id} on '{robot_id}'. Escalating failure to Open-RMF.")
+                        robot.status = "failed"
+                        robot.is_retrying = False
+                        robot.last_cmd_payload = None
+                        if not self.mock_rmf and robot.update_handle:
+                            try:
+                                robot.update_handle.more().log_error(f"Navigation failed for cmd_id {cmd_id} after {getattr(robot, 'nav_retries', 0)} attempts.")
+                                robot.update_handle.more().override_status("failed")
+                                robot.update_handle.more().replan()
+                            except Exception as e:
+                                print(f"[RMF ERROR] Error escalating failure to RMF: {e}")
 
     # ==========================================================================
     # RMF -> Robot Outbound Callbacks (調度下發指令)
