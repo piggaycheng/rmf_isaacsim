@@ -281,7 +281,7 @@
 - **Topic**：`rmf/{fleet_name}/robot/{robot_id}/deregister`
 - **方向**：車載端 $\rightarrow$ Fleet Adapter
 - **QoS**：`1`
-- **說明**：車輛欲關機、回廠保養或切換為手動遙控 (Manual) 前發送，告知 RMF 釋放其排程資源。
+- **說明**：車輛欲關機、重啟、回廠保養或切換為手動遙控 (Manual) 前發送。此動作代表當前車端執行 session 終止：若車輛尚有進行中之導航或動作任務，FA 將主動通報 Open-RMF 中斷並重規劃 (`replan`)，清除任務狀態。車輛後續重新開機註冊 (`register`) 時將以全新 `idle` 狀態加入，不會沿用或誤報前次 session 的未完成任務。（註：若僅為 Wi-Fi 或 MQTT 網路短暫瞬斷重連，車載端**無須**發送 `deregister` 或 `register`，僅需維持常態 `heartbeat` 發送即可無縫恢復任務追蹤）。
 
 ```json
 {

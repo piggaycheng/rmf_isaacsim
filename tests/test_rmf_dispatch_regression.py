@@ -450,8 +450,65 @@ class TestRMFDispatchRegression(unittest.TestCase):
         cmd_pubs = [c for c in adapter.mqtt_client.publish.call_args_list if "command" in c[0][0]]
         self.assertEqual(len(cmd_pubs), 0)
 
+    def test_issue11_1_deregister_and_reboot_invalidation(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1", "initial_location": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
+        robot = adapter.robots[("fleet1", "carter1")]
+        mock_handle = MagicMock()
+        robot.update_handle = mock_handle
+
+        # Active execution in progress
+        mock_exec1 = MagicMock()
+        mock_exec1.okay.return_value = True
+        mock_exec1.identifier = 101
+        robot.current_execution = mock_exec1
+        robot.cmd_id = 10
+        robot.target_position = np.array([2.0, 2.0, 0.0])
+        robot.last_cmd_payload = {"cmd_id": 10, "action": "navigate"}
+
+        mock_handle.reset_mock()
+
+        # Case A: Robot explicitly deregisters during execution (shutdown/reboot)
+        adapter._handle_deregister("carter1", "fleet1", {"reason": "rebooting"})
+
+        mock_exec1.finished.assert_not_called()
+        self.assertIsNone(robot.current_execution)
+        self.assertIsNone(robot.target_position)
+        self.assertFalse(robot.is_online)
+        self.assertEqual(robot.status, "offline")
+        # Must report to RMF and trigger replan
+        mock_handle.more().log_error.assert_called_once()
+        mock_handle.more().replan.assert_called_once()
+
+        # Robot boots up and re-registers
+        mock_handle.reset_mock()
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1", "initial_location": {"x": 2.0, "y": 2.0, "yaw": 0.0}})
+
+        self.assertTrue(robot.is_online)
+        self.assertEqual(robot.status, "idle")  # Must NOT be 'moving'
+        self.assertIsNone(robot.current_execution)
+
+        # Heartbeat arriving at target location must NOT falsely complete the aborted task
+        adapter._handle_heartbeat("carter1", "fleet1", {"x": 2.0, "y": 2.0, "yaw": 0.0, "status": "idle"})
+        mock_exec1.finished.assert_not_called()
+
+        # Case B: Crash reboot without deregister sending fresh register
+        mock_exec2 = MagicMock()
+        mock_exec2.okay.return_value = True
+        mock_exec2.identifier = 202
+        robot.current_execution = mock_exec2
+        robot.cmd_id = 20
+        mock_handle.reset_mock()
+
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1", "initial_location": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
+        mock_exec2.finished.assert_not_called()
+        self.assertIsNone(robot.current_execution)
+        self.assertEqual(robot.status, "idle")
+        mock_handle.more().replan.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

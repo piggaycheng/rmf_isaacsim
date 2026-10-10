@@ -369,29 +369,36 @@ class MqttFleetAdapter:
                     existing_robot.charger_waypoint = default_charger
                 existing_robot.last_heartbeat = time.time()
 
-                if not self.mock_rmf and existing_robot.update_handle:
+                if existing_robot.update_handle:
                     try:
                         existing_robot.update_handle.more().override_status(None)
                         existing_robot.update_handle.more().unstable_recommission()
                     except Exception as e:
                         print(f"[RMF WARN] Error recommissioning '{robot_id}' on re-register: {e}")
 
-                # Retain active execution activity identifier if execution is still valid, else reset to idle
-                has_active_exec = existing_robot.current_execution is not None and existing_robot.current_execution.okay()
-                if has_active_exec:
-                    activity_id = existing_robot.current_execution.identifier
-                    existing_robot.status = "moving"
-                    print(f"[REGISTER] Retaining active execution (identifier: {activity_id}) for '{robot_id}' on reconnect.")
-                else:
-                    activity_id = None
-                    existing_robot.status = "idle"
+                # Fresh registration signifies a new session/boot: abort any stale execution from prior session
+                if existing_robot.current_execution:
+                    print(f"[REGISTER WARN] Aborting stale execution for '{robot_id}' from prior session (cmd_id: {existing_robot.cmd_id}).")
+                    if existing_robot.update_handle:
+                        try:
+                            existing_robot.update_handle.more().log_error(f"Robot '{robot_id}' re-registered; aborting previous session execution.")
+                            existing_robot.update_handle.more().replan()
+                        except Exception as e:
+                            print(f"[RMF WARN] Error replanning on re-register: {e}")
                     existing_robot.current_execution = None
                     existing_robot.target_position = None
+                    existing_robot.last_cmd_payload = None
+                    existing_robot.nav_retries = 0
+                    existing_robot.is_retrying = False
+                    existing_robot.stop_cmd_id = None
+
+                existing_robot.status = "idle"
+                activity_id = None
 
                 if not self.mock_rmf and existing_robot.update_handle:
                     try:
                         rmf_state = rmf_easy.RobotState(level_name, initial_pos, existing_robot.battery_soc)
-                        existing_robot.update_handle.update(rmf_state, activity_id)
+                        existing_robot.update_handle.update(rmf_state, None)
                     except Exception as e:
                         print(f"[WARN] Failed to update RMF state on re-register for '{robot_id}': {e}")
 
@@ -592,13 +599,27 @@ class MqttFleetAdapter:
                 robot.is_online = False
                 robot.status = "offline"
                 if robot.current_execution:
-                    print(f"[DEREGISTER] Robot '{robot_id}' deregistered during active execution (cmd_id: {robot.cmd_id}). Preserving execution without falsely marking finished.")
-                if not self.mock_rmf and robot.update_handle:
-                    try:
-                        robot.update_handle.more().override_status("offline")
-                        robot.update_handle.more().unstable_decommission()
-                    except Exception as e:
-                        print(f"[RMF WARN] Error updating RMF offline state for '{robot_id}': {e}")
+                    print(f"[DEREGISTER] Robot '{robot_id}' deregistered during active execution (cmd_id: {robot.cmd_id}). Aborting execution and requesting RMF replan.")
+                    if robot.update_handle:
+                        try:
+                            robot.update_handle.more().log_error(f"Robot '{robot_id}' deregistered during active execution (cmd_id: {robot.cmd_id}).")
+                            robot.update_handle.more().override_status("offline")
+                            robot.update_handle.more().replan()
+                        except Exception as e:
+                            print(f"[RMF WARN] Error aborting execution on deregister for '{robot_id}': {e}")
+                    robot.current_execution = None
+                    robot.target_position = None
+                    robot.last_cmd_payload = None
+                    robot.nav_retries = 0
+                    robot.is_retrying = False
+                    robot.stop_cmd_id = None
+                else:
+                    if robot.update_handle:
+                        try:
+                            robot.update_handle.more().override_status("offline")
+                            robot.update_handle.more().unstable_decommission()
+                        except Exception as e:
+                            print(f"[RMF WARN] Error updating RMF offline state for '{robot_id}': {e}")
                 print(f"[DEREGISTER] Robot '{robot_id}' marked offline (retaining update_handle, not deleted).")
             else:
                 print(f"[DEREGISTER WARN] Cannot deregister '{robot_id}': robot not found in fleet '{fleet_name}'. Ignoring.")
