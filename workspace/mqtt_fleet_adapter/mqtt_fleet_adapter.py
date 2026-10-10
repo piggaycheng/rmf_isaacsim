@@ -561,10 +561,36 @@ class MqttFleetAdapter:
             dy = target_pos[1] - robot.position[1]
             dist = math.hypot(dx, dy)
 
-            # If robot is already at destination (< 0.20m):
-            # Complete execution smoothly so Open-RMF knows this waypoint/step is fulfilled.
-            if dist < 0.20:
-                print(f"[RMF -> AMR] Robot '{robot_id}' already at destination [{target_pos[0]:.2f}, {target_pos[1]:.2f}] (dist: {dist:.3f}m < 0.2m). Fulfilling in-place execution.")
+            target_map = getattr(destination, "map", robot.map_name)
+            same_map = (target_map == robot.map_name)
+            dock_name = getattr(destination, "dock", None)
+            speed_limit = getattr(destination, "speed_limit", None)
+
+            # Check yaw alignment with [-pi, pi] wrap-around
+            target_yaw = float(target_pos[2])
+            has_yaw_constraint = not math.isnan(target_yaw)
+            yaw_diff = 0.0
+            if has_yaw_constraint:
+                yaw_diff = abs((target_yaw - robot.position[2] + math.pi) % (2 * math.pi) - math.pi)
+
+            # Only allow in-place completion if:
+            # 1. No docking process required (dock_name is empty/None)
+            # 2. Same map / level
+            # 3. Robot is stopped/idle (not actively moving)
+            # 4. XY distance < 0.15m
+            # 5. Yaw aligned (yaw_diff < 0.15 rad ~ 8.6 deg)
+            is_stopped = (robot.status != "moving")
+            yaw_satisfied = (not has_yaw_constraint) or (yaw_diff < 0.15)
+            can_finish_in_place = (
+                not dock_name
+                and same_map
+                and is_stopped
+                and dist < 0.15
+                and yaw_satisfied
+            )
+
+            if can_finish_in_place:
+                print(f"[RMF -> AMR] Robot '{robot_id}' already at destination [{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_yaw:.2f}] (dist: {dist:.3f}m, yaw_diff: {yaw_diff:.3f}rad, map: '{target_map}', status: '{robot.status}'). Fulfilling in-place execution.")
                 robot.current_execution = execution
                 robot.target_position = target_pos
                 robot.is_holding = False
@@ -589,9 +615,6 @@ class MqttFleetAdapter:
             robot.current_execution = execution
             robot.target_position = target_pos
 
-            dock_name = getattr(destination, "dock", None)
-            speed_limit = getattr(destination, "speed_limit", None)
-
             cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot_id}/command"
             cmd_payload = {
                 "robot_id": robot_id,
@@ -601,7 +624,7 @@ class MqttFleetAdapter:
                     "x": float(target_pos[0]),
                     "y": float(target_pos[1]),
                     "yaw": float(target_pos[2]),
-                    "level_name": destination.map,
+                    "level_name": target_map,
                 },
                 "dock_name": dock_name,
                 "speed_limit": speed_limit,
@@ -610,7 +633,8 @@ class MqttFleetAdapter:
             robot.last_cmd_payload = cmd_payload
 
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
-            print(f"[RMF -> AMR] Dispatched NAVIGATE (cmd_id: {robot.cmd_id}) to '{robot_id}': target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}]")
+            action_label = f"DOCK ({dock_name})" if dock_name else "NAVIGATE"
+            print(f"[RMF -> AMR] Dispatched {action_label} (cmd_id: {robot.cmd_id}) to '{robot_id}': target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}], map='{target_map}'")
 
     def _on_rmf_stop(self, robot_id: str, activity_id: Any):
         with self.lock:
