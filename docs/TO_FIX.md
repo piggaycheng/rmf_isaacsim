@@ -196,7 +196,7 @@
 **驗收：**
 
 - [x] fleet1／fleet2 的 ACTION 發往各自的 MQTT topic。
-- [ ] 兩個 fleet 使用相同 robot ID 時仍完全隔離。（見第 11 項 11.2）
+- [x] 兩個 fleet 使用相同 robot ID 時仍完全隔離。（見第 11 項 11.2）
 - [x] 未配置 fleet 不會被註冊到別的 fleet handle。
 - [x] pause 會影響實際可派遣性；resume／restart／set-graph 成功回應對應真實執行結果。（pause 會吞掉完成回報，見 11.3）
 - [x] UI 車隊參數與 RMF 實際設定一致，或明確呈現尚未套用／不支援。
@@ -232,8 +232,8 @@
 
 **驗收：**
 
-- [ ] fleet2/carter1 未註冊時，其心跳、`deregister`、`status`、`command_result` 不會影響 fleet1/carter1。
-- [ ] 回歸測試涵蓋兩個 fleet 同名車同時存在與只存在一個的情境。
+- [x] fleet2/carter1 未註冊時，其心跳、`deregister`、`status`、`command_result` 不會影響 fleet1/carter1。
+- [x] 回歸測試涵蓋兩個 fleet 同名車同時存在與只存在一個的情境。
 
 ### 11.3 中優先級：fleet pause 沿用 `is_holding`，吞掉完成回報
 

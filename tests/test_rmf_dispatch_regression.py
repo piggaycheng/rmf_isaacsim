@@ -345,6 +345,59 @@ class TestRMFDispatchRegression(unittest.TestCase):
         mock_exec.finished.assert_called_once()
         self.assertIsNone(robot.current_execution)
 
+    def test_issue11_2_no_cross_fleet_fallback(self):
+        adapter = self._create_mock_adapter(["fleet1", "fleet2"])
+        # Register carter1 only in fleet1
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1", "initial_location": {"x": 1.0, "y": 1.0, "yaw": 0.0}})
+        r1 = adapter.robots[("fleet1", "carter1")]
+        mock_exec1 = MagicMock()
+        r1.current_execution = mock_exec1
+        r1.cmd_id = 10
+
+        adapter._send_register_ack.reset_mock()
+
+        # 1. Unregistered fleet2/carter1 sends heartbeat
+        adapter._handle_heartbeat("carter1", "fleet2", {"x": 50.0, "y": 50.0, "yaw": 0.0})
+        # Check require_register was requested for fleet2
+        adapter._send_register_ack.assert_called_with(
+            "carter1", success=False, msg="Robot not registered in RMF, please register", status="require_register", fleet_name="fleet2"
+        )
+        # Check fleet1/carter1 position unchanged
+        self.assertEqual(r1.position[0], 1.0)
+
+        # 2. Unregistered fleet2/carter1 sends deregister
+        adapter._handle_deregister("carter1", "fleet2", {})
+        self.assertTrue(r1.is_online)
+        self.assertNotEqual(r1.status, "offline")
+
+        # 3. Unregistered fleet2/carter1 sends status offline
+        adapter._handle_status("carter1", "fleet2", {"status": "offline"})
+        self.assertTrue(r1.is_online)
+        self.assertNotEqual(r1.status, "offline")
+
+        # 4. Unregistered fleet2/carter1 sends command_result
+        adapter._handle_command_result("carter1", "fleet2", {"cmd_id": 10, "status": "completed"})
+        mock_exec1.finished.assert_not_called()
+        self.assertEqual(r1.current_execution, mock_exec1)
+
+        # 5. Now register carter1 in fleet2 as well
+        adapter._handle_register("carter1", "fleet2", {"robot_id": "carter1", "initial_location": {"x": 2.0, "y": 2.0, "yaw": 0.0}})
+        r2 = adapter.robots[("fleet2", "carter1")]
+        mock_exec2 = MagicMock()
+        r2.current_execution = mock_exec2
+        r2.cmd_id = 20
+
+        # Sending command_result for fleet2/carter1 must only complete fleet2
+        adapter._handle_command_result("carter1", "fleet2", {"cmd_id": 20, "status": "completed"})
+        mock_exec2.finished.assert_called_once()
+        mock_exec1.finished.assert_not_called()
+
+        # Sending deregister for fleet2/carter1 must not affect fleet1
+        adapter._handle_deregister("carter1", "fleet2", {})
+        self.assertFalse(r2.is_online)
+        self.assertTrue(r1.is_online)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -152,14 +152,9 @@ class MqttFleetAdapter:
         self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
 
     def _get_robot(self, fleet_name: Optional[str], robot_id: str) -> Optional[ManagedRobot]:
-        if fleet_name:
-            robot = self.robots.get((fleet_name, robot_id))
-            if robot:
-                return robot
-        for (f, r), robot in self.robots.items():
-            if r == robot_id:
-                return robot
-        return None
+        target_fleet = fleet_name or self.fleet_name
+        return self.robots.get((target_fleet, robot_id))
+
 
     def _init_rmf(self):
         """Initializes ROS 2 and Open-RMF Adapter."""
@@ -605,6 +600,8 @@ class MqttFleetAdapter:
                     except Exception as e:
                         print(f"[RMF WARN] Error updating RMF offline state for '{robot_id}': {e}")
                 print(f"[DEREGISTER] Robot '{robot_id}' marked offline (retaining update_handle, not deleted).")
+            else:
+                print(f"[DEREGISTER WARN] Cannot deregister '{robot_id}': robot not found in fleet '{fleet_name}'. Ignoring.")
 
     def _handle_status(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         status = payload.get("status", "unknown")
@@ -624,6 +621,8 @@ class MqttFleetAdapter:
                         except Exception as e:
                             print(f"[RMF WARN] Error decommissioning '{robot_id}': {e}")
                     print(f"[ALERT] Robot '{robot_id}' marked OFFLINE due to status message.")
+                else:
+                    print(f"[STATUS WARN] Cannot update status for '{robot_id}': robot not found in fleet '{fleet_name}'. Ignoring.")
 
     def _handle_command_result(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         cmd_id = payload.get("cmd_id")
@@ -633,6 +632,7 @@ class MqttFleetAdapter:
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
             if not robot:
+                print(f"[CMD_RESULT WARN] Received command_result for '{robot_id}' in fleet '{fleet_name}' but robot was not found. Ignoring.")
                 return
 
             # Explicit check for STOP command confirmation (never complete previous navigation)
@@ -795,6 +795,7 @@ class MqttFleetAdapter:
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
             if not robot:
+                print(f"[RMF STOP WARN] Robot '{robot_id}' in '{fleet_name}' not found. Ignoring STOP.")
                 return
 
             # Verify that activity_id matches the active execution to avoid stopping newer commands
