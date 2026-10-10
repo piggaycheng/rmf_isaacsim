@@ -280,9 +280,12 @@ class MqttFleetAdapter:
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
         with self.lock:
-            # Check if robot already exists with a valid handle (reuse existing handle on re-register)
+            # Check if robot already exists with a valid handle in the SAME fleet (reuse existing handle on re-register)
             existing_robot = self.robots.get(robot_id)
-            if existing_robot and (self.mock_rmf or existing_robot.update_handle is not None):
+            if existing_robot and existing_robot.fleet_name != fleet_name:
+                print(f"[REGISTER WARN] Robot '{robot_id}' requested registration for fleet '{fleet_name}', but exists in fleet '{existing_robot.fleet_name}'. Cannot cross-reuse handle.")
+
+            if existing_robot and existing_robot.fleet_name == fleet_name and (self.mock_rmf or existing_robot.update_handle is not None):
                 print(f"[REGISTER] Robot '{robot_id}' re-registered. Reusing existing update_handle and updating position to ({x:.3f}, {y:.3f}, {yaw:.3f}).")
                 existing_robot.is_online = True
                 existing_robot.position = initial_pos
@@ -495,6 +498,8 @@ class MqttFleetAdapter:
             with self.lock:
                 if robot_id in self.robots:
                     robot = self.robots[robot_id]
+                    if not robot.is_online and robot.status == "offline":
+                        return
                     robot.is_online = False
                     robot.status = "offline"
                     if not self.mock_rmf and robot.update_handle:
@@ -544,7 +549,8 @@ class MqttFleetAdapter:
     def _on_rmf_navigate(self, robot_id: str, destination: Any, execution: Any):
         with self.lock:
             robot = self.robots.get(robot_id)
-            if not robot:
+            if not robot or not robot.is_online:
+                print(f"[RMF -> AMR WARN] Robot '{robot_id}' is offline or not found. Rejecting NAVIGATE command.")
                 return
 
             target_pos = np.array(
@@ -636,7 +642,8 @@ class MqttFleetAdapter:
     def _on_rmf_action(self, robot_id: str, category: str, description: Any, execution: Any):
         with self.lock:
             robot = self.robots.get(robot_id)
-            if not robot:
+            if not robot or not robot.is_online:
+                print(f"[RMF -> AMR WARN] Robot '{robot_id}' is offline or not found. Rejecting ACTION command.")
                 return
 
             robot.cmd_id += 1
