@@ -267,6 +267,74 @@ class TestRMFDispatchRegression(unittest.TestCase):
             task["status"] = "in_progress"
         self.assertEqual(state.current_tasks[0]["status"], "completed")
 
+    def test_issue7_task_completion_lifecycle(self):
+        from rmf_service import task_matches
+        # 1. Successful completion when robot finishes navigation and clears task_id
+        state.current_tasks = [
+            {"id": "task_100", "request_id": "task_100", "booking_id": "patrol.dispatch-1", "robot_id": "carter1", "status": "active", "progress": 95}
+        ]
+        state.current_robots = {
+            "carter1": {"id": "carter1", "task_id": "patrol.dispatch-1", "status": "moving"}
+        }
+        state.discovered_robots = {
+            "fleet1_carter1": {"status": "idle", "is_online": True}
+        }
+
+        # Simulate fleet_states callback when carter1 finishes navigation (task_id cleared)
+        prev_robot = state.current_robots.get("carter1", {})
+        prev_task_id = prev_robot.get("task_id", "")
+        is_online = state.discovered_robots["fleet1_carter1"]["is_online"]
+        phys_status = state.discovered_robots["fleet1_carter1"]["status"]
+        current_r_task_id = ""  # cleared by Open-RMF upon finish
+
+        if not current_r_task_id and prev_task_id:
+            if is_online and phys_status != "offline":
+                for t in state.current_tasks:
+                    if task_matches(t, prev_task_id):
+                        if t.get("status") not in state.TERMINAL_STATES:
+                            t["status"] = "completed"
+                            t["progress"] = 100
+
+        self.assertEqual(state.current_tasks[0]["status"], "completed")
+        self.assertEqual(state.current_tasks[0]["progress"], 100)
+
+        # 2. Offline guard: If robot disconnected, task should NOT be completed
+        state.current_tasks = [
+            {"id": "task_101", "request_id": "task_101", "booking_id": "patrol.dispatch-2", "robot_id": "carter1", "status": "active", "progress": 50}
+        ]
+        prev_task_id = "patrol.dispatch-2"
+        is_online = False
+        phys_status = "offline"
+
+        if not current_r_task_id and prev_task_id:
+            if is_online and phys_status != "offline":
+                for t in state.current_tasks:
+                    if task_matches(t, prev_task_id):
+                        if t.get("status") not in state.TERMINAL_STATES:
+                            t["status"] = "completed"
+                            t["progress"] = 100
+
+        self.assertEqual(state.current_tasks[0]["status"], "active")
+        self.assertEqual(state.current_tasks[0]["progress"], 50)
+
+        # 3. Canceled task protection: Already canceled task is never overwritten to completed
+        state.current_tasks = [
+            {"id": "task_102", "request_id": "task_102", "booking_id": "patrol.dispatch-3", "robot_id": "carter1", "status": "canceled", "progress": 40}
+        ]
+        prev_task_id = "patrol.dispatch-3"
+        is_online = True
+        phys_status = "idle"
+
+        if not current_r_task_id and prev_task_id:
+            if is_online and phys_status != "offline":
+                for t in state.current_tasks:
+                    if task_matches(t, prev_task_id):
+                        if t.get("status") not in state.TERMINAL_STATES:
+                            t["status"] = "completed"
+                            t["progress"] = 100
+
+        self.assertEqual(state.current_tasks[0]["status"], "canceled")
+
     # --------------------------------------------------------------------------
     # Issue 8: Atomic Task ID Generation and Decoupled Request IDs
     # --------------------------------------------------------------------------

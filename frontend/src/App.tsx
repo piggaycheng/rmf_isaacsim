@@ -1658,7 +1658,15 @@ export function App() {
                           {task.type}: {task.target_waypoint}
                         </span>
                         <Badge
-                          variant={task.status === 'active' ? 'success' : 'outline'}
+                          variant={
+                            task.status === 'completed'
+                              ? 'success'
+                              : task.status === 'active'
+                              ? 'default'
+                              : task.status === 'failed' || task.status === 'canceled'
+                              ? 'destructive'
+                              : 'outline'
+                          }
                           className="text-[10px]"
                         >
                           {task.status}

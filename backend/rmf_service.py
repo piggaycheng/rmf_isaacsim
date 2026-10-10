@@ -217,6 +217,8 @@ class RMFService:
                                     # Terminal state protection: do not let non-terminal override terminal
                                     if t.get("status") not in state.TERMINAL_STATES or mapped_status in state.TERMINAL_STATES:
                                         t["status"] = mapped_status
+                                        if mapped_status == "completed":
+                                            t["progress"] = 100
                                     break
                 except Exception as ex:
                     print(f"[RMF Task API] Error parsing response: {ex}")
@@ -289,6 +291,10 @@ class RMFService:
                     else:
                         mode_str = "idle"
 
+                    prev_robot = state.current_robots.get(r_id, {})
+                    prev_task_id = prev_robot.get("task_id", "")
+                    is_online = disc.get("is_online", True) if disc else True
+
                     state.current_robots[r_id] = {
                         "id": r_id,
                         "name": r_id,
@@ -314,8 +320,49 @@ class RMFService:
                                     if mode_str == "moving":
                                         t["progress"] = min(95, max(15, t.get("progress", 0) + 2))
                                 break
-                    # Note: When r.task_id becomes empty, do NOT assume completed!
-                    # Terminal state (completed / failed / canceled) must come from TaskSummary or DispatchStates.
+                        # If robot transitioned directly to a new task, complete the previous task
+                        if prev_task_id and prev_task_id != r.task_id:
+                            for t in state.current_tasks:
+                                if task_matches(t, prev_task_id):
+                                    if t.get("status") not in state.TERMINAL_STATES:
+                                        t["status"] = "completed"
+                                        t["progress"] = 100
+                                        append_adapter_log(
+                                            fleet_name,
+                                            f"[INFO] Task [{prev_task_id}] completed by robot [{r_id}].",
+                                        )
+                                    break
+                    elif prev_task_id:
+                        # Robot had an active task and now r.task_id is empty (execution completed).
+                        # Guard: only mark completed if robot is online, not in emergency/error.
+                        if is_online and phys_status != "offline" and r.mode.mode != 5:
+                            for t in state.current_tasks:
+                                if task_matches(t, prev_task_id):
+                                    if t.get("status") not in state.TERMINAL_STATES:
+                                        t["status"] = "completed"
+                                        t["progress"] = 100
+                                        t["robot_id"] = r_id
+                                        t["fleet_name"] = fleet_name
+                                        append_adapter_log(
+                                            fleet_name,
+                                            f"[INFO] Task [{prev_task_id}] successfully completed by robot [{r_id}].",
+                                        )
+                                    break
+                    else:
+                        # Fallback recovery: confirm completion for tasks that were running on this robot and robot is now idle
+                        if is_online and phys_status != "offline" and mode_str == "idle" and r.mode.mode != 5:
+                            for t in state.current_tasks:
+                                if (
+                                    t.get("robot_id") == r_id
+                                    and t.get("status") == "active"
+                                    and t.get("progress", 0) >= 90
+                                ):
+                                    t["status"] = "completed"
+                                    t["progress"] = 100
+                                    append_adapter_log(
+                                        fleet_name,
+                                        f"[INFO] Task [{t.get('booking_id') or t.get('id')}] confirmed completed by robot [{r_id}].",
+                                    )
 
             self.ros_node.create_subscription(FleetState, "/fleet_states", fleet_callback, 10)
 
