@@ -39,11 +39,30 @@
 
 **修正方向：** 將 LWT、心跳逾時與註銷納入一致且冪等的離線生命週期；同步處理 RMF 可派遣性，不只修改本地旗標。定義重連時如何恢復既有 RMF handle，避免重複註冊或重設命令狀態。
 
+**已觀察到的實際故障（2026-10-10）：** 車端關閉時送出 `deregister`，舊版 `_handle_deregister()` 會把車從 `self.robots` 刪除，但 RMF 核心沒有移除車輛的 API，車仍留在 fleet 中。車端重啟後再註冊時，`add_robot()` 記錄 `Robot [...] was previously added ... Ignoring request` 並回傳 `None`，Adapter 卻仍回 `Registered successfully`。之後每次心跳都因 `update_handle is None` 回 `require_register`，車端立刻重送註冊，形成約每秒一次的重新註冊迴圈；只有重啟 Adapter 才能暫時恢復。
+
+**已修正（2026-10-10）：**
+
+- `_handle_deregister()` 不再刪除車輛，只標記 `is_online=False`、`status="offline"`，保留 `update_handle`。
+- `_handle_register()` 遇到已有 handle 的車輛時沿用舊 handle，更新位置並設回 online，不再呼叫 `add_robot()`。
+- `add_robot()` 回傳 `None`，或找不到 fleet handle 時，回 `error` ACK，不再誤報成功。
+- 已在運行環境確認重新註冊迴圈消失。
+
+**仍未完成：**
+
+- 重新註冊時固定呼叫 `update_handle.update(state, None)` 並把 `status` 設為 `idle`；若 MQTT 在執行中重連且 execution 仍有效，RMF 會短暫認為車輛沒有活動。應沿用 `current_execution.identifier`，並只在沒有 execution 時重設狀態。
+- 重新註冊沒有核對 fleet：同名車改用其他 fleet 時，會沿用舊 fleet 的 handle，卻把 `fleet_name` 改成新的（見第 10 項）。
+- `_on_rmf_navigate()`／`_on_rmf_action()` 仍未阻擋 offline 車輛；註銷後車仍在 RMF 核心，可能被派遣。
+- `_handle_deregister()` 仍呼叫 `current_execution.finished()`（見第 1 項）。
+
 **驗收：**
 
 - [ ] LWT 與心跳逾時產生一致的任務中斷結果，且不誤報成功。
 - [ ] 重複 offline 訊息不會重複清理或觸發額外任務轉移。
 - [ ] 離線車不能開始新命令；恢復連線後需有明確的狀態核對。
+- [x] 註銷後重新註冊沿用既有 RMF handle，不會因 `add_robot()` 被忽略而形成重新註冊迴圈。
+- [x] `add_robot()` 失敗或回傳 `None` 時回報錯誤，不誤報註冊成功。
+- [ ] 執行中重連時保留目前 activity，不重設命令狀態。
 
 ## 3. 高優先級：近距離導航忽略朝向、樓層與 docking
 
@@ -164,6 +183,12 @@
 - robot 字典及回呼僅以 robot ID 區分，跨車隊同名會混用；未知 fleet 也會 fallback 到第一個 RMF fleet handle。
 - UI 的 pause／resume／restart／set-graph 只修改 JSON 與日誌，沒有控制運行中的 Adapter，卻回報已生效。
 - Adapter 啟動時各車隊共用同一份 YAML，主要只覆寫 fleet name 與 graph；不能假設 UI 儲存的個別速度、尺寸及其他參數已套用。
+
+**目前狀態（2026-10-10）：**
+
+- Adapter 啟動時已依各車隊的 `robot_radius`、`linear_velocity`、`angular_velocity` 產生 `/tmp/fleet_cfg_<fleet>.yaml`，覆寫 footprint、vicinity 與速度上限；其他參數仍共用基礎 YAML。
+- `_handle_register()` 找不到 fleet handle 時會回錯誤，但仍先執行 `self.fleet_handles.get(fleet_name) or self.fleet_handle`，未知 fleet 實際上仍會 fallback 到預設 handle。
+- 重新註冊時沿用既有 handle，但沒有核對 fleet 是否相同。
 
 **修正方向：** 導航、STOP、ACTION、遙測與結果統一使用正確 fleet／robot 身分；拒絕未配置的 fleet，而非靜默 fallback。管理操作需有真實執行與 ACK／錯誤回傳；若不能動態切圖，明確標示需重新載入，不要製造成功日誌。切圖或重啟需處理執行中的任務。
 
