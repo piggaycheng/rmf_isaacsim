@@ -77,12 +77,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 dest_wp = payload.get("destination_waypoint")
 
                 # Dispatch via Open-RMF scheduler
-                rmf_service.dispatch_task(
+                res = rmf_service.dispatch_task(
                     task_type=task_type,
                     target_waypoint=target_wp,
                     destination_waypoint=dest_wp,
                     robot_id=assigned_robot,
                 )
+
+                # Send explicit dispatch response back to the requesting client
+                await websocket.send_json({
+                    "type": "dispatch_response",
+                    "status": res.get("status"),
+                    "task_id": res.get("task_id"),
+                    "message": res.get("message"),
+                })
 
                 await broadcast({
                     "type": "tasks",
@@ -96,16 +104,14 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in active_connections:
             active_connections.remove(websocket)
 
-# Background Simulation Loop (Simulates smooth movement if no live ROS 2 /fleet_states yet)
+# Background Broadcast & Optional Simulation Loop
 async def simulation_loop():
-    import time
     while True:
         await asyncio.sleep(0.1)
-        now = time.time()
-        # Only simulate if ROS 2 hasn't published within last 2 seconds
-        if now - state.last_ros2_time > 2.0:
+        # Simulation only runs if explicitly enabled (isolated from real mode)
+        if getattr(state, "simulation_mode", False):
             for robot in current_robots.values():
-                if robot["status"] == "moving":
+                if robot.get("status") == "moving":
                     target_x = 8.0 if robot["id"] == "tinyRobot1" else 2.0
                     target_y = 5.0 if robot["id"] == "tinyRobot1" else 1.0
                     dx = target_x - robot["x"]
@@ -120,12 +126,6 @@ async def simulation_loop():
                         robot["y"] += (dy / dist) * step
                         robot["yaw"] = math.atan2(dy, dx)
                         robot["battery"] = max(10.0, robot["battery"] - 0.02)
-
-            for t in current_tasks:
-                if t["status"] == "active":
-                    t["progress"] = min(100, t["progress"] + 1)
-                    if t["progress"] >= 100:
-                        t["status"] = "completed"
 
         # Continuous real-time broadcast to connected Web Studio clients
         if active_connections:

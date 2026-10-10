@@ -58,6 +58,9 @@ current_robots: Dict[str, Dict[str, Any]] = dict(DEFAULT_ROBOTS)
 
 current_tasks: List[Dict[str, Any]] = []
 
+TERMINAL_STATES = {"completed", "failed", "canceled", "cancelled", "rejected"}
+simulation_mode: bool = False
+
 # MQTT Auto-Discovered Robots (Live scanning from EMQX)
 discovered_robots: Dict[str, Dict[str, Any]] = {}
 

@@ -155,22 +155,92 @@ class RMFService:
                     req_id = msg.request_id
                     print(f"[RMF Task API Response] ID: {req_id}, payload: {payload}")
                     
-                    # Update active tasks in state
-                    booking_id = payload.get("state", {}).get("booking", {}).get("id") or req_id
-                    status = payload.get("state", {}).get("status", "active")
+                    is_success = payload.get("success", True)
+                    errors = payload.get("errors") or []
                     
-                    for t in state.current_tasks:
-                        if t.get("id") == req_id or t.get("booking_id") == req_id:
-                            t["status"] = status
-                            t["booking_id"] = booking_id
-                            break
-                            
+                    if not is_success or errors:
+                        err_str = "; ".join(errors) if isinstance(errors, list) else str(errors)
+                        if not err_str:
+                            err_str = "Task request rejected by Open-RMF dispatcher"
+                        print(f"[RMF Task API] Request [{req_id}] REJECTED: {err_str}")
+                        for t in state.current_tasks:
+                            if t.get("id") == req_id or t.get("booking_id") == req_id:
+                                t["status"] = "failed"
+                                t["error"] = err_str
+                                t["detail"] = err_str
+                                append_adapter_log(
+                                    t.get("fleet_name") or "system",
+                                    f"[ERROR] Task [{req_id}] rejected by RMF: {err_str}",
+                                )
+                                break
+                    else:
+                        state_obj = payload.get("state")
+                        if isinstance(state_obj, dict):
+                            booking_id = state_obj.get("booking", {}).get("id") or req_id
+                            rmf_status = state_obj.get("status", "queued")
+                            status_map = {
+                                "queued": "queued",
+                                "standby": "queued",
+                                "underway": "active",
+                                "completed": "completed",
+                                "failed": "failed",
+                                "canceled": "canceled",
+                                "cancelled": "canceled",
+                                "killed": "failed",
+                            }
+                            mapped_status = status_map.get(rmf_status, "queued")
+                            for t in state.current_tasks:
+                                if t.get("id") == req_id or t.get("booking_id") == req_id:
+                                    t["booking_id"] = booking_id
+                                    # Terminal state protection: do not let non-terminal override terminal
+                                    if t.get("status") not in state.TERMINAL_STATES or mapped_status in state.TERMINAL_STATES:
+                                        t["status"] = mapped_status
+                                    break
                 except Exception as ex:
                     print(f"[RMF Task API] Error parsing response: {ex}")
 
             self.ros_node.create_subscription(
                 ApiResponse, "/task_api_responses", task_response_cb, task_qos
             )
+
+            # Subscribe to /dispatch_states
+            try:
+                from rmf_task_msgs.msg import DispatchStates
+                def dispatch_states_cb(msg: DispatchStates):
+                    for ds in list(msg.active) + list(msg.finished):
+                        tid = ds.task_id
+                        # 4: STATUS_FAILED_TO_ASSIGN, 5: STATUS_CANCELED_IN_FLIGHT
+                        if ds.status == 4:
+                            err_msg = "; ".join(ds.errors) if ds.errors else "Open-RMF 派車失敗 (無可用車輛或無解)"
+                            for t in state.current_tasks:
+                                if (t.get("id") == tid or t.get("booking_id") == tid):
+                                    if t.get("status") not in state.TERMINAL_STATES:
+                                        t["status"] = "failed"
+                                        t["error"] = err_msg
+                                        t["detail"] = err_msg
+                                        append_adapter_log(
+                                            t.get("fleet_name") or "system",
+                                            f"[ERROR] Task [{tid}] dispatch failed: {err_msg}",
+                                        )
+                        elif ds.status == 5:
+                            for t in state.current_tasks:
+                                if (t.get("id") == tid or t.get("booking_id") == tid):
+                                    if t.get("status") not in state.TERMINAL_STATES:
+                                        t["status"] = "canceled"
+                                        append_adapter_log(
+                                            t.get("fleet_name") or "system",
+                                            f"[WARN] Task [{tid}] canceled in flight",
+                                        )
+                        elif ds.assignment and ds.assignment.is_assigned:
+                            for t in state.current_tasks:
+                                if t.get("id") == tid or t.get("booking_id") == tid:
+                                    if ds.assignment.expected_robot_name:
+                                        t["robot_id"] = ds.assignment.expected_robot_name
+                                    if ds.assignment.fleet_name:
+                                        t["fleet_name"] = ds.assignment.fleet_name
+                self.ros_node.create_subscription(DispatchStates, "/dispatch_states", dispatch_states_cb, 10)
+            except Exception as e:
+                print(f"[RMF Bridge] Note: DispatchStates sub setup: {e}")
 
             # Subscribe to /fleet_states
             def fleet_callback(msg: FleetState):
@@ -197,9 +267,6 @@ class RMFService:
                     else:
                         mode_str = "idle"
 
-                    prev_robot = state.current_robots.get(r_id, {})
-                    prev_task_id = prev_robot.get("task_id", "")
-
                     state.current_robots[r_id] = {
                         "id": r_id,
                         "name": r_id,
@@ -217,18 +284,16 @@ class RMFService:
                     if r.task_id:
                         for t in state.current_tasks:
                             if t.get("id") == r.task_id or t.get("booking_id") == r.task_id:
-                                t["status"] = "active"
-                                t["robot_id"] = r_id
-                                t["fleet_name"] = fleet_name
-                                if mode_str == "moving":
-                                    t["progress"] = min(95, max(15, t.get("progress", 0) + 2))
+                                # Terminal state protection: never revert terminated task back to active
+                                if t.get("status") not in state.TERMINAL_STATES:
+                                    t["status"] = "active"
+                                    t["robot_id"] = r_id
+                                    t["fleet_name"] = fleet_name
+                                    if mode_str == "moving":
+                                        t["progress"] = min(95, max(15, t.get("progress", 0) + 2))
                                 break
-                    elif prev_task_id:
-                        for t in state.current_tasks:
-                            if (t.get("id") == prev_task_id or t.get("booking_id") == prev_task_id) and t.get("status") == "active":
-                                t["status"] = "completed"
-                                t["progress"] = 100
-                                break
+                    # Note: When r.task_id becomes empty, do NOT assume completed!
+                    # Terminal state (completed / failed / canceled) must come from TaskSummary or DispatchStates.
 
             self.ros_node.create_subscription(FleetState, "/fleet_states", fleet_callback, 10)
 
@@ -248,6 +313,9 @@ class RMFService:
                     stat = status_map.get(ts.state, "active")
                     for t in state.current_tasks:
                         if t.get("id") == t_id or t.get("booking_id") == t_id:
+                            # Terminal state protection
+                            if t.get("status") in state.TERMINAL_STATES and stat not in state.TERMINAL_STATES:
+                                break
                             t["status"] = stat
                             if ts.robot_name:
                                 t["robot_id"] = ts.robot_name
@@ -255,8 +323,12 @@ class RMFService:
                                 t["fleet_name"] = ts.fleet_name
                             if stat == "completed":
                                 t["progress"] = 100
+                            elif stat in ["failed", "canceled"]:
+                                if ts.status:
+                                    t["error"] = ts.status
+                                    t["detail"] = ts.status
                             break
-                self.ros_node.create_subscription(TaskSummary, "/task_summaries", task_summary_cb, 10)
+                self.ros_node.create_subscription(TaskSummary, "/task_summaries", task_summary_cb, task_qos)
             except Exception as e:
                 print(f"[RMF Bridge] Note: TaskSummary sub setup: {e}")
 
@@ -330,6 +402,15 @@ class RMFService:
                 }
             }
 
+        # Check if publisher is ready before accepting or enqueueing task
+        if not self.task_pub or not rclpy.ok():
+            print(f"[RMF Dispatcher ERROR] task_pub not available, rejecting task request [{req_id}].")
+            return {
+                "status": "error",
+                "task_id": req_id,
+                "message": "ROS 2 Task Publisher 尚未就緒，無法受理調度請求。請確認 RMF 核心服務已啟動。",
+            }
+
         # Add to state.current_tasks immediately
         new_task = {
             "id": req_id,
@@ -345,29 +426,21 @@ class RMFService:
         state.current_tasks.insert(0, new_task)
 
         # Publish to ROS 2 /task_api_requests
-        if self.task_pub:
-            msg = ApiRequest()
-            msg.request_id = req_id
-            msg.json_msg = json.dumps(payload_json)
-            self.task_pub.publish(msg)
-            print(f"[RMF Dispatcher] 🚀 Published ApiRequest [{req_id}] to Open-RMF: {payload_json}")
-            append_adapter_log(
-                target_fleet or "system",
-                f"[INFO] [RMF Dispatcher]: Task [{req_id}] ({task_type} -> {places}) submitted to Open-RMF scheduler."
-            )
-            return {
-                "status": "success",
-                "task_id": req_id,
-                "payload": payload_json,
-                "message": f"任務 [{req_id}] 已成功提交至 Open-RMF 調度器！",
-            }
-        else:
-            print(f"[RMF Dispatcher WARN] task_pub not available, task queued in local state.")
-            return {
-                "status": "warning",
-                "task_id": req_id,
-                "message": "ROS 2 Task Publisher 尚未就緒，任務暫時僅存於本地佇列。",
-            }
+        msg = ApiRequest()
+        msg.request_id = req_id
+        msg.json_msg = json.dumps(payload_json)
+        self.task_pub.publish(msg)
+        print(f"[RMF Dispatcher] 🚀 Published ApiRequest [{req_id}] to Open-RMF: {payload_json}")
+        append_adapter_log(
+            target_fleet or "system",
+            f"[INFO] [RMF Dispatcher]: Task [{req_id}] ({task_type} -> {places}) submitted to Open-RMF scheduler."
+        )
+        return {
+            "status": "success",
+            "task_id": req_id,
+            "payload": payload_json,
+            "message": f"任務 [{req_id}] 已成功提交至 Open-RMF 調度器！",
+        }
 
     def shutdown(self):
         """Terminates processes gracefully."""

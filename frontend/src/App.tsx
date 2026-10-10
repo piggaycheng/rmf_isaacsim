@@ -281,6 +281,13 @@ export function App() {
             if (data.type === 'tasks' && data.tasks) {
               setTasks(data.tasks);
             }
+            if (data.type === 'dispatch_response') {
+              if (data.status === 'error') {
+                setSaveToast(`任務派發失敗: ${data.message || '調度器拒絕'}`);
+              } else if (data.status === 'success') {
+                setSaveToast(data.message || `任務 [${data.task_id}] 已成功提交`);
+              }
+            }
             if (data.type === 'slam_map') {
               if (data.map) {
                 setSlamMap((prev) => ({
@@ -538,40 +545,40 @@ export function App() {
     destination_waypoint?: string;
     robot_id?: string;
   }) => {
-    const newTask: Task = {
-      id: `task_${Date.now().toString().slice(-4)}`,
-      type: taskReq.type,
-      target_waypoint: taskReq.target_waypoint,
-      destination_waypoint: taskReq.destination_waypoint,
-      robot_id: taskReq.robot_id || 'tinyRobot1',
-      status: 'active',
-      progress: 5,
-      created_at: new Date().toLocaleTimeString(),
-    };
-
-    setTasks((prev) => [newTask, ...prev]);
-
-    // Update robot state in mock simulation
-    const assignedRobotId = taskReq.robot_id || 'tinyRobot1';
-    setRobots((prev) =>
-      prev.map((r) =>
-        r.id === assignedRobotId
-          ? {
-              ...r,
-              status: 'moving',
-              current_task: `執行 ${taskReq.type} 前往 ${taskReq.target_waypoint}`,
-            }
-          : r
-      )
-    );
-
-    // If connected to real backend, send over WebSocket / REST
+    // If connected to real backend, send over WebSocket and rely on backend authoritative state
     if (isConnected && wsRef.current) {
       wsRef.current.send(
         JSON.stringify({
           action: 'dispatch_task',
           payload: taskReq,
         })
+      );
+    } else {
+      // Fallback only for standalone offline preview
+      const newTask: Task = {
+        id: `task_${Date.now().toString().slice(-4)}`,
+        type: taskReq.type,
+        target_waypoint: taskReq.target_waypoint,
+        destination_waypoint: taskReq.destination_waypoint,
+        robot_id: taskReq.robot_id || 'tinyRobot1',
+        status: 'active',
+        progress: 5,
+        created_at: new Date().toLocaleTimeString(),
+      };
+
+      setTasks((prev) => [newTask, ...prev]);
+
+      const assignedRobotId = taskReq.robot_id || 'tinyRobot1';
+      setRobots((prev) =>
+        prev.map((r) =>
+          r.id === assignedRobotId
+            ? {
+                ...r,
+                status: 'moving',
+                current_task: `執行 ${taskReq.type} 前往 ${taskReq.target_waypoint}`,
+              }
+            : r
+        )
       );
     }
   };
