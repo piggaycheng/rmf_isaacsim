@@ -1030,16 +1030,19 @@ ${
                       adapter.robots.map((robotItem) => {
                         const cfg = normalizeRobotConfig(robotItem, adapter.default_parking, adapter.default_charger);
                         const liveRobot = robots.find((r) => r.id === cfg.name);
+                        const isEstopped = liveRobot?.emergency_stop || liveRobot?.status === 'emergency_stop';
                         return (
                           <div
                             key={cfg.name}
-                            className="p-2 rounded-lg bg-slate-950/70 border border-slate-800/80 flex flex-col justify-between space-y-1.5 hover:border-slate-750 transition-colors"
+                            className="p-2 rounded-lg bg-slate-950/70 border border-slate-800/80 flex flex-col justify-between space-y-1.5 hover:border-slate-755 transition-colors"
                           >
                             <div className="flex items-center justify-between">
                               <div className="flex items-center space-x-1.5 truncate">
                                 <span
                                   className={`w-2 h-2 rounded-full shrink-0 ${
-                                    liveRobot?.status === 'moving'
+                                    isEstopped
+                                      ? 'bg-rose-500 animate-pulse ring-2 ring-rose-500/50'
+                                      : liveRobot?.status === 'moving'
                                       ? 'bg-cyan-400 animate-pulse'
                                       : liveRobot?.status === 'charging'
                                       ? 'bg-amber-400 animate-pulse'

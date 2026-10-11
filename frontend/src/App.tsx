@@ -41,6 +41,9 @@ import {
   Eye,
   EyeOff,
   Pencil,
+  OctagonAlert,
+  AlertTriangle,
+  Ban,
 } from 'lucide-react';
 
 const DEFAULT_GRAPHS: NavGraph[] = [
@@ -163,6 +166,9 @@ export function App() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveToast, setSaveToast] = useState<string | null>(null);
+  const [cancelingTaskId, setCancelingTaskId] = useState<string | null>(null);
+  const [actionPendingRobotId, setActionPendingRobotId] = useState<string | null>(null);
+  const [isGlobalActionPending, setIsGlobalActionPending] = useState<boolean>(false);
   const wsRef = useRef<WebSocket | null>(null);
   const isInitialMount = useRef(true);
 
@@ -339,7 +345,7 @@ export function App() {
     const timer = setInterval(() => {
       setRobots((prevRobots) =>
         prevRobots.map((robot) => {
-          if (robot.status === 'moving') {
+          if (robot.status === 'moving' && !robot.emergency_stop) {
             // Move gently towards a target or patrol
             const targetX = robot.id === 'tinyRobot1' ? 8.0 : 2.0;
             const targetY = robot.id === 'tinyRobot1' ? 5.0 : 1.0;
@@ -592,6 +598,183 @@ export function App() {
     }
   };
 
+  // Cancel Task Action
+  const handleCancelTask = async (taskId: string) => {
+    setCancelingTaskId(taskId);
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status !== 'error') {
+        setSaveToast(data.message || `任務 [${taskId}] 已成功取消`);
+        setTasks((prev) =>
+          prev.map((t) => (t.id === taskId ? { ...t, status: 'canceled' } : t))
+        );
+      } else {
+        setSaveToast(`取消任務失敗：${data.message || res.statusText || '後端拒絕'}`);
+      }
+    } catch (err) {
+      if (isMockSimulation) {
+        setTasks((prev) =>
+          prev.map((t) => (t.id === taskId ? { ...t, status: 'canceled' } : t))
+        );
+        setSaveToast(`任務 [${taskId}] 已取消 (Mock 模式)`);
+      } else {
+        setSaveToast('無法連線至後端取消任務');
+      }
+    } finally {
+      setCancelingTaskId(null);
+      setTimeout(() => setSaveToast(null), 4000);
+    }
+  };
+
+  // Robot Emergency Stop Action
+  const handleRobotEmergencyStop = async (
+    robotId: string,
+    fleetName: string | undefined,
+    action: 'estop' | 'release',
+    cancelTask: boolean = false
+  ) => {
+    setActionPendingRobotId(robotId);
+    const endpoint =
+      action === 'estop'
+        ? `/api/robots/${encodeURIComponent(robotId)}/emergency-stop`
+        : `/api/robots/${encodeURIComponent(robotId)}/emergency-stop/release`;
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fleet_name: fleetName,
+          cancel_task: cancelTask,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status !== 'error') {
+        setSaveToast(
+          data.message ||
+            (action === 'estop'
+              ? `車輛 [${robotId}] 已緊急停車`
+              : `車輛 [${robotId}] 已解除緊急停車`)
+        );
+        setRobots((prev) =>
+          prev.map((r) =>
+            r.id === robotId
+              ? {
+                  ...r,
+                  emergency_stop: action === 'estop',
+                  status: action === 'estop' ? 'emergency_stop' : 'idle',
+                }
+              : r
+          )
+        );
+        if (cancelTask) {
+          setTasks((prev) =>
+            prev.map((t) => (t.robot_id === robotId ? { ...t, status: 'canceled' } : t))
+          );
+        }
+      } else {
+        setSaveToast(`操作失敗：${data.message || res.statusText || '未知錯誤'}`);
+      }
+    } catch (err) {
+      if (isMockSimulation) {
+        setRobots((prev) =>
+          prev.map((r) =>
+            r.id === robotId
+              ? {
+                  ...r,
+                  emergency_stop: action === 'estop',
+                  status: action === 'estop' ? 'emergency_stop' : 'idle',
+                }
+              : r
+          )
+        );
+        setSaveToast(
+          action === 'estop'
+            ? `車輛 [${robotId}] 已緊急停車 (Mock 模式)`
+            : `車輛 [${robotId}] 已解除緊急停車 (Mock 模式)`
+        );
+      } else {
+        setSaveToast('無法連線至伺服器發送急停控制');
+      }
+    } finally {
+      setActionPendingRobotId(null);
+      setTimeout(() => setSaveToast(null), 4000);
+    }
+  };
+
+  // Fleet-wide Emergency Stop Action
+  const handleGlobalEmergencyStop = async (action: 'estop' | 'release', cancelTask: boolean = false) => {
+    setIsGlobalActionPending(true);
+    const endpoint =
+      action === 'estop' ? '/api/emergency-stop' : '/api/emergency-stop/release';
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cancel_task: cancelTask,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status !== 'error') {
+        setSaveToast(
+          action === 'estop'
+            ? '全場車輛已發送緊急停車指令'
+            : '全場車輛已解除緊急停車'
+        );
+        setRobots((prev) =>
+          prev.map((r) => ({
+            ...r,
+            emergency_stop: action === 'estop',
+            status: action === 'estop' ? 'emergency_stop' : 'idle',
+          }))
+        );
+        if (cancelTask) {
+          setTasks((prev) =>
+            prev.map((t) =>
+              t.status === 'active' || t.status === 'queued'
+                ? { ...t, status: 'canceled' }
+                : t
+            )
+          );
+        }
+      } else {
+        setSaveToast(`全場急停操作失敗：${data.message || res.statusText || '未知錯誤'}`);
+      }
+    } catch (err) {
+      if (isMockSimulation) {
+        setRobots((prev) =>
+          prev.map((r) => ({
+            ...r,
+            emergency_stop: action === 'estop',
+            status: action === 'estop' ? 'emergency_stop' : 'idle',
+          }))
+        );
+        setSaveToast(
+          action === 'estop'
+            ? '全場車輛已緊急停車 (Mock 模式)'
+            : '全場車輛已解除急停 (Mock 模式)'
+        );
+      } else {
+        setSaveToast('無法連線至伺服器發送全場急停');
+      }
+    } finally {
+      setIsGlobalActionPending(false);
+      setTimeout(() => setSaveToast(null), 4000);
+    }
+  };
+
+  // Computed emergency stop states across fleet
+  const estoppedCount = robots.filter(
+    (r) => r.emergency_stop || r.status === 'emergency_stop'
+  ).length;
+  const hasEstoppedRobots = estoppedCount > 0;
+
   // Save Map to Backend & LocalStorage
   const handleSaveMap = async () => {
     setIsSaving(true);
@@ -735,6 +918,26 @@ export function App() {
 
         {/* Right Info & Actions */}
         <div className="flex items-center space-x-3">
+          {saveToast && (
+            <div
+              className={`text-xs px-3 py-1 rounded-full flex items-center shadow-md border animate-in fade-in transition-all ${
+                saveToast.includes('失敗') || saveToast.includes('拒絕') || saveToast.includes('錯誤')
+                  ? 'bg-rose-950/90 text-rose-300 border-rose-800'
+                  : saveToast.includes('急停')
+                  ? 'bg-amber-950/90 text-amber-300 border-amber-800'
+                  : 'bg-emerald-950/90 text-emerald-300 border-emerald-800'
+              }`}
+            >
+              {saveToast.includes('失敗') || saveToast.includes('拒絕') || saveToast.includes('錯誤') ? (
+                <AlertTriangle className="w-3.5 h-3.5 mr-1.5 text-rose-400 shrink-0" />
+              ) : saveToast.includes('急停') ? (
+                <OctagonAlert className="w-3.5 h-3.5 mr-1.5 text-amber-400 shrink-0" />
+              ) : (
+                <Check className="w-3.5 h-3.5 mr-1.5 text-emerald-400 shrink-0" />
+              )}
+              <span className="truncate max-w-xs">{saveToast}</span>
+            </div>
+          )}
           {/* Status Indicator */}
           <div className="flex items-center space-x-1.5 text-xs px-2.5 py-1 rounded-full border border-slate-800 bg-slate-900/60">
             {isConnected ? (
@@ -1096,26 +1299,85 @@ export function App() {
             />
           </div>
 
-          {/* Monitor Mode: Floating Quick Dispatch Prompt */}
+          {/* Monitor Mode: Floating Quick Dispatch & Safety Controls */}
           {mode === 'monitor' && (
-            <div className="absolute top-4 left-4 bg-slate-900/90 backdrop-blur border border-slate-800 p-3 rounded-xl shadow-xl flex items-center space-x-3 pointer-events-auto">
-              <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary">
-                <Play className="w-4 h-4 fill-primary" />
+            <div className="absolute top-4 left-4 flex flex-wrap items-center gap-3 pointer-events-auto z-20">
+              {/* Quick Dispatch Card */}
+              <div className="bg-slate-900/90 backdrop-blur border border-slate-800 p-2.5 px-3 rounded-xl shadow-xl flex items-center space-x-3">
+                <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary">
+                  <Play className="w-4 h-4 fill-primary" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-slate-200">地圖互動派單</p>
+                  <p className="text-[11px] text-slate-400">點擊地圖上的任意站點即可快速派遣任務</p>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setDispatchPresetWp(waypoints[0] || null);
+                    setDispatchModalOpen(true);
+                  }}
+                >
+                  <Send className="w-3.5 h-3.5 mr-1" />
+                  立即派單
+                </Button>
               </div>
-              <div>
-                <p className="text-xs font-semibold text-slate-200">地圖互動派單</p>
-                <p className="text-[11px] text-slate-400">點擊地圖上的任意站點即可快速派遣任務</p>
-              </div>
-              <Button
-                size="sm"
-                onClick={() => {
-                  setDispatchPresetWp(waypoints[0] || null);
-                  setDispatchModalOpen(true);
-                }}
+
+              {/* Global Emergency Stop Control Card */}
+              <div
+                className={`p-2.5 px-3 rounded-xl shadow-xl backdrop-blur border flex items-center space-x-3 transition-all ${
+                  hasEstoppedRobots
+                    ? 'bg-rose-950/90 border-rose-600/70 shadow-rose-950/50'
+                    : 'bg-slate-900/90 border-slate-800'
+                }`}
               >
-                <Send className="w-3.5 h-3.5 mr-1" />
-                立即派單
-              </Button>
+                <div
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    hasEstoppedRobots
+                      ? 'bg-rose-500/20 text-rose-400 animate-pulse ring-2 ring-rose-500/40'
+                      : 'bg-rose-500/10 text-rose-400'
+                  }`}
+                >
+                  <OctagonAlert className="w-4 h-4" />
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-slate-200 flex items-center space-x-1.5">
+                    <span>{hasEstoppedRobots ? '⚠️ 全場緊急停車中' : '車隊緊急安全停車'}</span>
+                    {hasEstoppedRobots && (
+                      <Badge variant="destructive" className="text-[9px] px-1 py-0 h-4 animate-pulse">
+                        {estoppedCount} 台受阻
+                      </Badge>
+                    )}
+                  </p>
+                  <p className="text-[11px] text-slate-400">
+                    {hasEstoppedRobots
+                      ? '車輛指令已暫停保留，點擊以恢復運作'
+                      : '一鍵緊急煞停所有運作中的車輛'}
+                  </p>
+                </div>
+                {hasEstoppedRobots ? (
+                  <Button
+                    size="sm"
+                    disabled={isGlobalActionPending}
+                    onClick={() => handleGlobalEmergencyStop('release')}
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium shadow-sm"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 mr-1" />
+                    解除全場急停
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={isGlobalActionPending || robots.length === 0}
+                    onClick={() => handleGlobalEmergencyStop('estop')}
+                    className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-md shadow-rose-950/50"
+                  >
+                    <OctagonAlert className="w-3.5 h-3.5 mr-1" />
+                    全場緊急停車
+                  </Button>
+                )}
+              </div>
             </div>
           )}
         </main>
@@ -1600,43 +1862,148 @@ export function App() {
                     <Radio className="w-4 h-4 text-emerald-400" />
                     <span>車隊即時狀態 ({robots.length})</span>
                   </h2>
+                  {robots.length > 0 && (
+                    hasEstoppedRobots ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={isGlobalActionPending}
+                        className="h-6 text-[10px] px-2 text-emerald-400 border-emerald-800 bg-emerald-950/40 hover:bg-emerald-900/60"
+                        onClick={() => handleGlobalEmergencyStop('release')}
+                        title="解除所有已急停的車輛"
+                      >
+                        <RotateCcw className="w-3 h-3 mr-1" />
+                        解除全場
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        disabled={isGlobalActionPending}
+                        className="h-6 text-[10px] px-2 bg-rose-600/90 hover:bg-rose-600 text-white font-medium shadow-sm"
+                        onClick={() => handleGlobalEmergencyStop('estop')}
+                        title="對所有車輛發送緊急停車"
+                      >
+                        <OctagonAlert className="w-3 h-3 mr-1" />
+                        全場急停
+                      </Button>
+                    )
+                  )}
                 </div>
 
                 <div className="space-y-2.5">
-                  {robots.map((robot) => (
-                    <Card key={robot.id} className="bg-slate-900/60 border-slate-800 shadow-none">
-                      <CardContent className="p-3">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="font-semibold text-xs text-slate-200">{robot.name}</span>
-                          <Badge
-                            variant={
-                              robot.status === 'moving'
-                                ? 'success'
-                                : robot.status === 'charging' || robot.status === 'paused'
-                                ? 'warning'
-                                : robot.status === 'offline'
-                                ? 'destructive'
-                                : 'secondary'
-                            }
-                            className="text-[10px] uppercase font-mono"
+                  {robots.map((robot) => {
+                    const isEstopped = robot.emergency_stop || robot.status === 'emergency_stop';
+                    const hasActiveTask = Boolean(
+                      robot.task_id ||
+                      (robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving')
+                    );
+                    return (
+                      <Card
+                        key={robot.id}
+                        className={`bg-slate-900/60 border-slate-800 shadow-none transition-colors ${
+                          isEstopped ? 'border-rose-800/80 bg-rose-950/20' : ''
+                        }`}
+                      >
+                        <CardContent className="p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-xs text-slate-200 flex items-center space-x-1.5">
+                              {isEstopped && <OctagonAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
+                              <span className="truncate">{robot.name}</span>
+                            </span>
+                            <Badge
+                              variant={
+                                isEstopped
+                                  ? 'destructive'
+                                  : robot.status === 'moving'
+                                  ? 'success'
+                                  : robot.status === 'charging' || robot.status === 'paused'
+                                  ? 'warning'
+                                  : robot.status === 'offline'
+                                  ? 'destructive'
+                                  : 'secondary'
+                              }
+                              className={`text-[10px] uppercase font-mono ${
+                                isEstopped ? 'bg-rose-600 text-white animate-pulse' : ''
+                              }`}
+                            >
+                              {isEstopped
+                                ? 'EMERGENCY STOP'
+                                : robot.status === 'idle'
+                                ? 'IDLE'
+                                : robot.status.toUpperCase()}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] text-slate-400">
+                            <span>車隊: {robot.fleet}</span>
+                            <span className={robot.battery < 30 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
+                              ⚡ {Math.round(robot.battery)}%
+                            </span>
+                          </div>
+                          <div
+                            className={`text-[10px] px-2 py-1 rounded truncate ${
+                              isEstopped
+                                ? 'bg-rose-950/60 text-rose-300 border border-rose-900/50'
+                                : 'bg-slate-950 text-slate-400'
+                            }`}
                           >
-                            {robot.status === 'idle' ? 'IDLE' : robot.status.toUpperCase()}
-                          </Badge>
-                        </div>
-                        <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">
-                          <span>車隊: {robot.fleet}</span>
-                          <span className={robot.battery < 30 ? 'text-rose-400 font-bold' : 'text-emerald-400'}>
-                            ⚡ {Math.round(robot.battery)}%
-                          </span>
-                        </div>
-                        <div className="text-[10px] bg-slate-950 px-2 py-1 rounded text-slate-400 truncate">
-                          {robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving'
-                            ? robot.current_task
-                            : '在線待命中'}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
+                            {isEstopped
+                              ? '🛑 緊急停車中（動作暫停等待解除）'
+                              : robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving'
+                              ? robot.current_task
+                              : '在線待命中'}
+                          </div>
+
+                          {/* Emergency Stop / Release Action Row */}
+                          <div className="pt-1.5 border-t border-slate-800/80 flex items-center justify-between">
+                            <span className="text-[10px] text-slate-500">
+                              {isEstopped ? '安全鎖定' : '單車控制'}
+                            </span>
+                            <div className="flex items-center space-x-1.5">
+                              {isEstopped ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={actionPendingRobotId === robot.id}
+                                  onClick={() => handleRobotEmergencyStop(robot.id, robot.fleet, 'release')}
+                                  className="h-6 px-2 text-[10px] text-emerald-400 border-emerald-800 bg-emerald-950/40 hover:bg-emerald-900/60 hover:text-emerald-300"
+                                >
+                                  <RotateCcw className="w-3 h-3 mr-1" />
+                                  解除急停
+                                </Button>
+                              ) : (
+                                <>
+                                  {hasActiveTask && (
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      disabled={actionPendingRobotId === robot.id}
+                                      onClick={() => handleRobotEmergencyStop(robot.id, robot.fleet, 'estop', true)}
+                                      className="h-6 px-1.5 text-[10px] text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border border-rose-900/40"
+                                      title="緊急停車並同時取消當前任務"
+                                    >
+                                      急停+取消
+                                    </Button>
+                                  )}
+                                  <Button
+                                    size="sm"
+                                    variant="destructive"
+                                    disabled={actionPendingRobotId === robot.id}
+                                    onClick={() => handleRobotEmergencyStop(robot.id, robot.fleet, 'estop', false)}
+                                    className="h-6 px-2 text-[10px] bg-rose-600/90 hover:bg-rose-600 text-white font-medium shadow-sm"
+                                    title="緊急停車（暫停動作並保留任務）"
+                                  >
+                                    <OctagonAlert className="w-3 h-3 mr-1" />
+                                    緊急停車
+                                  </Button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1650,43 +2017,73 @@ export function App() {
                 </div>
 
                 <div className="space-y-2">
-                  {tasks.map((task) => (
-                    <div
-                      key={task.id}
-                      className="bg-slate-900/40 border border-slate-800/80 p-2.5 rounded-lg text-xs space-y-1.5"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium text-slate-300 capitalize">
-                          {task.type}: {task.target_waypoint}
-                        </span>
-                        <Badge
-                          variant={
-                            task.status === 'completed'
-                              ? 'success'
-                              : task.status === 'active'
-                              ? 'default'
-                              : task.status === 'failed' || task.status === 'canceled'
-                              ? 'destructive'
-                              : 'outline'
-                          }
-                          className="text-[10px]"
-                        >
-                          {task.status}
-                        </Badge>
+                  {tasks.map((task) => {
+                    const isCancellable = task.status === 'active' || task.status === 'queued';
+                    return (
+                      <div
+                        key={task.id}
+                        className={`bg-slate-900/40 border p-2.5 rounded-lg text-xs space-y-1.5 ${
+                          task.status === 'canceled'
+                            ? 'border-rose-900/40 bg-rose-950/10'
+                            : 'border-slate-800/80'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-slate-300 capitalize truncate max-w-[130px]">
+                            {task.type}: {task.target_waypoint}
+                          </span>
+                          <div className="flex items-center space-x-1.5">
+                            <Badge
+                              variant={
+                                task.status === 'completed'
+                                  ? 'success'
+                                  : task.status === 'active'
+                                  ? 'default'
+                                  : task.status === 'failed' || task.status === 'canceled'
+                                  ? 'destructive'
+                                  : 'outline'
+                              }
+                              className="text-[10px]"
+                            >
+                              {task.status === 'canceled' ? '已取消' : task.status}
+                            </Badge>
+                            {isCancellable && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                disabled={cancelingTaskId === task.id}
+                                onClick={() => handleCancelTask(task.id)}
+                                className="h-5 px-1.5 text-[10px] text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border border-rose-900/50"
+                                title="取消此項任務"
+                              >
+                                {cancelingTaskId === task.id ? (
+                                  <span className="text-[9px]">取消中...</span>
+                                ) : (
+                                  <>
+                                    <Ban className="w-2.5 h-2.5 mr-1" />
+                                    取消
+                                  </>
+                                )}
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                        {/* Progress bar */}
+                        <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            className={`h-full transition-all duration-300 ${
+                              task.status === 'canceled' ? 'bg-rose-500' : 'bg-primary'
+                            }`}
+                            style={{ width: `${task.progress}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between text-[10px] text-slate-500">
+                          <span>車輛: {task.robot_id || '自動'}</span>
+                          <span>{task.progress}%</span>
+                        </div>
                       </div>
-                      {/* Progress bar */}
-                      <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                        <div
-                          className="bg-primary h-full transition-all duration-300"
-                          style={{ width: `${task.progress}%` }}
-                        />
-                      </div>
-                      <div className="flex justify-between text-[10px] text-slate-500">
-                        <span>車輛: {task.robot_id || '自動'}</span>
-                        <span>{task.progress}%</span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>

@@ -449,12 +449,18 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
 
         // Pulsing circle around robot
         const isMoving = robot.status === 'moving';
+        const isEstopped = robot.status === 'emergency_stop' || !!robot.emergency_stop;
+
         ctx.beginPath();
         ctx.arc(0, 0, 18, 0, Math.PI * 2);
-        ctx.fillStyle = isMoving ? 'rgba(6, 182, 212, 0.3)' : 'rgba(16, 185, 129, 0.2)';
+        ctx.fillStyle = isEstopped
+          ? 'rgba(239, 68, 68, 0.35)'
+          : isMoving
+          ? 'rgba(6, 182, 212, 0.3)'
+          : 'rgba(16, 185, 129, 0.2)';
         ctx.fill();
-        ctx.strokeStyle = isMoving ? '#06b6d4' : '#10b981';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = isEstopped ? '#ef4444' : isMoving ? '#06b6d4' : '#10b981';
+        ctx.lineWidth = isEstopped ? 3 : 2;
         ctx.stroke();
 
         // Directional Triangle / Head
@@ -464,7 +470,7 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.lineTo(-6, 0);
         ctx.lineTo(-10, 9);
         ctx.closePath();
-        ctx.fillStyle = isMoving ? '#22d3ee' : '#34d399';
+        ctx.fillStyle = isEstopped ? '#f87171' : isMoving ? '#22d3ee' : '#34d399';
         ctx.fill();
 
         ctx.restore();
@@ -476,17 +482,23 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.textAlign = 'center';
 
         // Background pill
-        const nameText = `${robot.name} (${Math.round(robot.battery)}%) ${isMoving ? '▶ 運行中' : ''}`;
+        const nameText = isEstopped
+          ? `${robot.name} 🛑 [急停]`
+          : `${robot.name} (${Math.round(robot.battery)}%) ${isMoving ? '▶ 運行中' : ''}`;
         const textWidth = ctx.measureText(nameText).width;
         ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-        ctx.strokeStyle = isMoving ? '#06b6d4' : (robot.battery > 30 ? '#10b981' : '#f43f5e');
+        ctx.strokeStyle = isEstopped
+          ? '#ef4444'
+          : isMoving
+          ? '#06b6d4'
+          : (robot.battery > 30 ? '#10b981' : '#f43f5e');
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.roundRect(-textWidth / 2 - 6, -34, textWidth + 12, 16, 4);
         ctx.fill();
         ctx.stroke();
 
-        ctx.fillStyle = '#f8fafc';
+        ctx.fillStyle = isEstopped ? '#fca5a5' : '#f8fafc';
         ctx.fillText(nameText, 0, -22);
 
         ctx.restore();

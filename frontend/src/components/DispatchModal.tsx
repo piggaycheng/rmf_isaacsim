@@ -198,11 +198,14 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
             className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-primary"
           >
             <option value="any">由 RMF 最佳化指派 (Auto Optimal)</option>
-            {robots.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.name} ({r.fleet}) - 電量 {Math.round(r.battery)}% [{r.status}]
-              </option>
-            ))}
+            {robots.map((r) => {
+              const isEstopped = r.emergency_stop || r.status === 'emergency_stop';
+              return (
+                <option key={r.id} value={r.id} disabled={isEstopped}>
+                  {r.name} ({r.fleet}) - 電量 {Math.round(r.battery)}% [{isEstopped ? '🛑 緊急停車 (無法指派)' : r.status}]
+                </option>
+              );
+            })}
           </select>
         </div>
 
