@@ -124,6 +124,7 @@ class MqttFleetAdapter:
         self.configured_fleets: Set[str] = set()
         self.paused_fleets: Set[str] = set()
         self.estopped_robots: Set[str] = set()  # "{fleet}/{robot}"
+        self.fleet_waypoint_info: Dict[str, Dict[str, Any]] = {}
 
         estop_file = find_backend_path("saved_maps/estopped_robots.json")
         if os.path.exists(estop_file):
@@ -331,12 +332,42 @@ class MqttFleetAdapter:
             if not adapters_data:
                 adapters_data = [{"fleet_name": self.fleet_name, "graph_idx": 0}]
 
+            self.fleet_waypoint_info: Dict[str, Dict[str, Any]] = {}
+
             for item in adapters_data:
                 f_name = item.get("fleet_name") or self.fleet_name
                 g_idx = item.get("graph_idx", 0)
                 nav_path = find_backend_path(f"saved_maps/nav_graphs/{g_idx}.yaml")
                 if not os.path.exists(nav_path):
                     nav_path = self.nav_graph_path
+
+                # Parse waypoints from nav_path
+                all_wps = []
+                charger_wps = []
+                parking_wps = []
+                if os.path.exists(nav_path):
+                    try:
+                        with open(nav_path, "r", encoding="utf-8") as yf:
+                            nav_dict = yaml.safe_load(yf) or {}
+                        for lvl_data in nav_dict.get("levels", {}).values():
+                            for v in lvl_data.get("vertices", []):
+                                if len(v) >= 3 and isinstance(v[2], dict):
+                                    wp_name = v[2].get("name")
+                                    if wp_name:
+                                        all_wps.append(wp_name)
+                                        if v[2].get("is_charger", False):
+                                            charger_wps.append(wp_name)
+                                        if v[2].get("is_parking_spot", False):
+                                            parking_wps.append(wp_name)
+                    except Exception as e:
+                        print(f"[WARN] Failed to parse nav graph {nav_path} for fleet [{f_name}]: {e}")
+
+                self.fleet_waypoint_info[f_name] = {
+                    "all": all_wps,
+                    "chargers": charger_wps,
+                    "parkings": parking_wps,
+                    "graph_idx": g_idx,
+                }
 
                 try:
                     fleet_cfg_path = self.config_path
@@ -381,6 +412,31 @@ class MqttFleetAdapter:
                 self.fleet_handle = self.adapter.add_easy_fleet(self.fleet_config)
                 self.fleet_handles[self.fleet_name] = self.fleet_handle
                 self.configured_fleets = {self.fleet_name}
+
+                # Parse fallback nav waypoints
+                all_wps, charger_wps, parking_wps = [], [], []
+                if os.path.exists(self.nav_graph_path):
+                    try:
+                        with open(self.nav_graph_path, "r", encoding="utf-8") as yf:
+                            nav_dict = yaml.safe_load(yf) or {}
+                        for lvl_data in nav_dict.get("levels", {}).values():
+                            for v in lvl_data.get("vertices", []):
+                                if len(v) >= 3 and isinstance(v[2], dict):
+                                    wp_name = v[2].get("name")
+                                    if wp_name:
+                                        all_wps.append(wp_name)
+                                        if v[2].get("is_charger", False):
+                                            charger_wps.append(wp_name)
+                                        if v[2].get("is_parking_spot", False):
+                                            parking_wps.append(wp_name)
+                    except Exception:
+                        pass
+                self.fleet_waypoint_info[self.fleet_name] = {
+                    "all": all_wps,
+                    "chargers": charger_wps,
+                    "parkings": parking_wps,
+                    "graph_idx": 0,
+                }
 
             print(f"[INFO] Open-RMF EasyFullControl Adapter ready for fleets: {list(self.fleet_handles.keys())}")
         except Exception as e:
@@ -599,6 +655,80 @@ class MqttFleetAdapter:
         except Exception as e:
             print(f"[FA WARN] Failed to save discovered robots: {e}")
 
+    def _resolve_charger_waypoint(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]) -> str:
+        fleet_info = self.fleet_waypoint_info.get(fleet_name, {})
+        valid_wps = set(fleet_info.get("all", []))
+        chargers = fleet_info.get("chargers", [])
+
+        # 1. Check if payload explicitly provides a valid charger
+        req_charger = payload.get("default_charger")
+        if req_charger and (not valid_wps or req_charger in valid_wps):
+            return req_charger
+
+        # 2. Check fleet_adapters.json
+        adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
+        if os.path.exists(adapters_file):
+            try:
+                with open(adapters_file, "r", encoding="utf-8") as f:
+                    adapters_data = json.load(f)
+                for item in adapters_data:
+                    if item.get("fleet_name") == fleet_name:
+                        for r in item.get("robots", []):
+                            if r.get("name") == robot_id and r.get("charger_waypoint"):
+                                c = r.get("charger_waypoint")
+                                if not valid_wps or c in valid_wps:
+                                    return c
+                        if item.get("default_charger"):
+                            c = item.get("default_charger")
+                            if not valid_wps or c in valid_wps:
+                                return c
+            except Exception:
+                pass
+
+        # 3. Use charger marked in the nav graph vertices
+        if chargers:
+            return chargers[0]
+
+        # 4. Use first waypoint in the nav graph
+        if valid_wps:
+            return fleet_info.get("all", [])[0]
+
+        return "charger_1"
+
+    def _resolve_parking_waypoint(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]) -> str:
+        fleet_info = self.fleet_waypoint_info.get(fleet_name, {})
+        valid_wps = set(fleet_info.get("all", []))
+        parkings = fleet_info.get("parkings", [])
+
+        req_parking = payload.get("default_parking")
+        if req_parking and (not valid_wps or req_parking in valid_wps):
+            return req_parking
+
+        adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
+        if os.path.exists(adapters_file):
+            try:
+                with open(adapters_file, "r", encoding="utf-8") as f:
+                    adapters_data = json.load(f)
+                for item in adapters_data:
+                    if item.get("fleet_name") == fleet_name:
+                        for r in item.get("robots", []):
+                            if r.get("name") == robot_id and r.get("parking_waypoint"):
+                                p = r.get("parking_waypoint")
+                                if not valid_wps or p in valid_wps:
+                                    return p
+                        if item.get("default_parking"):
+                            p = item.get("default_parking")
+                            if not valid_wps or p in valid_wps:
+                                return p
+            except Exception:
+                pass
+
+        if parkings:
+            return parkings[0]
+        if valid_wps:
+            return fleet_info.get("all", [])[0]
+        return "parking_1"
+
     # ==========================================================================
     # Handler 1: Robot Registration (開機註冊)
     # ==========================================================================
@@ -610,9 +740,9 @@ class MqttFleetAdapter:
         y = float(loc.get("y", 0.0))
         yaw = float(loc.get("yaw", 0.0))
         level_name = loc.get("level_name", "L1")
-        fallback_charger = "wp_1"
-        default_charger = payload.get("default_charger") or fallback_charger
-        default_parking = payload.get("default_parking") or fallback_charger
+        default_charger = self._resolve_charger_waypoint(robot_id, fleet_name, payload)
+        default_parking = self._resolve_parking_waypoint(robot_id, fleet_name, payload)
+        print(f"[REGISTER] Resolved charger for '{robot_id}' ({fleet_name}): {default_charger}, parking: {default_parking}")
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
         # Track in discovered_robots dictionary
