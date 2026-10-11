@@ -50,10 +50,12 @@ class RMFService:
         self.ros_node: Optional[Node] = None
         self.task_pub = None
         self.fleet_control_pub = None
+        self.robot_control_pub = None
         self.camera_control_pub = None
         self.discovered_sub = None
         self.running = False
-        self.pending_requests: Dict[str, asyncio.Future] = {}
+        # request_id -> {"event": threading.Event, "responses": [payload, ...]} for Task API calls awaiting a reply
+        self.pending_requests: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.Lock()
 
     def start_background_processes(self):
@@ -179,6 +181,13 @@ class RMFService:
                     payload = json.loads(msg.json_msg)
                     req_id = msg.request_id
                     print(f"[RMF Task API Response] ID: {req_id}, payload: {payload}")
+                    with self.lock:
+                        pending = self.pending_requests.get(req_id)
+                        if pending is not None:
+                            pending["responses"].append(payload)
+                            pending["event"].set()
+                    if pending is not None:
+                        return
                     
                     is_success = payload.get("success", True)
                     errors = payload.get("errors") or []
@@ -280,8 +289,11 @@ class RMFService:
                     prev_task_id = prev_robot.get("task_id", "")
                     # RMF keeps reporting the last known pose for a disconnected robot; the FA knows the link state.
                     is_offline = state.is_robot_offline(fleet_name, r_id)
+                    is_estopped = state.is_robot_estopped(fleet_name, r_id)
 
-                    if is_offline:
+                    if is_estopped:
+                        mode_str = "emergency_stop"
+                    elif is_offline:
                         mode_str = "offline"
                     elif r.mode.mode == 3 or fleet_name in state.paused_fleets:
                         mode_str = "paused"
@@ -294,7 +306,9 @@ class RMFService:
 
                     # Keep the previous task id while offline so completion is only inferred after reconnecting.
                     task_id = r.task_id or (prev_task_id if is_offline else "")
-                    if is_offline:
+                    if is_estopped:
+                        current_task = f"緊急停車（{task_id}）" if task_id else "緊急停車"
+                    elif is_offline:
                         current_task = f"離線（{task_id}）" if task_id else "離線"
                     else:
                         current_task = r.task_id or ("正在導航" if mode_str == "moving" else "已暫停" if mode_str == "paused" else "在線待命中")
@@ -310,6 +324,8 @@ class RMFService:
                         "status": mode_str,
                         "current_task": current_task,
                         "task_id": task_id,
+                        "emergency_stop": is_estopped,
+                        "online": not is_offline,
                     }
 
                     if is_offline:
@@ -331,7 +347,7 @@ class RMFService:
                         if prev_task_id and prev_task_id != r.task_id:
                             for t in state.current_tasks:
                                 if task_matches(t, prev_task_id):
-                                    if t.get("status") not in state.TERMINAL_STATES:
+                                    if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested"):
                                         t["status"] = "completed"
                                         t["progress"] = 100
                                         append_adapter_log(
@@ -345,7 +361,7 @@ class RMFService:
                         if r.mode.mode not in (5, 8):
                             for t in state.current_tasks:
                                 if task_matches(t, prev_task_id):
-                                    if t.get("status") not in state.TERMINAL_STATES:
+                                    if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested"):
                                         t["status"] = "completed"
                                         t["progress"] = 100
                                         t["robot_id"] = r_id
@@ -362,6 +378,7 @@ class RMFService:
                                 if (
                                     t.get("robot_id") == r_id
                                     and t.get("status") == "active"
+                                    and not t.get("cancel_requested")
                                     and t.get("progress", 0) >= 90
                                 ):
                                     t["status"] = "completed"
@@ -414,6 +431,11 @@ class RMFService:
                 String, "/rmf/fleet_control", 10
             )
 
+            # Robot control publisher (operator emergency stop / release)
+            self.robot_control_pub = self.ros_node.create_publisher(
+                String, "/rmf/robot_control", 10
+            )
+
             # Camera control publisher
             self.camera_control_pub = self.ros_node.create_publisher(
                 String, "/rmf/camera_control", 10
@@ -459,39 +481,140 @@ class RMFService:
         except Exception as e:
             print(f"[RMF Bridge ERROR] Failed to initialize ROS 2 node: {e}")
 
-    def send_fleet_control(self, fleet_name: str, action: str, timeout_s: float = 4.0) -> bool:
-        """Sends fleet pause/resume to the Fleet Adapter via ROS 2 and waits for its state to confirm it.
+    def _publish_until_confirmed(self, pub, topic: str, payload: Dict[str, Any], confirmed, timeout_s: float) -> bool:
+        """Publish to the FA (resending every second) until its latched state satisfies `confirmed()`.
 
-        Blocking; call from a worker thread. The FA owns paused_fleets.json, so nothing is persisted here.
+        Blocking; call from a worker thread.
         """
-        if action not in ("pause", "resume"):
+        if not pub or not rclpy.ok():
+            print(f"[RMF Bridge ERROR] Publisher for {topic} not ready.")
             return False
-        if not self.fleet_control_pub or not rclpy.ok():
-            print("[RMF Bridge ERROR] Fleet control publisher not ready.")
-            return False
-
-        want_paused = action == "pause"
-        payload = json.dumps({"action": action, "fleet": fleet_name})
+        data = json.dumps(payload)
         deadline = time.time() + timeout_s
         next_publish = 0.0
         while time.time() < deadline:
-            if (fleet_name in state.paused_fleets) == want_paused and state.fa_state_time > 0 \
-                    and (time.time() - state.fa_state_time) < state.FA_STATE_STALE_S:
-                print(f"[RMF Bridge] Fleet Adapter confirmed '{action}' for fleet [{fleet_name}].")
+            if state.is_fa_state_fresh() and confirmed():
+                print(f"[RMF Bridge] Fleet Adapter confirmed {data}.")
                 return True
             if time.time() >= next_publish:
                 try:
                     msg = String()
-                    msg.data = payload
-                    self.fleet_control_pub.publish(msg)
-                    print(f"[RMF Bridge] Published fleet control to /rmf/fleet_control: {payload}")
+                    msg.data = data
+                    pub.publish(msg)
+                    print(f"[RMF Bridge] Published to {topic}: {data}")
                 except Exception as e:
-                    print(f"[RMF Bridge ERROR] Failed to publish fleet control: {e}")
+                    print(f"[RMF Bridge ERROR] Failed to publish to {topic}: {e}")
                     return False
                 next_publish = time.time() + 1.0
             time.sleep(0.1)
-        print(f"[RMF Bridge ERROR] Fleet Adapter did not confirm '{action}' for fleet [{fleet_name}] within {timeout_s}s.")
+        print(f"[RMF Bridge ERROR] Fleet Adapter did not confirm {data} within {timeout_s}s.")
         return False
+
+    def send_fleet_control(self, fleet_name: str, action: str, timeout_s: float = 4.0) -> bool:
+        """Fleet pause/resume via the FA. The FA owns paused_fleets.json, so nothing is persisted here."""
+        if action not in ("pause", "resume"):
+            return False
+        want_paused = action == "pause"
+        return self._publish_until_confirmed(
+            self.fleet_control_pub, "/rmf/fleet_control",
+            {"action": action, "fleet": fleet_name},
+            lambda: (fleet_name in state.paused_fleets) == want_paused,
+            timeout_s,
+        )
+
+    def send_robot_control(self, fleet_name: str, robot_id: str, action: str, timeout_s: float = 4.0) -> bool:
+        """Operator emergency stop ('estop') / 'release' of one robot via the FA (owner of estopped_robots.json)."""
+        if action not in ("estop", "release"):
+            return False
+        want_estopped = action == "estop"
+        return self._publish_until_confirmed(
+            self.robot_control_pub, "/rmf/robot_control",
+            {"action": action, "fleet": fleet_name, "robot": robot_id},
+            lambda: state.is_robot_estopped(fleet_name, robot_id) == want_estopped,
+            timeout_s,
+        )
+
+    def _call_task_api(self, payload_json: Dict[str, Any], timeout_s: float, grace_s: float = 1.0) -> List[Dict[str, Any]]:
+        """Publish a Task API request and collect its responses. Blocking; call from a worker thread.
+
+        Several fleet adapters may answer the same request (only the owner of a task succeeds), so after the
+        first non-successful reply we keep listening for `grace_s` for a successful one.
+        """
+        if not self.task_pub or not rclpy.ok():
+            raise RuntimeError("ROS 2 Task Publisher 尚未就緒")
+        req_id = f"api_{uuid.uuid4().hex[:12]}"
+        pending = {"event": threading.Event(), "responses": []}
+        with self.lock:
+            self.pending_requests[req_id] = pending
+        try:
+            msg = ApiRequest()
+            msg.request_id = req_id
+            msg.json_msg = json.dumps(payload_json)
+            self.task_pub.publish(msg)
+            print(f"[RMF Task API] Published [{req_id}]: {payload_json}")
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                pending["event"].wait(max(0.0, deadline - time.time()))
+                pending["event"].clear()
+                with self.lock:
+                    responses = list(pending["responses"])
+                if any(r.get("success") for r in responses):
+                    break
+                if responses:
+                    deadline = min(deadline, time.time() + grace_s)
+            with self.lock:
+                return list(pending["responses"])
+        finally:
+            with self.lock:
+                self.pending_requests.pop(req_id, None)
+
+    def cancel_task(self, identifier: str, timeout_s: float = 5.0) -> Dict[str, Any]:
+        """Cancels a queued or in-progress task via the Open-RMF Task API (cancel_task_request).
+
+        The owning fleet adapter removes a queued task from the robot's queue, or stops the active one
+        (RMF then sends 'stop' to the robot through the MQTT Fleet Adapter). Blocking; call from a worker thread.
+        """
+        task = next((t for t in state.current_tasks if task_matches(t, identifier)), None)
+        if task is not None:
+            if task.get("status") in state.TERMINAL_STATES:
+                return {"status": "error", "task_id": identifier,
+                        "message": f"任務已結束 ({task.get('status')})，無法取消。"}
+            rmf_task_id = task.get("booking_id")
+            if not rmf_task_id:
+                return {"status": "error", "task_id": identifier,
+                        "message": "任務尚未取得 Open-RMF 任務編號（仍在派車競標中），請稍後再試。"}
+        else:
+            # Not tracked by this backend (e.g. after a backend restart): treat it as an RMF task id.
+            rmf_task_id = identifier
+
+        if task is not None:
+            task["cancel_requested"] = True
+        try:
+            responses = self._call_task_api(
+                {"type": "cancel_task_request", "task_id": rmf_task_id, "labels": ["rmf_web_studio"]}, timeout_s)
+        except Exception as e:
+            if task is not None:
+                task.pop("cancel_requested", None)
+            return {"status": "error", "task_id": rmf_task_id, "message": f"無法送出取消請求: {e}"}
+
+        if any(r.get("success") for r in responses):
+            if task is not None and task.get("status") not in state.TERMINAL_STATES:
+                task["status"] = "canceled"
+                task["detail"] = "已由操作員取消"
+            append_adapter_log(
+                (task or {}).get("fleet_name") or "system",
+                f"[WARN] [RMF Dispatcher]: Task [{rmf_task_id}] canceled by operator.",
+            )
+            return {"status": "success", "task_id": rmf_task_id, "message": f"任務 [{rmf_task_id}] 已取消。"}
+
+        if task is not None:
+            task.pop("cancel_requested", None)
+        errors = []
+        for r in responses:
+            for err in r.get("errors") or []:
+                errors.append(err.get("detail") or err.get("category") or str(err) if isinstance(err, dict) else str(err))
+        message = "; ".join(errors) if errors else "Open-RMF 未回應取消請求（任務可能不存在或已結束）。"
+        return {"status": "error", "task_id": rmf_task_id, "message": f"取消失敗: {message}"}
 
     def send_camera_control(self, camera_name: str, topic_prefix: str = "slam/cameras", enabled: bool = False) -> bool:
         """Dispatches camera enable/disable control to Fleet Adapter via ROS 2."""
@@ -648,6 +771,14 @@ class RMFService:
                 "task_id": None,
                 "request_id": None,
                 "message": f"車隊 '{target_fleet}' 目前處於暫停狀態 (paused)，無法受理調度任務。請先至車隊管理介面恢復車隊。",
+            }
+
+        if robot_id and robot_id != "any" and target_fleet and state.is_robot_estopped(target_fleet, robot_id):
+            return {
+                "status": "error",
+                "task_id": None,
+                "request_id": None,
+                "message": f"車輛 '{robot_id}' 處於緊急停車狀態，請先解除緊急停車。",
             }
 
         # Format Request JSON

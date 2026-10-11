@@ -1,8 +1,9 @@
 import asyncio
 import json
 import math
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 import state
 from state import (
     current_robots,
@@ -44,6 +45,84 @@ async def dispatch_task_endpoint(req: TaskRequest):
     })
     return res
 
+class EmergencyStopRequest(BaseModel):
+    fleet_name: Optional[str] = None
+    cancel_task: bool = False
+
+
+async def _broadcast_fleet_and_tasks():
+    await broadcast({"type": "fleet_states", "robots": list(current_robots.values())})
+    await broadcast({"type": "tasks", "tasks": current_tasks})
+
+
+@router.post("/api/tasks/{task_id}/cancel")
+async def cancel_task_endpoint(task_id: str):
+    """Cancels a queued or in-progress task (local id, request id, or Open-RMF booking id)."""
+    res = await asyncio.to_thread(rmf_service.cancel_task, task_id)
+    await _broadcast_fleet_and_tasks()
+    return res
+
+
+async def _robot_control(robot_id: str, action: str, fleet_name: Optional[str], cancel_task: bool = False) -> Dict[str, Any]:
+    fleet = fleet_name or state.find_robot_fleet(robot_id)
+    if not fleet:
+        return {"status": "error", "robot_id": robot_id, "message": f"找不到車輛 '{robot_id}' 所屬車隊。"}
+    task_id = (current_robots.get(robot_id) or {}).get("task_id") or ""
+    confirmed = await asyncio.to_thread(rmf_service.send_robot_control, fleet, robot_id, action)
+    if not confirmed:
+        label = "緊急停車" if action == "estop" else "解除緊急停車"
+        return {"status": "error", "robot_id": robot_id, "fleet_name": fleet,
+                "message": f"Fleet Adapter 未確認{label}（{fleet}/{robot_id}）。"}
+    result: Dict[str, Any] = {"status": "success", "robot_id": robot_id, "fleet_name": fleet,
+                              "emergency_stop": action == "estop"}
+    if action == "estop":
+        result["message"] = f"車輛 '{robot_id}' 已緊急停車；解除前不會再執行任何指令。"
+        if cancel_task and task_id:
+            result["cancel_result"] = await asyncio.to_thread(rmf_service.cancel_task, task_id)
+    else:
+        result["message"] = f"車輛 '{robot_id}' 已解除緊急停車；若原任務仍有效將繼續執行。"
+    return result
+
+
+@router.post("/api/robots/{robot_id}/emergency-stop")
+async def emergency_stop_robot(robot_id: str, req: Optional[EmergencyStopRequest] = None):
+    """Stops the robot immediately and holds all RMF commands until released. Optionally cancels its task."""
+    req = req or EmergencyStopRequest()
+    res = await _robot_control(robot_id, "estop", req.fleet_name, req.cancel_task)
+    await _broadcast_fleet_and_tasks()
+    return res
+
+
+@router.post("/api/robots/{robot_id}/emergency-stop/release")
+async def release_emergency_stop_robot(robot_id: str, req: Optional[EmergencyStopRequest] = None):
+    """Releases the emergency stop; the interrupted command is resumed if its task is still active."""
+    req = req or EmergencyStopRequest()
+    res = await _robot_control(robot_id, "release", req.fleet_name)
+    await _broadcast_fleet_and_tasks()
+    return res
+
+
+@router.post("/api/emergency-stop")
+async def emergency_stop_all(req: Optional[EmergencyStopRequest] = None):
+    """Emergency-stops every known robot."""
+    req = req or EmergencyStopRequest()
+    robots = list(current_robots.values())
+    results = await asyncio.gather(*[
+        _robot_control(r["id"], "estop", r.get("fleet"), req.cancel_task) for r in robots
+    ])
+    await _broadcast_fleet_and_tasks()
+    ok = all(r.get("status") == "success" for r in results)
+    return {"status": "success" if ok else "error", "results": results}
+
+
+@router.post("/api/emergency-stop/release")
+async def release_emergency_stop_all():
+    """Releases the emergency stop of every e-stopped robot."""
+    targets = [key.split("/", 1) for key in sorted(state.estopped_robots) if "/" in key]
+    results = await asyncio.gather(*[_robot_control(rid, "release", fleet) for fleet, rid in targets])
+    await _broadcast_fleet_and_tasks()
+    ok = all(r.get("status") == "success" for r in results)
+    return {"status": "success" if ok else "error", "results": results}
 @router.websocket("/ws/fleet")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()

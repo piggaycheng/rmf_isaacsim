@@ -53,7 +53,8 @@ class TestRMFDispatchRegression(unittest.TestCase):
         # Isolate FA persistence (paused fleets / discovered robots) so tests don't leak state via saved_maps.
         self._tmpdir = tempfile.TemporaryDirectory()
         real_find = mfa.find_backend_path
-        isolated = {"saved_maps/paused_fleets.json", "saved_maps/discovered_robots.json"}
+        isolated = {"saved_maps/paused_fleets.json", "saved_maps/discovered_robots.json",
+                    "saved_maps/estopped_robots.json"}
 
         def isolated_find(subpath):
             if subpath in isolated:
@@ -734,6 +735,146 @@ class TestRMFDispatchRegression(unittest.TestCase):
         self.assertIsNone(robot.current_execution)
         self.assertEqual(robot.status, "idle")
         mock_handle.more().replan.assert_called_once()
+
+    # --------------------------------------------------------------------------
+    # Operator emergency stop (FA) and task cancellation (backend)
+    # --------------------------------------------------------------------------
+    def _published(self, adapter):
+        return [json.loads(c.args[1]) for c in adapter.mqtt_client.publish.call_args_list
+                if c.args[0].endswith("/command")]
+
+    def test_estop_halts_holds_and_resumes_command(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        robot = adapter.robots[("fleet1", "carter1")]
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = robot.map_name
+        dest.dock = None
+        dest.speed_limit = None
+        nav_exec = MagicMock()
+        nav_exec.okay.return_value = True
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, nav_exec)
+        nav_cmd = self._published(adapter)[-1]
+        self.assertEqual(nav_cmd["action"], "navigate")
+
+        adapter.mqtt_client.publish.reset_mock()
+        adapter._handle_robot_control("fleet1", "carter1", "estop")
+        stop_cmd = self._published(adapter)[-1]
+        self.assertEqual(stop_cmd["action"], "stop")
+        self.assertGreater(stop_cmd["cmd_id"], nav_cmd["cmd_id"])
+        self.assertTrue(robot.is_estopped)
+        self.assertIn("fleet1/carter1", adapter.estopped_robots)
+        self.assertIs(robot.current_execution, nav_exec)
+        self.assertIsNotNone(robot.deferred_cmd_payload)
+        with open(mfa.find_backend_path("saved_maps/estopped_robots.json")) as f:
+            self.assertEqual(json.load(f), ["fleet1/carter1"])
+
+        # Late result of the interrupted navigate and heartbeats at the target must not finish the execution
+        adapter._handle_command_result("carter1", "fleet1", {"cmd_id": nav_cmd["cmd_id"], "status": "completed"})
+        adapter._handle_heartbeat("carter1", "fleet1", {"x": 5.0, "y": 0.0, "yaw": 0.0, "status": "idle"})
+        nav_exec.finished.assert_not_called()
+
+        # New RMF commands while e-stopped are held, not sent
+        adapter.mqtt_client.publish.reset_mock()
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, nav_exec)
+        adapter._on_rmf_action("fleet1", "carter1", "act", {}, nav_exec)
+        self.assertEqual(self._published(adapter), [])
+
+        # A robot (re)connecting while e-stopped must not get the held command
+        adapter._dispatch_deferred_command(robot)
+        self.assertEqual(self._published(adapter), [])
+
+        # Release re-dispatches the held command with a fresh cmd_id
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, nav_exec)
+        adapter._handle_robot_control("fleet1", "carter1", "release")
+        resumed = self._published(adapter)[-1]
+        self.assertEqual(resumed["action"], "navigate")
+        self.assertEqual(resumed["cmd_id"], robot.cmd_id)
+        self.assertGreater(resumed["cmd_id"], stop_cmd["cmd_id"])
+        self.assertFalse(robot.is_estopped)
+        self.assertIsNone(robot.deferred_cmd_payload)
+
+    def test_estop_persists_across_registration(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter.estopped_robots = {"fleet1/carter1"}
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        robot = adapter.robots[("fleet1", "carter1")]
+        self.assertTrue(robot.is_estopped)
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        self.assertTrue(robot.is_estopped)
+
+    def test_rmf_cancel_while_estopped_drops_held_command(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {"robot_id": "carter1"})
+        robot = adapter.robots[("fleet1", "carter1")]
+        dest = MagicMock()
+        dest.position = [5.0, 0.0, 0.0]
+        dest.map = robot.map_name
+        dest.dock = None
+        dest.speed_limit = None
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, MagicMock())
+        adapter._handle_robot_control("fleet1", "carter1", "estop")
+        adapter._on_rmf_stop("fleet1", "carter1", None)  # task canceled by RMF
+        self.assertIsNone(robot.deferred_cmd_payload)
+        adapter.mqtt_client.publish.reset_mock()
+        adapter._handle_robot_control("fleet1", "carter1", "release")
+        self.assertEqual(self._published(adapter), [])
+
+    def test_backend_cancel_task(self):
+        state.current_tasks.clear()
+        state.current_tasks.append({"id": "task_1", "request_id": "task_1", "booking_id": "patrol.dispatch-7",
+                                    "robot_id": "carter1", "fleet_name": "fleet1", "status": "active", "progress": 50})
+        with patch.object(rmf_service, "_call_task_api", return_value=[{"success": False, "errors": [{"detail": "x"}]},
+                                                                         {"success": True}]) as call:
+            res = rmf_service.cancel_task("task_1")
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(call.call_args.args[0], {"type": "cancel_task_request", "task_id": "patrol.dispatch-7",
+                                                  "labels": ["rmf_web_studio"]})
+        self.assertEqual(state.current_tasks[0]["status"], "canceled")
+        self.assertEqual(rmf_service.cancel_task("task_1")["status"], "error")  # already terminal
+
+        state.current_tasks.append({"id": "task_2", "request_id": "task_2", "booking_id": None, "status": "queued"})
+        self.assertEqual(rmf_service.cancel_task("task_2")["status"], "error")  # no RMF id yet
+
+        state.current_tasks.append({"id": "task_3", "request_id": "task_3", "booking_id": "b3", "status": "queued"})
+        with patch.object(rmf_service, "_call_task_api", return_value=[]):
+            res = rmf_service.cancel_task("task_3")
+        self.assertEqual(res["status"], "error")
+        self.assertEqual(state.current_tasks[-1]["status"], "queued")
+        self.assertNotIn("cancel_requested", state.current_tasks[-1])
+
+    def test_backend_task_api_collects_success_after_failure(self):
+        import rmf_service as rs
+
+        def fake_publish(msg):
+            def respond():
+                for payload in ({"success": False, "errors": []}, {"success": True}):
+                    time.sleep(0.05)
+                    with rmf_service.lock:
+                        pending = rmf_service.pending_requests.get(msg.request_id)
+                        pending["responses"].append(payload)
+                        pending["event"].set()
+            import threading
+            threading.Thread(target=respond, daemon=True).start()
+
+        with patch.object(rmf_service, "task_pub", MagicMock(publish=fake_publish)), \
+                patch.object(rs.rclpy, "ok", return_value=True):
+            responses = rmf_service._call_task_api({"type": "cancel_task_request", "task_id": "x"}, timeout_s=2.0)
+        self.assertTrue(any(r.get("success") for r in responses))
+        self.assertEqual(rmf_service.pending_requests, {})
+
+    def test_backend_robot_control_waits_for_fa_ack(self):
+        import rmf_service as rs
+        state.estopped_robots.clear()
+        pub = MagicMock()
+        pub.publish.side_effect = lambda msg: state.update_fa_state(
+            {"mqtt_connected": True, "paused_fleets": [], "estopped_robots": ["fleet1/carter1"]})
+        with patch.object(rmf_service, "robot_control_pub", pub), patch.object(rs.rclpy, "ok", return_value=True):
+            self.assertTrue(rmf_service.send_robot_control("fleet1", "carter1", "estop"))
+            pub.publish.side_effect = None
+            self.assertFalse(rmf_service.send_robot_control("fleet1", "carter1", "release", timeout_s=0.3))
+        state.estopped_robots.clear()
 
 
 if __name__ == "__main__":

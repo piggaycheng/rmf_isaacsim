@@ -144,11 +144,27 @@ Backend 不直接與車端（MQTT）通訊；所有車端互動皆經由 Fleet A
 | Topic | 方向 | QoS | Payload | 說明 |
 |---|---|---|---|---|
 | `/rmf/fleet_control` | Backend → FA | depth 10 | `{"action":"pause"\|"resume","fleet":"fleet1"}` | 車隊暫停/恢復。Backend 每秒重送直到 `/rmf/fleet_adapter_state` 反映結果（逾時約 4 秒即回報失敗）。 |
+| `/rmf/robot_control` | Backend → FA | depth 10 | `{"action":"estop"\|"release","fleet":"fleet1","robot":"carter1"}` | 單車緊急停車/解除。Backend 每秒重送直到 `/rmf/fleet_adapter_state` 的 `estopped_robots` 反映結果（逾時約 4 秒即回報失敗）。 |
 | `/rmf/camera_control` | Backend → FA | depth 10 | 相機開關指令（FA 轉成 MQTT 下發車端） | 相機啟用/停用。 |
 | `/rmf/discovered_robots` | FA → Backend | depth 10 | `{"<fleet>_<robot>": {fleet_name, robot_id, status, last_seen, specs, ...}}` | 車端註冊/心跳/離線狀態；Backend 以此判定 `offline`，並將 `specs`（footprint/速度）寫回 `fleet_adapters.json`。 |
-| `/rmf/fleet_adapter_state` | FA → Backend | depth 1, RELIABLE, TRANSIENT_LOCAL | `{"mqtt_connected":bool,"paused_fleets":[...],"timestamp":float}` | FA 執行狀態，每 1.5 秒及變更時發布；作為 pause/resume 的確認，以及 `/api/discovered-robots` 的 `mqtt_connected` 來源（超過 5 秒未更新視為斷線）。 |
+| `/rmf/fleet_adapter_state` | FA → Backend | depth 1, RELIABLE, TRANSIENT_LOCAL | `{"mqtt_connected":bool,"paused_fleets":[...],"estopped_robots":["fleet/robot",...],"timestamp":float}` | FA 執行狀態，每 1.5 秒及變更時發布；作為 pause/resume 的確認，以及 `/api/discovered-robots` 的 `mqtt_connected` 來源（超過 5 秒未更新視為斷線）。 |
 
-`saved_maps/paused_fleets.json` 僅由 FA 寫入；Backend 的暫停狀態一律鏡像自 `/rmf/fleet_adapter_state`。
+`saved_maps/paused_fleets.json`、`saved_maps/estopped_robots.json` 僅由 FA 寫入；Backend 的暫停/緊急停車狀態一律鏡像自 `/rmf/fleet_adapter_state`。
+
+任務取消使用 Open-RMF 標準 Task API：Backend 於 `/task_api_requests` 發布 `{"type":"cancel_task_request","task_id":"<RMF booking id>"}`，由擁有該任務的 fleet adapter 回覆於 `/task_api_responses`（多個 adapter 可能回覆，任一 `success:true` 即成功）。
+
+### 任務取消與緊急停車 REST API
+
+| Method & Path | Body | 說明 |
+|---|---|---|
+| `POST /api/tasks/{task_id}/cancel` | – | 取消佇列中或執行中的任務。`task_id` 可為本地 id、request id 或 RMF booking id。佇列中的任務直接移除；執行中的任務由 RMF 經 FA 對車端下發 `stop`。成功後任務狀態為 `canceled`。已結束的任務、或尚未取得 RMF booking id（仍在競標）的任務回傳 error。 |
+| `POST /api/robots/{robot_id}/emergency-stop` | `{"fleet_name"?: str, "cancel_task"?: bool}` | 立即對車端下發 `stop`，並將車輛自 RMF 退役（不接新任務）；RMF 後續對該車的指令一律暫扣不下發。`cancel_task: true` 時同時取消該車目前任務（結果在 `cancel_result`）。狀態持久化，FA 重啟後仍維持。 |
+| `POST /api/robots/{robot_id}/emergency-stop/release` | `{"fleet_name"?: str}` | 解除緊急停車；若原任務仍有效，FA 會以新 `cmd_id` 重新下發被中斷的指令，車輛繼續執行。 |
+| `POST /api/emergency-stop` | `{"cancel_task"?: bool}` | 全部車輛緊急停車，回傳 `results`（每台的結果）。 |
+| `POST /api/emergency-stop/release` | – | 解除所有緊急停車中的車輛。 |
+
+回應格式：`{"status":"success"|"error","message":str,...}`；FA 未在時限內確認時回傳 `status:"error"` 且狀態不變。
+`/api/robots` 與 WebSocket `fleet_states` 中的車輛包含 `status`（`idle`/`moving`/`charging`/`paused`/`offline`/`emergency_stop`）、`emergency_stop: bool`、`online: bool`、`task_id`。緊急停車中的車輛無法指定派車（`/api/tasks/dispatch` 回傳 error）。
 
 ---
 

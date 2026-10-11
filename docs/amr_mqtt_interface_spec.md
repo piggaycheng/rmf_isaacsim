@@ -247,6 +247,8 @@
   "timestamp": 1728312015.000
 }
 ```
+- 下發時機：RMF 交通管制/任務取消（`reason` 為 RMF hold），或操作員緊急停車（`reason: "Emergency stop by operator"`）。車端處理方式相同：立即中止目前導航並回報 `command_result`。
+- 緊急停車期間 Fleet Adapter 不會再下發任何指令；解除後若原任務仍有效，會以新的 `cmd_id` 重新下發被中斷的 `navigate`/`dock`/`action`。
 
 ---
 

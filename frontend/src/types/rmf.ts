@@ -64,8 +64,11 @@ export interface Robot {
   y: number;
   yaw: number;
   battery: number; // 0 - 100
-  status: 'idle' | 'moving' | 'charging' | 'paused' | 'offline' | 'error';
+  status: 'idle' | 'moving' | 'charging' | 'paused' | 'offline' | 'emergency_stop' | 'error';
   current_task?: string;
+  task_id?: string;
+  emergency_stop?: boolean;
+  online?: boolean;
   path?: { x: number; y: number }[];
 }
 

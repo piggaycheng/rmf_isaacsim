@@ -62,6 +62,7 @@ TERMINAL_STATES = {"completed", "failed", "canceled", "cancelled", "rejected"}
 simulation_mode: bool = False
 # Mirrored from the Fleet Adapter's /rmf/fleet_adapter_state; the FA owns paused_fleets.json.
 paused_fleets: set = set()
+estopped_robots: set = set()  # "{fleet}/{robot}", operator emergency stop (owned by the FA)
 fa_state: Dict[str, Any] = {}
 fa_state_time: float = 0.0
 FA_STATE_STALE_S = 5.0
@@ -84,11 +85,33 @@ def update_fa_state(data: Dict[str, Any]) -> None:
     if isinstance(paused, list):
         paused_fleets.clear()
         paused_fleets.update(paused)
+    estopped = data.get("estopped_robots")
+    if isinstance(estopped, list):
+        estopped_robots.clear()
+        estopped_robots.update(estopped)
+
+
+def is_fa_state_fresh() -> bool:
+    import time
+    return fa_state_time > 0 and (time.time() - fa_state_time) < FA_STATE_STALE_S
+
+
+def is_robot_estopped(fleet_name: str, robot_id: str) -> bool:
+    return f"{fleet_name}/{robot_id}" in estopped_robots
+
+
+def find_robot_fleet(robot_id: str) -> Optional[str]:
+    rob = current_robots.get(robot_id)
+    if rob and rob.get("fleet"):
+        return rob["fleet"]
+    for disc in discovered_robots.values():
+        if disc.get("robot_id") == robot_id and disc.get("fleet_name"):
+            return disc["fleet_name"]
+    return None
 
 
 def is_fa_mqtt_connected() -> bool:
-    import time
-    return (time.time() - fa_state_time) < FA_STATE_STALE_S and bool(fa_state.get("mqtt_connected"))
+    return is_fa_state_fresh() and bool(fa_state.get("mqtt_connected"))
 
 
 def is_robot_offline(fleet_name: str, robot_id: str) -> bool:

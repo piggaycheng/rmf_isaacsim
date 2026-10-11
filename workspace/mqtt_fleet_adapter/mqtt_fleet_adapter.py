@@ -81,6 +81,8 @@ class ManagedRobot:
         self.target_position: Optional[np.ndarray] = None
         self.is_holding: bool = False
         self.is_paused: bool = False
+        # Operator emergency stop: robot halted, decommissioned, and RMF commands held until released.
+        self.is_estopped: bool = False
         self.is_retrying: bool = False
         self.nav_retries: int = 0
         self.last_cmd_payload: Optional[Dict[str, Any]] = None
@@ -121,6 +123,15 @@ class MqttFleetAdapter:
         self.running = True
         self.configured_fleets: Set[str] = set()
         self.paused_fleets: Set[str] = set()
+        self.estopped_robots: Set[str] = set()  # "{fleet}/{robot}"
+
+        estop_file = find_backend_path("saved_maps/estopped_robots.json")
+        if os.path.exists(estop_file):
+            try:
+                with open(estop_file, "r", encoding="utf-8") as f:
+                    self.estopped_robots = set(json.load(f))
+            except Exception as e:
+                print(f"[WARN] Failed to read estopped_robots.json: {e}")
 
         # Load paused fleets if available
         paused_file = find_backend_path("saved_maps/paused_fleets.json")
@@ -159,6 +170,7 @@ class MqttFleetAdapter:
         self.discovered_pub = None
         self.fa_state_pub = None
         self.fleet_control_sub = None
+        self.robot_control_sub = None
         self.camera_control_sub = None
         self.mqtt_connected = False
 
@@ -191,13 +203,16 @@ class MqttFleetAdapter:
         return self.robots.get((target_fleet, robot_id))
 
     def _sync_rmf_availability(self, robot: ManagedRobot):
-        """Single source of truth for RMF status/commission: offline > paused > available."""
+        """Single source of truth for RMF status/commission: offline > e-stop > paused > available."""
         if not robot.update_handle:
             return
         try:
             more = robot.update_handle.more()
             if not robot.is_online:
                 more.override_status("offline")
+                more.unstable_decommission()
+            elif robot.is_estopped:
+                more.override_status("error")
                 more.unstable_decommission()
             elif robot.is_paused:
                 # "paused" is not a valid robot_state.json status; decommission alone blocks new bids.
@@ -210,8 +225,8 @@ class MqttFleetAdapter:
             print(f"[RMF WARN] Error syncing RMF availability for '{robot.name}' ({robot.fleet_name}): {e}")
 
     def _defer_command(self, robot: ManagedRobot, execution: Any, cmd_payload: Dict[str, Any], err_msg: str):
-        """Hold an RMF command for an offline robot instead of rejecting/replanning (avoids replan loops)."""
-        print(f"[RMF -> AMR WARN] {err_msg} Deferring until robot is back online.")
+        """Hold an RMF command for an offline/e-stopped robot instead of rejecting/replanning (avoids replan loops)."""
+        print(f"[RMF -> AMR WARN] {err_msg} Deferring until robot is back online and not e-stopped.")
         robot.is_holding = False
         robot.cmd_id += 1  # invalidate late results from earlier commands
         robot.nav_retries = 0
@@ -222,7 +237,7 @@ class MqttFleetAdapter:
         robot.deferred_cmd_payload = cmd_payload
         if robot.update_handle:
             try:
-                robot.update_handle.more().log_error(f"{err_msg} Command deferred until robot reconnects.")
+                robot.update_handle.more().log_error(f"{err_msg} Command deferred until robot is available.")
             except Exception as e:
                 print(f"[RMF WARN] Error logging deferred command for '{robot.name}': {e}")
         self._sync_rmf_availability(robot)
@@ -251,7 +266,7 @@ class MqttFleetAdapter:
 
     def _dispatch_deferred_command(self, robot: ManagedRobot):
         payload = robot.deferred_cmd_payload
-        if payload is None:
+        if payload is None or robot.is_estopped or not robot.is_online:
             return
         robot.deferred_cmd_payload = None
         execution = robot.current_execution
@@ -289,6 +304,9 @@ class MqttFleetAdapter:
             self.fa_state_pub = self.node.create_publisher(String, "/rmf/fleet_adapter_state", fa_state_qos)
             self.fleet_control_sub = self.node.create_subscription(
                 String, "/rmf/fleet_control", self._on_ros2_fleet_control, 10
+            )
+            self.robot_control_sub = self.node.create_subscription(
+                String, "/rmf/robot_control", self._on_ros2_robot_control, 10
             )
             self.camera_control_sub = self.node.create_subscription(
                 String, "/rmf/camera_control", self._on_ros2_camera_control, 10
@@ -451,16 +469,82 @@ class MqttFleetAdapter:
                         self._sync_rmf_availability(robot)
                 print(f"[FLEET CONTROL] Fleet [{fleet_name}] resumed in Fleet Adapter.")
 
-        # Persist paused fleets (FA is the sole writer of this file)
-        try:
-            paused_path = find_backend_path("saved_maps/paused_fleets.json")
-            tmp_path = f"{paused_path}.{os.getpid()}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(sorted(self.paused_fleets), f)
-            os.replace(tmp_path, paused_path)
-        except Exception as e:
-            print(f"[WARN] Failed to write paused_fleets.json: {e}")
+        self._persist_set("saved_maps/paused_fleets.json", self.paused_fleets)
         self._publish_fa_state()
+
+    @staticmethod
+    def _persist_set(subpath: str, values: Set[str]):
+        """Atomically persist FA-owned state (the FA is the sole writer of these files)."""
+        try:
+            path = find_backend_path(subpath)
+            tmp_path = f"{path}.{os.getpid()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(sorted(values), f)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            print(f"[WARN] Failed to write {subpath}: {e}")
+
+    def _handle_robot_control(self, fleet_name: str, robot_id: str, action: str):
+        """Operator emergency stop / release for a single robot (from backend via /rmf/robot_control)."""
+        key = f"{fleet_name}/{robot_id}"
+        with self.lock:
+            robot = self._get_robot(fleet_name, robot_id)
+            if action == "estop":
+                self.estopped_robots.add(key)
+                if robot:
+                    self._apply_estop(robot)
+                else:
+                    print(f"[ROBOT CONTROL WARN] E-stop recorded for unknown robot '{key}'; applied when it registers.")
+            elif action == "release":
+                self.estopped_robots.discard(key)
+                if robot and robot.is_estopped:
+                    robot.is_estopped = False
+                    self._sync_rmf_availability(robot)
+                    print(f"[ROBOT CONTROL] E-stop released for '{key}'.")
+                    # Resume the RMF command that was interrupted/held by the e-stop (if its task is still active).
+                    self._dispatch_deferred_command(robot)
+            else:
+                print(f"[ROBOT CONTROL WARN] Unknown action '{action}' for '{key}'. Ignoring.")
+                return
+        self._persist_set("saved_maps/estopped_robots.json", self.estopped_robots)
+        self._publish_fa_state()
+
+    def _apply_estop(self, robot: ManagedRobot):
+        """Halt the robot now; keep the RMF execution and hold its command for re-dispatch on release."""
+        robot.is_estopped = True
+        if robot.current_execution and robot.deferred_cmd_payload is None and robot.last_cmd_payload:
+            robot.deferred_cmd_payload = dict(robot.last_cmd_payload, cmd_id=None)
+        robot.is_retrying = False
+        robot.nav_retries = 0
+        robot.target_position = None  # heartbeat must not complete the interrupted command
+        robot.last_cmd_payload = None  # nor resend it as "lost"
+        robot.cmd_id += 1  # late results of the interrupted command must not match
+        robot.stop_cmd_id = robot.cmd_id
+        cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
+        self.mqtt_client.publish(cmd_topic, json.dumps({
+            "robot_id": robot.name,
+            "cmd_id": robot.cmd_id,
+            "action": "stop",
+            "reason": "Emergency stop by operator",
+            "timestamp": time.time(),
+        }), qos=1)
+        print(f"[ROBOT CONTROL] EMERGENCY STOP (cmd_id: {robot.cmd_id}) sent to '{robot.name}' via {cmd_topic}")
+        if robot.update_handle:
+            try:
+                robot.update_handle.more().log_error(f"Robot '{robot.name}' emergency-stopped by operator.")
+            except Exception as e:
+                print(f"[RMF WARN] Error logging e-stop for '{robot.name}': {e}")
+        self._sync_rmf_availability(robot)
+
+    def _on_ros2_robot_control(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+            fleet_name = payload.get("fleet")
+            robot_id = payload.get("robot")
+            if fleet_name and robot_id:
+                self._handle_robot_control(fleet_name, robot_id, payload.get("action"))
+        except Exception as e:
+            print(f"[FA ERROR] Failed to process ROS 2 robot control: {e}")
 
     def _publish_fa_state(self):
         """Publish FA runtime state (latched); doubles as the ACK for fleet pause/resume."""
@@ -471,6 +555,7 @@ class MqttFleetAdapter:
             msg.data = json.dumps({
                 "mqtt_connected": self.mqtt_connected,
                 "paused_fleets": sorted(self.paused_fleets),
+                "estopped_robots": sorted(self.estopped_robots),
                 "timestamp": time.time(),
             })
             self.fa_state_pub.publish(msg)
@@ -585,6 +670,7 @@ class MqttFleetAdapter:
                     existing_robot.charger_waypoint = default_charger
                 existing_robot.last_heartbeat = time.time()
                 existing_robot.is_paused = fleet_name in self.paused_fleets
+                existing_robot.is_estopped = f"{fleet_name}/{robot_id}" in self.estopped_robots
                 self._sync_rmf_availability(existing_robot)
 
                 # Fresh registration signifies a new session/boot: abort any stale execution from prior session.
@@ -670,9 +756,10 @@ class MqttFleetAdapter:
             )
             self.robots[robot_key] = managed_robot
 
-            # If fleet is currently paused, mark new robot paused
-            if fleet_name in self.paused_fleets:
-                managed_robot.is_paused = True
+            # Restore fleet pause / persisted operator e-stop for a newly added robot
+            managed_robot.is_paused = fleet_name in self.paused_fleets
+            managed_robot.is_estopped = f"{fleet_name}/{robot_id}" in self.estopped_robots
+            if managed_robot.is_paused or managed_robot.is_estopped:
                 self._sync_rmf_availability(managed_robot)
 
         # Send ACK back to AMR
@@ -1009,11 +1096,12 @@ class MqttFleetAdapter:
             dock_name = getattr(destination, "dock", None)
             speed_limit = getattr(destination, "speed_limit", None)
 
-            if not robot.is_online:
+            if not robot.is_online or robot.is_estopped:
                 self._defer_command(
                     robot, execution,
                     self._navigate_payload(robot_id, None, target_pos, target_map, dock_name, speed_limit),
-                    f"Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' is offline.")
+                    f"Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' is "
+                    f"{'emergency-stopped' if robot.is_estopped else 'offline'}.")
                 return
 
             # Check yaw alignment with [-pi, pi] wrap-around
@@ -1140,10 +1228,11 @@ class MqttFleetAdapter:
                 "description": description,
                 "timestamp": time.time(),
             }
-            if not robot.is_online:
+            if not robot.is_online or robot.is_estopped:
                 self._defer_command(
                     robot, execution, cmd_payload,
-                    f"Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' is offline.")
+                    f"Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' is "
+                    f"{'emergency-stopped' if robot.is_estopped else 'offline'}.")
                 return
 
             robot.cmd_id += 1
