@@ -174,9 +174,12 @@ client.loop_forever()
 
 ## 4. 啟動
 
-`run_multi_nav_online.sh` 會自動啟動：每台設有雲台的車在其容器內執行 action server 與 MQTT bridge（`robot.launch.py`），天花板相機由 `ceiling-gimbals` 容器執行四組。手動啟動：
+`run_multi_nav_online.sh` 會自動啟動：每台設有雲台的車在其容器內執行 action server 與 MQTT bridge（`slam_bringup/robot.launch.py`），天花板相機由 `ceiling-gimbals` 容器執行四組（`slam_bringup/ceiling_cameras.launch.py`）。手動啟動：
 
 ```bash
+# 天花板相機（四組）
+ros2 launch slam_bringup ceiling_cameras.launch.py mqtt_host:=HOST
+
 # 一次啟動多組（; 分隔），mqtt_host 留空則只啟動 action server
 ros2 launch slam_sensor_control gimbals.launch.py \
   'namespaces:=carter1;ceiling_cams/ceiling_cam_1' mqtt_host:=HOST
