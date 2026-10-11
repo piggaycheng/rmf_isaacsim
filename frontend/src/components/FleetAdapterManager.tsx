@@ -77,6 +77,21 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
   const [yamlAdapter, setYamlAdapter] = useState<FleetAdapter | null>(null);
   const [copiedYaml, setCopiedYaml] = useState<boolean>(false);
 
+  // Dynamic set_graph confirmation modal state
+  const [switchGraphConfirm, setSwitchGraphConfirm] = useState<{
+    adapterId: string;
+    adapterName: string;
+    fleetName: string;
+    currentGraphIdx: number;
+    targetGraphIdx: number;
+  } | null>(null);
+
+  // Local pending graph_idx selections per adapter (avoids immediate auto-trigger)
+  const [pendingGraphIdxs, setPendingGraphIdxs] = useState<Record<string, number>>({});
+
+  // Track restarting state per adapter
+  const [restartingAdapters, setRestartingAdapters] = useState<Record<string, boolean>>({});
+
   // Dynamic set_graph feedback toast
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
@@ -443,6 +458,7 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
 
   // Dynamic set_graph
   const handleDynamicSetGraph = async (adapterId: string, newGraphIdx: number) => {
+    setRestartingAdapters((prev) => ({ ...prev, [adapterId]: true }));
     try {
       const res = await fetch(`/api/fleet-adapters/${adapterId}/set-graph`, {
         method: 'POST',
@@ -450,20 +466,30 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
         body: JSON.stringify({ graph_idx: newGraphIdx }),
       });
       const data = await res.json();
-      if (res.ok) {
-        showToast(data.message || `已成功切換至 Graph ${newGraphIdx}！(免重啟熱更新)`);
-        fetchAdapters();
+      if (res.ok && data.status !== 'error') {
+        showToast(data.message || `已成功切換至 Graph ${newGraphIdx}，服務已重新載入！`);
+        // Clear pending selection so it aligns with saved adapter
+        setPendingGraphIdxs((prev) => {
+          const next = { ...prev };
+          delete next[adapterId];
+          return next;
+        });
+        await fetchAdapters();
+      } else {
+        showToast(`切換失敗: ${data.message || res.status}`);
       }
     } catch (e) {
-      setAdapters((prev) =>
-        prev.map((a) => (a.id === adapterId ? { ...a, graph_idx: newGraphIdx } : a))
-      );
-      showToast(`車隊已切換至 Graph ${newGraphIdx} (免重啟)`);
+      showToast(`車隊切換路網失敗`);
+    } finally {
+      setRestartingAdapters((prev) => ({ ...prev, [adapterId]: false }));
     }
   };
 
   // Action (Restart / Pause / Resume)
   const handleAdapterAction = async (adapterId: string, action: 'restart' | 'pause' | 'resume') => {
+    if (action === 'restart') {
+      setRestartingAdapters((prev) => ({ ...prev, [adapterId]: true }));
+    }
     try {
       const res = await fetch(`/api/fleet-adapters/${adapterId}/action`, {
         method: 'POST',
@@ -472,14 +498,18 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.status !== 'error') {
-        const actionLabels = { restart: '重新載入服務', pause: '已暫停', resume: '已恢復連線' };
+        const actionLabels = { restart: '已重新載入服務', pause: '已暫停', resume: '已恢復連線' };
         showToast(`Adapter ${actionLabels[action]}`);
       } else {
         showToast(`指令失敗: ${data.message || action}`);
       }
-      fetchAdapters();
+      await fetchAdapters();
     } catch (e) {
       showToast(`指令失敗: ${action}`);
+    } finally {
+      if (action === 'restart') {
+        setRestartingAdapters((prev) => ({ ...prev, [adapterId]: false }));
+      }
     }
   };
 
@@ -562,16 +592,23 @@ ${
         <Button
           size="sm"
           variant="outline"
+          disabled={Object.values(restartingAdapters).some(Boolean)}
           onClick={() => {
             if (adapters.length > 0) {
               handleAdapterAction(adapters[0].id, 'restart');
             }
           }}
-          className="text-xs h-9 bg-cyan-950/50 border-cyan-700/60 hover:bg-cyan-900/50 text-cyan-300 font-medium"
+          className="text-xs h-9 bg-cyan-950/50 border-cyan-700/60 hover:bg-cyan-900/50 text-cyan-300 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           title="重新啟動 Open-RMF 車隊適配器進程以重新載入最新路網"
         >
-          <RotateCcw className="w-3.5 h-3.5 mr-1.5 text-cyan-400" />
-          重載車隊服務 (同步最新路網)
+          <RotateCcw
+            className={`w-3.5 h-3.5 mr-1.5 text-cyan-400 ${
+              Object.values(restartingAdapters).some(Boolean) ? 'animate-spin' : ''
+            }`}
+          />
+          {Object.values(restartingAdapters).some(Boolean)
+            ? '重啟服務中...'
+            : '重載車隊服務 (同步最新路網)'}
         </Button>
 
         <Button
@@ -866,6 +903,14 @@ ${
       ) : (
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
           {filteredAdapters.map((adapter) => {
+            const currentGraphIdx = adapter.graph_idx ?? 0;
+            const selectedGraphIdx =
+              pendingGraphIdxs[adapter.id] !== undefined
+                ? pendingGraphIdxs[adapter.id]
+                : currentGraphIdx;
+            const hasGraphChanged = selectedGraphIdx !== currentGraphIdx;
+            const isRestarting = Boolean(restartingAdapters[adapter.id]);
+
             const currentGraph = graphs.find((g) => g.id === adapter.graph_idx);
             const graphColor =
               GRAPH_PALETTE[(adapter.graph_idx ?? 0) % GRAPH_PALETTE.length];
@@ -948,14 +993,18 @@ ${
                   <div className="flex items-center space-x-2 pt-1 border-t border-slate-800/60">
                     <span className="text-[11px] text-slate-400 shrink-0">動態更換路網：</span>
                     <select
-                      value={adapter.graph_idx}
+                      value={selectedGraphIdx}
+                      disabled={isRestarting}
                       onChange={(e) => {
                         const targetIdx = parseInt(e.target.value, 10);
                         if (!isNaN(targetIdx)) {
-                          handleDynamicSetGraph(adapter.id, targetIdx);
+                          setPendingGraphIdxs((prev) => ({
+                            ...prev,
+                            [adapter.id]: targetIdx,
+                          }));
                         }
                       }}
-                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200"
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200 disabled:opacity-50"
                     >
                       {graphs.map((g) => (
                         <option key={g.id} value={g.id}>
@@ -967,9 +1016,28 @@ ${
                     <Button
                       size="sm"
                       variant="secondary"
-                      className="h-7 text-xs bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-800/50"
-                      onClick={() => handleDynamicSetGraph(adapter.id, adapter.graph_idx)}
-                      title="發送 set_graph 指令至 Fleet Adapter"
+                      disabled={!hasGraphChanged || isRestarting}
+                      className={`h-7 text-xs border transition-all ${
+                        hasGraphChanged && !isRestarting
+                          ? 'bg-amber-600/90 hover:bg-amber-500 text-amber-100 border-amber-500/80 shadow-sm'
+                          : 'bg-slate-800/40 text-slate-500 border-slate-700/50 cursor-not-allowed opacity-50'
+                      }`}
+                      onClick={() => {
+                        setSwitchGraphConfirm({
+                          adapterId: adapter.id,
+                          adapterName: adapter.name,
+                          fleetName: adapter.fleet_name,
+                          currentGraphIdx,
+                          targetGraphIdx: selectedGraphIdx,
+                        });
+                      }}
+                      title={
+                        isRestarting
+                          ? '服務重啟中，請稍候...'
+                          : hasGraphChanged
+                          ? `點擊以切換至 Graph ${selectedGraphIdx}（需確認重啟）`
+                          : '請先在左側選取不同路網'
+                      }
                     >
                       <ArrowRightLeft className="w-3 h-3 mr-1" />
                       set_graph
@@ -978,7 +1046,7 @@ ${
 
                   {isEasyFull && (
                     <p className="text-[10px] text-amber-400/90 leading-tight">
-                      💡 Jazzy EasyFullControl 原生支援動態路網熱更換，車隊執行此指令無須重啟節點即可直接套用新圖層。
+                      💡 選取不同路網後點擊 set_graph 並確認，系統將重啟 Fleet Adapter 以生效新拓撲。
                     </p>
                   )}
                 </div>
@@ -1127,12 +1195,17 @@ ${
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="h-7 text-xs text-cyan-400 hover:text-cyan-300 hover:bg-cyan-950/30"
+                      disabled={isRestarting}
+                      className={`h-7 text-xs transition-colors ${
+                        isRestarting
+                          ? 'text-amber-400/80 cursor-not-allowed opacity-80'
+                          : 'text-cyan-400 hover:text-cyan-300 hover:bg-cyan-950/30'
+                      }`}
                       onClick={() => handleAdapterAction(adapter.id, 'restart')}
-                      title="重啟車隊適配器（重新載入最新導航路網）"
+                      title={isRestarting ? '服務重啟中...' : '重啟車隊適配器（重新載入最新導航路網）'}
                     >
-                      <RotateCcw className="w-3 h-3 mr-1" />
-                      重啟服務
+                      <RotateCcw className={`w-3 h-3 mr-1 ${isRestarting ? 'animate-spin text-amber-400' : ''}`} />
+                      {isRestarting ? '重啟服務中' : '重啟服務'}
                     </Button>
 
                     {adapter.status === 'online' ? (
@@ -1813,6 +1886,65 @@ ${
             完成
           </Button>
         </DialogFooter>
+      </Dialog>
+
+      {/* 4. Modal: Confirmation for Dynamic set_graph */}
+      <Dialog
+        open={Boolean(switchGraphConfirm)}
+        onOpenChange={(open) => {
+          if (!open) setSwitchGraphConfirm(null);
+        }}
+      >
+        {switchGraphConfirm && (
+          <div className="space-y-4">
+            <DialogHeader>
+              <DialogTitle className="flex items-center space-x-2 text-base font-bold text-amber-400">
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+                <span>確認切換車隊導航路網 (Nav Graph)</span>
+              </DialogTitle>
+              <DialogDescription className="text-xs text-slate-300 pt-1 leading-relaxed">
+                即將將車隊 <span className="font-bold text-cyan-300 font-mono">[{switchGraphConfirm.fleetName}]</span> 的導航路網由{' '}
+                <span className="font-bold text-amber-300">Graph {switchGraphConfirm.currentGraphIdx}</span> 切換為{' '}
+                <span className="font-bold text-emerald-300">Graph {switchGraphConfirm.targetGraphIdx}</span>。
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="bg-amber-950/40 border border-amber-800/60 rounded-xl p-3.5 text-xs text-amber-200/90 space-y-2 leading-relaxed">
+              <p className="font-semibold flex items-center text-amber-300">
+                <AlertTriangle className="w-4 h-4 mr-1.5 text-amber-400 shrink-0" />
+                服務重啟警告提醒：
+              </p>
+              <p className="text-slate-300">
+                為了讓 Open-RMF 正式套用新的路網拓撲，確認後系統將會<strong>重新啟動 Fleet Adapter 背景服務</strong>。
+              </p>
+              <p className="text-slate-400 text-[11px]">
+                ⚠️ 服務重啟過程需約 1.5 ~ 2 秒，進行中的車輛任務可能會重新規劃或短暫中斷。
+              </p>
+            </div>
+
+            <DialogFooter className="flex items-center justify-end space-x-2 pt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setSwitchGraphConfirm(null)}
+                className="text-xs border-slate-700 hover:bg-slate-800 text-slate-300"
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                className="text-xs bg-amber-600 hover:bg-amber-500 text-white font-medium"
+                onClick={() => {
+                  const target = switchGraphConfirm;
+                  setSwitchGraphConfirm(null);
+                  handleDynamicSetGraph(target.adapterId, target.targetGraphIdx);
+                }}
+              >
+                確認切換並重啟服務
+              </Button>
+            </DialogFooter>
+          </div>
+        )}
       </Dialog>
     </div>
   );
