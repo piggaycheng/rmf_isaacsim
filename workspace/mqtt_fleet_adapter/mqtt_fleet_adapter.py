@@ -22,6 +22,8 @@ try:
     import rclpy
     from rclpy.node import Node
     from rclpy.parameter import Parameter
+    from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+    from std_msgs.msg import String
     import rmf_adapter
     from rmf_adapter import Adapter
     import rmf_adapter.easy_full_control as rmf_easy
@@ -114,10 +116,29 @@ class MqttFleetAdapter:
         self.keepalive = mqtt_cfg.get("keepalive", 30)
 
         self.robots: Dict[Tuple[str, str], ManagedRobot] = {}
+        self.discovered_robots: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.Lock()
         self.running = True
         self.configured_fleets: Set[str] = set()
         self.paused_fleets: Set[str] = set()
+
+        # Load paused fleets if available
+        paused_file = find_backend_path("saved_maps/paused_fleets.json")
+        if os.path.exists(paused_file):
+            try:
+                with open(paused_file, "r", encoding="utf-8") as f:
+                    self.paused_fleets = set(json.load(f))
+            except Exception as e:
+                print(f"[WARN] Failed to read paused_fleets.json: {e}")
+
+        # Load discovered robots cache if available
+        disc_file = find_backend_path("saved_maps/discovered_robots.json")
+        if os.path.exists(disc_file):
+            try:
+                with open(disc_file, "r", encoding="utf-8") as f:
+                    self.discovered_robots = json.load(f)
+            except Exception as e:
+                pass
 
         # Pre-populate configured_fleets from fleet_adapters.json or fallback
         adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
@@ -133,6 +154,13 @@ class MqttFleetAdapter:
             adapters_data = [{"fleet_name": self.fleet_name, "graph_idx": 0}]
 
         self.configured_fleets = {item.get("fleet_name") or self.fleet_name for item in adapters_data}
+
+        # ROS 2 Pub/Sub handles (assigned when RMF is live)
+        self.discovered_pub = None
+        self.fa_state_pub = None
+        self.fleet_control_sub = None
+        self.camera_control_sub = None
+        self.mqtt_connected = False
 
         print(f"==================================================")
         print(f"🚀 Initializing MQTT Fleet Adapter: [{self.fleet_name}]")
@@ -251,6 +279,20 @@ class MqttFleetAdapter:
             rmf_adapter.init_rclcpp()
 
             self.node = rclpy.node.Node("rmf_mqtt_command_handle")
+            self.discovered_pub = self.node.create_publisher(String, "/rmf/discovered_robots", 10)
+            # Latched so a (re)started backend immediately learns paused fleets and MQTT link state.
+            fa_state_qos = QoSProfile(
+                depth=1,
+                reliability=QoSReliabilityPolicy.RELIABLE,
+                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.fa_state_pub = self.node.create_publisher(String, "/rmf/fleet_adapter_state", fa_state_qos)
+            self.fleet_control_sub = self.node.create_subscription(
+                String, "/rmf/fleet_control", self._on_ros2_fleet_control, 10
+            )
+            self.camera_control_sub = self.node.create_subscription(
+                String, "/rmf/camera_control", self._on_ros2_camera_control, 10
+            )
             self.adapter = Adapter.make("rmf_mqtt_fleet_adapter")
             if not self.adapter:
                 raise RuntimeError("Unable to initialize Adapter. Make sure RMF Schedule is running.")
@@ -332,6 +374,8 @@ class MqttFleetAdapter:
     # MQTT Callbacks & Connection
     # ==========================================================================
     def _on_mqtt_connect(self, client, userdata, flags, rc):
+        self.mqtt_connected = rc == 0
+        self._publish_fa_state()
         if rc == 0:
             print(f"[MQTT] Connected successfully to Broker at {self.mqtt_host}:{self.mqtt_port}")
             # Wildcard subscription to support both self.fleet_name and all other AMR fleets
@@ -346,6 +390,8 @@ class MqttFleetAdapter:
             print(f"[MQTT] Connection failed with result code: {rc}")
 
     def _on_mqtt_disconnect(self, client, userdata, rc):
+        self.mqtt_connected = False
+        self._publish_fa_state()
         if rc != 0:
             print(f"[MQTT] Unexpected disconnection (rc={rc}). Reconnecting...")
 
@@ -405,6 +451,69 @@ class MqttFleetAdapter:
                         self._sync_rmf_availability(robot)
                 print(f"[FLEET CONTROL] Fleet [{fleet_name}] resumed in Fleet Adapter.")
 
+        # Persist paused fleets (FA is the sole writer of this file)
+        try:
+            paused_path = find_backend_path("saved_maps/paused_fleets.json")
+            tmp_path = f"{paused_path}.{os.getpid()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(sorted(self.paused_fleets), f)
+            os.replace(tmp_path, paused_path)
+        except Exception as e:
+            print(f"[WARN] Failed to write paused_fleets.json: {e}")
+        self._publish_fa_state()
+
+    def _publish_fa_state(self):
+        """Publish FA runtime state (latched); doubles as the ACK for fleet pause/resume."""
+        if not self.fa_state_pub:
+            return
+        try:
+            msg = String()
+            msg.data = json.dumps({
+                "mqtt_connected": self.mqtt_connected,
+                "paused_fleets": sorted(self.paused_fleets),
+                "timestamp": time.time(),
+            })
+            self.fa_state_pub.publish(msg)
+        except Exception as e:
+            print(f"[FA WARN] Failed to publish fleet adapter state: {e}")
+
+    def _on_ros2_fleet_control(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+            fleet_name = payload.get("fleet")
+            if fleet_name:
+                self._handle_fleet_control(fleet_name, payload)
+        except Exception as e:
+            print(f"[FA ERROR] Failed to process ROS 2 fleet control: {e}")
+
+    def _on_ros2_camera_control(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+            camera_name = payload.get("camera_name", "")
+            topic_prefix = payload.get("topic_prefix", "slam/cameras")
+            enabled = payload.get("enabled", False)
+            clean_name = camera_name.lstrip("/")
+            topic = f"{topic_prefix.rstrip('/')}/{clean_name}/enable"
+            payload_str = "true" if enabled else "false"
+            self.mqtt_client.publish(topic, payload_str, qos=1)
+            print(f"[FA] Forwarded camera control via MQTT: {topic} -> {payload_str}")
+        except Exception as e:
+            print(f"[FA ERROR] Failed to process ROS 2 camera control: {e}")
+
+    def _save_discovered_robots(self):
+        try:
+            disc_path = find_backend_path("saved_maps/discovered_robots.json")
+            os.makedirs(os.path.dirname(disc_path), exist_ok=True)
+            with open(disc_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(self.discovered_robots, f, indent=2, ensure_ascii=False)
+            os.replace(disc_path + ".tmp", disc_path)
+            if self.discovered_pub and rclpy.ok():
+                msg = String()
+                msg.data = json.dumps(self.discovered_robots)
+                self.discovered_pub.publish(msg)
+        except Exception as e:
+            print(f"[FA WARN] Failed to save discovered robots: {e}")
+
     # ==========================================================================
     # Handler 1: Robot Registration (開機註冊)
     # ==========================================================================
@@ -421,13 +530,42 @@ class MqttFleetAdapter:
         default_parking = payload.get("default_parking") or fallback_charger
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
+        # Track in discovered_robots dictionary
+        robot_key = f"{fleet_name}_{robot_id}"
+        now = time.time()
+        disc = self.discovered_robots.get(robot_key, {
+            "robot_id": robot_id,
+            "fleet_name": fleet_name,
+            "x": x,
+            "y": y,
+            "yaw": yaw,
+            "battery": 100.0,
+            "status": "idle",
+            "specs": payload.get("specs", {}),
+            "initial_location": loc,
+            "default_parking": default_parking,
+            "default_charger": default_charger,
+            "first_seen": now,
+        })
+        disc["last_seen"] = now
+        disc["x"] = x
+        disc["y"] = y
+        disc["yaw"] = yaw
+        if "specs" in payload:
+            disc["specs"] = payload["specs"]
+        disc["status"] = "idle"
+        disc["is_adopted"] = fleet_name in self.configured_fleets
+        self.discovered_robots[robot_key] = disc
+        self._save_discovered_robots()
+
         # 1. Reject unconfigured fleets explicitly (no silent fallback!)
         if fleet_name not in self.configured_fleets:
-            print(f"[REGISTER ERROR] Cannot register '{robot_id}': Fleet [{fleet_name}] is not configured in Open-RMF! Configured fleets: {list(self.configured_fleets)}")
+            print(f"[REGISTER WARN] Cannot register '{robot_id}': Fleet [{fleet_name}] is not configured in Open-RMF! Configured fleets: {list(self.configured_fleets)}")
             self._send_register_ack(
                 robot_id,
                 success=False,
-                msg=f"Fleet [{fleet_name}] is not configured in Open-RMF",
+                msg=f"Fleet [{fleet_name}] pending adoption in Web Studio",
+                status="pending_adoption",
                 fleet_name=fleet_name,
             )
             return
@@ -559,7 +697,45 @@ class MqttFleetAdapter:
     # ==========================================================================
     def _handle_heartbeat(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         robot_id = payload.get("robot_id") or robot_id
+
+        # Update discovered_robots record
+        robot_key = f"{fleet_name}_{robot_id}"
+        now = time.time()
+        x_val = float(payload.get("x", 0.0))
+        y_val = float(payload.get("y", 0.0))
+        yaw_val = float(payload.get("yaw", 0.0))
+        bat_val = float(payload.get("battery", 100.0))
+        status_val = payload.get("status", "idle")
+
         with self.lock:
+            if robot_key in self.discovered_robots:
+                disc = self.discovered_robots[robot_key]
+                if "x" in payload:
+                    disc["x"] = x_val
+                if "y" in payload:
+                    disc["y"] = y_val
+                if "yaw" in payload:
+                    disc["yaw"] = yaw_val
+                if "battery" in payload:
+                    disc["battery"] = bat_val
+                if "status" in payload:
+                    disc["status"] = status_val
+                disc["last_seen"] = now
+                disc["is_adopted"] = fleet_name in self.configured_fleets
+            else:
+                self.discovered_robots[robot_key] = {
+                    "robot_id": robot_id,
+                    "fleet_name": fleet_name,
+                    "x": x_val,
+                    "y": y_val,
+                    "yaw": yaw_val,
+                    "battery": bat_val,
+                    "status": status_val,
+                    "first_seen": now,
+                    "last_seen": now,
+                    "is_adopted": fleet_name in self.configured_fleets,
+                }
+
             robot = self._get_robot(fleet_name, robot_id)
             if not robot or (not self.mock_rmf and robot.update_handle is None):
                 # Robot sent heartbeat without registering first (e.g. FA late startup or restart)
@@ -661,7 +837,13 @@ class MqttFleetAdapter:
     # ==========================================================================
     def _handle_deregister(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         print(f"[DEREGISTER] Robot '{robot_id}' in '{fleet_name}' requested deregistration: {payload}")
+        robot_key = f"{fleet_name}_{robot_id}"
         with self.lock:
+            if robot_key in self.discovered_robots:
+                self.discovered_robots[robot_key]["status"] = "offline"
+                self.discovered_robots[robot_key]["last_seen"] = time.time()
+                self._save_discovered_robots()
+
             robot = self._get_robot(fleet_name, robot_id)
             if robot:
                 robot.is_online = False
@@ -696,8 +878,14 @@ class MqttFleetAdapter:
     def _handle_status(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         status = payload.get("status", "unknown")
         print(f"[STATUS/LWT] Robot '{robot_id}' ({fleet_name}) reported status: {status}")
-        if status in ["offline", "disconnected"]:
-            with self.lock:
+        robot_key = f"{fleet_name}_{robot_id}"
+        with self.lock:
+            if robot_key in self.discovered_robots:
+                self.discovered_robots[robot_key]["status"] = status
+                self.discovered_robots[robot_key]["last_seen"] = time.time()
+                self._save_discovered_robots()
+
+            if status in ["offline", "disconnected"]:
                 robot = self._get_robot(fleet_name, robot_id)
                 if robot:
                     if not robot.is_online and robot.status == "offline":
@@ -973,9 +1161,9 @@ class MqttFleetAdapter:
     # Background Watchdog & Main Loop
     # ==========================================================================
     def _watchdog_loop(self):
-        """Monitors heartbeat timeout for registered robots."""
+        """Monitors heartbeat timeout for registered robots and periodically syncs discovery."""
         while self.running:
-            time.sleep(2.0)
+            time.sleep(1.5)
             now = time.time()
             with self.lock:
                 for (f_name, r_id), robot in list(self.robots.items()):
@@ -986,6 +1174,13 @@ class MqttFleetAdapter:
                         if robot.current_execution:
                             print(f"[WATCHDOG WARN] Robot '{r_id}' timed out during execution (cmd_id: {robot.cmd_id}). Preserving execution without falsely marking finished.")
                         self._sync_rmf_availability(robot)
+
+                for k, disc in list(self.discovered_robots.items()):
+                    if disc.get("status") != "offline" and (now - disc.get("last_seen", 0) > 15.0):
+                        disc["status"] = "offline"
+
+                self._save_discovered_robots()
+            self._publish_fa_state()
 
     def start(self):
         """Starts MQTT connection, background threads, and spins ROS 2."""

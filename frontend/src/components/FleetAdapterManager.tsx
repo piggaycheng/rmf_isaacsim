@@ -470,13 +470,16 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       });
-      if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status !== 'error') {
         const actionLabels = { restart: '重新載入服務', pause: '已暫停', resume: '已恢復連線' };
         showToast(`Adapter ${actionLabels[action]}`);
-        fetchAdapters();
+      } else {
+        showToast(`指令失敗: ${data.message || action}`);
       }
+      fetchAdapters();
     } catch (e) {
-      showToast(`執行指令: ${action}`);
+      showToast(`指令失敗: ${action}`);
     }
   };
 
@@ -1040,6 +1043,10 @@ ${
                                       ? 'bg-cyan-400 animate-pulse'
                                       : liveRobot?.status === 'charging'
                                       ? 'bg-amber-400 animate-pulse'
+                                      : liveRobot?.status === 'paused'
+                                      ? 'bg-violet-400'
+                                      : liveRobot?.status === 'offline'
+                                      ? 'bg-slate-500'
                                       : 'bg-emerald-400'
                                   }`}
                                 />

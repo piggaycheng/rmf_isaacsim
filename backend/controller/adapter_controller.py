@@ -166,44 +166,33 @@ async def fleet_adapter_action(adapter_id: str, payload: Dict[str, Any]):
     fleet_name = adapter.get("fleet_name", "")
 
     if action == "restart":
-        adapter["status"] = "online"
-        state.paused_fleets.discard(fleet_name)
+        # The FA persists paused fleets across restarts, so keep the UI status consistent with it.
+        adapter["status"] = "standby" if fleet_name in state.paused_fleets else "online"
         try:
             from rmf_service import rmf_service
             rmf_service.restart_fleet_adapter()
         except Exception as e:
             print(f"[ERROR] Failed to restart fleet adapter process: {e}")
         append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' service reloaded.")
-    elif action == "pause":
-        adapter["status"] = "standby"
-        state.paused_fleets.add(fleet_name)
+    elif action in ("pause", "resume"):
         try:
-            import paho.mqtt.publish as mqtt_publish
-            mqtt_publish.single(
-                f"rmf/{fleet_name}/control",
-                payload=json.dumps({"action": "pause", "fleet": fleet_name}),
-                hostname="127.0.0.1",
-                port=1883,
-                qos=1
-            )
+            from rmf_service import rmf_service
+            confirmed = await asyncio.to_thread(rmf_service.send_fleet_control, fleet_name, action)
         except Exception as e:
-            print(f"[WARN] Failed to publish MQTT pause control: {e}")
-        append_adapter_log(adapter_id, f"[WARN] [system]: Fleet Adapter '{adapter.get('name')}' paused. Decommissioned in Open-RMF.")
-    elif action == "resume":
-        adapter["status"] = "online"
-        state.paused_fleets.discard(fleet_name)
-        try:
-            import paho.mqtt.publish as mqtt_publish
-            mqtt_publish.single(
-                f"rmf/{fleet_name}/control",
-                payload=json.dumps({"action": "resume", "fleet": fleet_name}),
-                hostname="127.0.0.1",
-                port=1883,
-                qos=1
-            )
-        except Exception as e:
-            print(f"[WARN] Failed to publish MQTT resume control: {e}")
-        append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' resumed online. Recommissioned in Open-RMF.")
+            print(f"[WARN] Failed to dispatch {action} control: {e}")
+            confirmed = False
+        if not confirmed:
+            msg = f"Fleet Adapter 未確認 '{action}'（車隊 {fleet_name}），狀態未變更。"
+            append_adapter_log(adapter_id, f"[ERROR] [system]: {msg}")
+            return {"status": "error", "action": action, "message": msg}
+        if action == "pause":
+            adapter["status"] = "standby"
+            append_adapter_log(adapter_id, f"[WARN] [system]: Fleet Adapter '{adapter.get('name')}' paused. Decommissioned in Open-RMF.")
+        else:
+            adapter["status"] = "online"
+            append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' resumed online. Recommissioned in Open-RMF.")
+    else:
+        return {"status": "error", "message": f"Unknown action '{action}'"}
 
     save_fleet_adapters_data(adapters)
 

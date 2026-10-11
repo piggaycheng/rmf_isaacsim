@@ -137,6 +137,21 @@ sequenceDiagram
 
 ---
 
+## 三之一、Backend ↔ Fleet Adapter ROS 2 介面
+
+Backend 不直接與車端（MQTT）通訊；所有車端互動皆經由 Fleet Adapter（FA）轉送。Backend 與 FA 之間使用以下 `std_msgs/String`（JSON payload）主題：
+
+| Topic | 方向 | QoS | Payload | 說明 |
+|---|---|---|---|---|
+| `/rmf/fleet_control` | Backend → FA | depth 10 | `{"action":"pause"\|"resume","fleet":"fleet1"}` | 車隊暫停/恢復。Backend 每秒重送直到 `/rmf/fleet_adapter_state` 反映結果（逾時約 4 秒即回報失敗）。 |
+| `/rmf/camera_control` | Backend → FA | depth 10 | 相機開關指令（FA 轉成 MQTT 下發車端） | 相機啟用/停用。 |
+| `/rmf/discovered_robots` | FA → Backend | depth 10 | `{"<fleet>_<robot>": {fleet_name, robot_id, status, last_seen, specs, ...}}` | 車端註冊/心跳/離線狀態；Backend 以此判定 `offline`，並將 `specs`（footprint/速度）寫回 `fleet_adapters.json`。 |
+| `/rmf/fleet_adapter_state` | FA → Backend | depth 1, RELIABLE, TRANSIENT_LOCAL | `{"mqtt_connected":bool,"paused_fleets":[...],"timestamp":float}` | FA 執行狀態，每 1.5 秒及變更時發布；作為 pause/resume 的確認，以及 `/api/discovered-robots` 的 `mqtt_connected` 來源（超過 5 秒未更新視為斷線）。 |
+
+`saved_maps/paused_fleets.json` 僅由 FA 寫入；Backend 的暫停狀態一律鏡像自 `/rmf/fleet_adapter_state`。
+
+---
+
 ## 四、目錄結構與 Docker 掛載映射
 
 專案所有程式碼皆置於宿主機，透過 Docker Compose 雙向 Volume 掛載至容器內部：

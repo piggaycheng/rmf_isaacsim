@@ -38,7 +38,7 @@ from rmf_service import rmf_service
 
 @app.on_event("startup")
 async def startup_event():
-    # 1. Background simulation, MediaMTX watchdog, and MQTT robot auto-discovery
+    # 1. Background simulation, MediaMTX watchdog, and Fleet Adapter discovery sync
     asyncio.create_task(simulation_loop())
     asyncio.create_task(mediamtx_watchdog_loop())
     asyncio.create_task(discovery_watchdog_loop())

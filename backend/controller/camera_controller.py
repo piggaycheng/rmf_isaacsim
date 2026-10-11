@@ -5,47 +5,28 @@ import threading
 import urllib.request
 from typing import Dict
 from fastapi import APIRouter
-import paho.mqtt.client as mqtt
-
 from state import CameraDisableRequest
 
 router = APIRouter(tags=["Cameras & Streams"])
 
 # ==========================================
-# MediaMTX Watchdog & MQTT Camera Controller
+# MediaMTX Watchdog Camera Controller
+# (Routes via Fleet Adapter ROS 2 -> MQTT)
 # ==========================================
-backend_mqtt_client = None
-backend_mqtt_lock = threading.Lock()
-
-def get_backend_mqtt_client():
-    global backend_mqtt_client
-    with backend_mqtt_lock:
-        if backend_mqtt_client is None:
-            try:
-                c = mqtt.Client(client_id=f"rmf-backend-watchdog-{os.getpid()}")
-                c.connect("127.0.0.1", 1883, 10)
-                c.loop_start()
-                backend_mqtt_client = c
-                print("[Backend MQTT] Connected to EMQX broker at 127.0.0.1:1883")
-            except Exception as e:
-                print(f"[Backend MQTT] Broker connection failed: {e}")
-                return None
-        return backend_mqtt_client
 
 def disable_camera_stream(camera_name: str, topic_prefix: str = "slam/cameras") -> bool:
-    """Publish 'false' to the camera enable topic to instruct the device to stop streaming."""
-    client = get_backend_mqtt_client()
-    if not client:
-        return False
-    clean_name = camera_name.lstrip("/")
-    topic = f"{topic_prefix.rstrip('/')}/{clean_name}/enable"
+    """Instructs Fleet Adapter via ROS 2 to disable the camera stream over MQTT."""
     try:
-        info = client.publish(topic, "false", qos=1)
-        info.wait_for_publish(timeout=2.0)
-        print(f"[Backend MQTT] Published 'false' to {topic} (Camera disabled)")
-        return True
+        from rmf_service import rmf_service
+        ok = rmf_service.send_camera_control(camera_name, topic_prefix, enabled=False)
+        if ok:
+            print(f"[Camera Watchdog] Dispatched disable control for '{camera_name}' via Fleet Adapter.")
+            return True
+        else:
+            print(f"[Camera Watchdog WARN] RMF service bridge not ready for camera '{camera_name}'.")
+            return False
     except Exception as e:
-        print(f"[Backend MQTT] Error publishing to {topic}: {e}")
+        print(f"[Camera Watchdog ERROR] Failed to dispatch camera disable: {e}")
         return False
 
 # Trackers for MediaMTX zero-reader idle monitoring

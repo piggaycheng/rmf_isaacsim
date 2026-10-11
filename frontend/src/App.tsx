@@ -1612,13 +1612,15 @@ export function App() {
                             variant={
                               robot.status === 'moving'
                                 ? 'success'
-                                : robot.status === 'charging'
+                                : robot.status === 'charging' || robot.status === 'paused'
                                 ? 'warning'
+                                : robot.status === 'offline'
+                                ? 'destructive'
                                 : 'secondary'
                             }
                             className="text-[10px] uppercase font-mono"
                           >
-                            {robot.status === 'moving' ? 'MOVING' : robot.status === 'charging' ? 'CHARGING' : 'IDLE'}
+                            {robot.status === 'idle' ? 'IDLE' : robot.status.toUpperCase()}
                           </Badge>
                         </div>
                         <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">

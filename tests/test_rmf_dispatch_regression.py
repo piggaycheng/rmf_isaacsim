@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import math
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -49,6 +50,20 @@ from rmf_service import rmf_service
 class TestRMFDispatchRegression(unittest.TestCase):
 
     def setUp(self):
+        # Isolate FA persistence (paused fleets / discovered robots) so tests don't leak state via saved_maps.
+        self._tmpdir = tempfile.TemporaryDirectory()
+        real_find = mfa.find_backend_path
+        isolated = {"saved_maps/paused_fleets.json", "saved_maps/discovered_robots.json"}
+
+        def isolated_find(subpath):
+            if subpath in isolated:
+                return os.path.join(self._tmpdir.name, os.path.basename(subpath))
+            return real_find(subpath)
+
+        self._find_patcher = patch.object(mfa, "find_backend_path", side_effect=isolated_find)
+        self._find_patcher.start()
+        self.addCleanup(self._find_patcher.stop)
+        self.addCleanup(self._tmpdir.cleanup)
         state.paused_fleets.clear()
         state.current_tasks.clear()
         state.active_nav_graph = {

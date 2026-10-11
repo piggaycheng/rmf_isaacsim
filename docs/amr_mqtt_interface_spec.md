@@ -317,7 +317,7 @@
 
 ### 4.8 車隊管理控制 (`control`)
 - **Topic**：`rmf/{fleet_name}/control`
-- **方向**：後端管理系統 $\rightarrow$ Fleet Adapter
+- **方向**：Fleet Adapter 內部控制介面（後端管理系統改經 ROS 2 `/rmf/fleet_control` 下發，見 `architecture.md`「Backend ↔ Fleet Adapter ROS 2 介面」）
 - **QoS**：`1`
 - **說明**：用於動態暫停 (`pause`) 或恢復 (`resume`) 指定車隊的調度。車隊暫停期間，RMF 與 Fleet Adapter 會將該車隊所有機器人退役 (decommission)，且拒絕新調度任務指派；恢復時重新上線 (recommission)，但仍離線的車維持 decommission 直到恢復連線。暫停不影響進行中命令的完成回報。
 

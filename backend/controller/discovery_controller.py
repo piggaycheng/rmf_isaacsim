@@ -6,7 +6,6 @@ import time
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
-import paho.mqtt.client as mqtt
 
 import state
 from state import (
@@ -34,174 +33,27 @@ class AdoptRequest(BaseModel):
     charger_waypoint: Optional[str] = None
 
 # ==========================================
-# MQTT Background Auto-Discovery Client
-# ==========================================
-mqtt_client: Optional[mqtt.Client] = None
-discovery_connected: bool = False
-
-def init_discovery_mqtt():
-    global mqtt_client
-    mqtt_host = os.environ.get("MQTT_HOST", "127.0.0.1")
-    mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
-
-    client_id = f"rmf_web_studio_discovery_{int(time.time())}"
-    client = mqtt.Client(client_id=client_id)
-
-    def on_connect(c, userdata, flags, rc):
-        global discovery_connected
-        if rc == 0:
-            discovery_connected = True
-            print(f"[DISCOVERY] Connected to MQTT Broker at {mqtt_host}:{mqtt_port}")
-            # Wildcard subscription across all fleets and robots
-            client.subscribe("rmf/+/robot/+/register", qos=1)
-            client.subscribe("rmf/+/robot/+/heartbeat", qos=0)
-            client.subscribe("rmf/+/robot/+/status", qos=1)
-            client.subscribe("rmf/+/robot/+/deregister", qos=1)
-            print("[DISCOVERY] Subscribed to rmf/+/robot/+/(register, heartbeat, status, deregister)")
-        else:
-            discovery_connected = False
-            print(f"[DISCOVERY] MQTT connection failed: rc={rc}")
-
-    def on_disconnect(c, userdata, rc):
-        global discovery_connected
-        discovery_connected = False
-        print(f"[DISCOVERY] MQTT disconnected: rc={rc}")
-
-    def on_message(c, userdata, msg):
-        try:
-            tokens = msg.topic.split("/")
-            if len(tokens) < 5:
-                return
-            fleet_name = tokens[1]
-            robot_id = tokens[3]
-            action = tokens[4]
-
-            payload = {}
-            if msg.payload:
-                try:
-                    payload = json.loads(msg.payload.decode("utf-8"))
-                except Exception:
-                    payload = {}
-
-            robot_key = f"{fleet_name}_{robot_id}"
-            now = time.time()
-
-            existing = discovered_robots.get(robot_key, {
-                "robot_id": robot_id,
-                "fleet_name": fleet_name,
-                "x": 0.0,
-                "y": 0.0,
-                "yaw": 0.0,
-                "battery": 100.0,
-                "status": "idle",
-                "specs": {},
-                "initial_location": {},
-                "default_parking": "parking_1",
-                "default_charger": "charger_1",
-                "first_seen": now,
-            })
-
-            existing["last_seen"] = now
-            existing["fleet_name"] = fleet_name
-            existing["robot_id"] = robot_id
-
-            if action == "register":
-                init_loc = payload.get("initial_location", {})
-                if init_loc:
-                    existing["x"] = float(init_loc.get("x", existing["x"]))
-                    existing["y"] = float(init_loc.get("y", existing["y"]))
-                    existing["yaw"] = float(init_loc.get("yaw", existing["yaw"]))
-                    existing["initial_location"] = init_loc
-
-                if "specs" in payload:
-                    specs = payload.get("specs", {})
-                    existing["specs"] = specs
-                    footprint = specs.get("footprint_radius")
-                    max_lin = specs.get("max_linear_velocity")
-                    max_ang = specs.get("max_angular_velocity")
-                    if footprint or max_lin:
-                        adapters = load_fleet_adapters_data()
-                        updated = False
-                        for a in adapters:
-                            if a.get("fleet_name") == fleet_name:
-                                if footprint and a.get("robot_radius") != footprint:
-                                    a["robot_radius"] = float(footprint)
-                                    updated = True
-                                if max_lin and a.get("linear_velocity") != max_lin:
-                                    a["linear_velocity"] = float(max_lin)
-                                    updated = True
-                                if max_ang and a.get("angular_velocity") != max_ang:
-                                    a["angular_velocity"] = float(max_ang)
-                                    updated = True
-                        if updated:
-                            save_fleet_adapters_data(adapters)
-                if "default_parking" in payload:
-                    existing["default_parking"] = payload.get("default_parking")
-                if "default_charger" in payload:
-                    existing["default_charger"] = payload.get("default_charger")
-                existing["status"] = "registering"
-
-            elif action == "heartbeat":
-                if "x" in payload:
-                    existing["x"] = float(payload.get("x", existing["x"]))
-                if "y" in payload:
-                    existing["y"] = float(payload.get("y", existing["y"]))
-                if "yaw" in payload:
-                    existing["yaw"] = float(payload.get("yaw", existing["yaw"]))
-                if "battery" in payload:
-                    existing["battery"] = float(payload.get("battery", existing["battery"]))
-                if "status" in payload:
-                    existing["status"] = payload.get("status", existing["status"])
-                if "level_name" in payload:
-                    existing["level_name"] = payload.get("level_name")
-
-            elif action == "deregister" or action == "status":
-                if payload.get("status") == "offline" or action == "deregister":
-                    existing["status"] = "offline"
-                    if robot_id in current_robots:
-                        del current_robots[robot_id]
-
-            discovered_robots[robot_key] = existing
-
-            # Synchronize active robots to current_robots for real-time map canvas rendering
-            if existing.get("status") != "offline":
-                prev_robot = current_robots.get(robot_id, {})
-                has_rmf_task = bool(prev_robot.get("task_id"))
-
-                current_robots[robot_id] = {
-                    "id": robot_id,
-                    "name": robot_id,
-                    "fleet": fleet_name,
-                    "x": round(float(existing["x"]), 3),
-                    "y": round(float(existing["y"]), 3),
-                    "yaw": round(float(existing["yaw"]), 3),
-                    "battery": round(float(existing["battery"]), 1),
-                    "status": "moving" if (existing.get("status") == "moving" or has_rmf_task) else ("charging" if existing.get("status") == "charging" else "idle"),
-                    "current_task": prev_robot.get("current_task") if has_rmf_task else ("執行導航任務中" if existing.get("status") == "moving" else "在線待命中"),
-                    "task_id": prev_robot.get("task_id", ""),
-                }
-
-        except Exception as e:
-            print(f"[DISCOVERY] Error parsing MQTT message: {e}")
-
-    client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
-    client.on_message = on_message
-
-    try:
-        client.connect_async(mqtt_host, mqtt_port, keepalive=30)
-        client.loop_start()
-        mqtt_client = client
-    except Exception as e:
-        print(f"[DISCOVERY] Failed to start MQTT client: {e}")
-
-# ==========================================
 # Background Broadcast & Maintenance Loop
+# (Discovered robots synced via Fleet Adapter)
 # ==========================================
 async def discovery_watchdog_loop():
-    init_discovery_mqtt()
+    disc_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "../saved_maps/discovered_robots.json"))
     while True:
         await asyncio.sleep(1.5)
+
+        # Synchronize from Fleet Adapter's saved cache if available
+        if os.path.exists(disc_file):
+            try:
+                with open(disc_file, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                    if isinstance(cached, dict):
+                        for k, v in cached.items():
+                            if isinstance(v, dict):
+                                state.discovered_robots[k] = v
+                        state.sync_robot_specs_to_adapters(cached)
+            except Exception:
+                pass
+
         discovered_list = get_discovered_robots_list()
         if discovered_list:
             await broadcast({
@@ -221,10 +73,10 @@ async def discovery_watchdog_loop():
 # ==========================================
 @router.get("/api/discovered-robots")
 def get_discovered_robots():
-    """Returns currently auto-discovered AMR robots from EMQX MQTT."""
+    """Returns currently auto-discovered AMR robots (forwarded by Fleet Adapter)."""
     return {
         "status": "ok",
-        "mqtt_connected": discovery_connected,
+        "mqtt_connected": state.is_fa_mqtt_connected(),
         "count": len(discovered_robots),
         "discovered": get_discovered_robots_list(),
     }
@@ -306,6 +158,11 @@ async def adopt_discovered_robot(req: AdoptRequest):
             append_adapter_log(target_adapter["id"], f"[INFO] 車輛 '{req.robot_id}' 已成功納管")
 
     save_fleet_adapters_data(adapters)
+    try:
+        from rmf_service import rmf_service
+        rmf_service.restart_fleet_adapter()
+    except Exception as e:
+        print(f"[WARN] Failed to restart fleet adapter on adopt: {e}")
 
     # Broadcast updates
     broadcast_adapters = []
@@ -396,6 +253,11 @@ async def batch_adopt_discovered_robots():
             adopted_count += len(robots)
 
     save_fleet_adapters_data(adapters)
+    try:
+        from rmf_service import rmf_service
+        rmf_service.restart_fleet_adapter()
+    except Exception as e:
+        print(f"[WARN] Failed to restart fleet adapter on batch adopt: {e}")
 
     # Broadcast updates
     broadcast_adapters = []

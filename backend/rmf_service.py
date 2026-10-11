@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+from std_msgs.msg import String
 from rmf_fleet_msgs.msg import FleetState
 from rmf_task_msgs.msg import ApiRequest, ApiResponse, DispatchStates
 
@@ -48,6 +49,9 @@ class RMFService:
         self.adapter_process: Optional[subprocess.Popen] = None
         self.ros_node: Optional[Node] = None
         self.task_pub = None
+        self.fleet_control_pub = None
+        self.camera_control_pub = None
+        self.discovered_sub = None
         self.running = False
         self.pending_requests: Dict[str, asyncio.Future] = {}
         self.lock = threading.Lock()
@@ -272,28 +276,28 @@ class RMFService:
                 fleet_name = msg.name
                 for r in msg.robots:
                     r_id = r.name
-                    # Fuse Open-RMF task assignment and physical MQTT telemetry from discovered_robots
-                    disc = (
-                        state.discovered_robots.get(f"{fleet_name}_{r_id}")
-                        or state.discovered_robots.get(f"fleet1_{r_id}")
-                        or state.discovered_robots.get(f"fleet2_{r_id}")
-                        or state.discovered_robots.get(r_id)
-                    )
-                    phys_status = disc.get("status") if disc else None
+                    prev_robot = state.current_robots.get(r_id, {})
+                    prev_task_id = prev_robot.get("task_id", "")
+                    # RMF keeps reporting the last known pose for a disconnected robot; the FA knows the link state.
+                    is_offline = state.is_robot_offline(fleet_name, r_id)
 
-                    # If AMR reports moving physically, or RMF indicates mode 2, or has active task
-                    if phys_status == "moving" or r.mode.mode == 2 or (r.task_id and phys_status != "idle"):
+                    if is_offline:
+                        mode_str = "offline"
+                    elif r.mode.mode == 3 or fleet_name in state.paused_fleets:
+                        mode_str = "paused"
+                    elif r.mode.mode == 2 or r.task_id:
                         mode_str = "moving"
-                    elif phys_status == "charging" or r.mode.mode == 1 or r.mode.mode == 3:
+                    elif r.mode.mode == 1:
                         mode_str = "charging"
-                    elif r.task_id:
-                        mode_str = "moving"
                     else:
                         mode_str = "idle"
 
-                    prev_robot = state.current_robots.get(r_id, {})
-                    prev_task_id = prev_robot.get("task_id", "")
-                    is_online = disc.get("is_online", True) if disc else True
+                    # Keep the previous task id while offline so completion is only inferred after reconnecting.
+                    task_id = r.task_id or (prev_task_id if is_offline else "")
+                    if is_offline:
+                        current_task = f"離線（{task_id}）" if task_id else "離線"
+                    else:
+                        current_task = r.task_id or ("正在導航" if mode_str == "moving" else "已暫停" if mode_str == "paused" else "在線待命中")
 
                     state.current_robots[r_id] = {
                         "id": r_id,
@@ -304,9 +308,12 @@ class RMFService:
                         "yaw": round(float(r.location.yaw), 3),
                         "battery": round(float(r.battery_percent), 1),
                         "status": mode_str,
-                        "current_task": r.task_id or ("正在導航" if mode_str == "moving" else "在線待命中"),
-                        "task_id": r.task_id,
+                        "current_task": current_task,
+                        "task_id": task_id,
                     }
+
+                    if is_offline:
+                        continue
 
                     # Update tasks lifecycle in state.current_tasks
                     if r.task_id:
@@ -334,8 +341,8 @@ class RMFService:
                                     break
                     elif prev_task_id:
                         # Robot had an active task and now r.task_id is empty (execution completed).
-                        # Guard: only mark completed if robot is online, not in emergency/error.
-                        if is_online and phys_status != "offline" and r.mode.mode != 5:
+                        # Guard: only mark completed if robot is not in emergency/error.
+                        if r.mode.mode not in (5, 8):
                             for t in state.current_tasks:
                                 if task_matches(t, prev_task_id):
                                     if t.get("status") not in state.TERMINAL_STATES:
@@ -350,7 +357,7 @@ class RMFService:
                                     break
                     else:
                         # Fallback recovery: confirm completion for tasks that were running on this robot and robot is now idle
-                        if is_online and phys_status != "offline" and mode_str == "idle" and r.mode.mode != 5:
+                        if mode_str == "idle" and r.mode.mode not in (5, 8):
                             for t in state.current_tasks:
                                 if (
                                     t.get("robot_id") == r_id
@@ -402,12 +409,108 @@ class RMFService:
                 print(f"[RMF Bridge] Note: TaskSummary sub setup: {e}")
 
 
+            # Fleet control publisher
+            self.fleet_control_pub = self.ros_node.create_publisher(
+                String, "/rmf/fleet_control", 10
+            )
+
+            # Camera control publisher
+            self.camera_control_pub = self.ros_node.create_publisher(
+                String, "/rmf/camera_control", 10
+            )
+
+            # Subscribe to discovered robots published by Fleet Adapter
+            def discovered_cb(msg: String):
+                try:
+                    data = json.loads(msg.data)
+                    if isinstance(data, dict):
+                        state.discovered_robots.clear()
+                        state.discovered_robots.update(data)
+                        state.sync_robot_specs_to_adapters(data)
+                except Exception as e:
+                    print(f"[RMF Bridge] Error updating discovered robots: {e}")
+
+            self.discovered_sub = self.ros_node.create_subscription(
+                String, "/rmf/discovered_robots", discovered_cb, 10
+            )
+
+            # Fleet Adapter runtime state (latched): MQTT link + paused fleets (ACK for pause/resume)
+            def fa_state_cb(msg: String):
+                try:
+                    data = json.loads(msg.data)
+                    if isinstance(data, dict):
+                        state.update_fa_state(data)
+                except Exception as e:
+                    print(f"[RMF Bridge] Error updating fleet adapter state: {e}")
+
+            fa_state_qos = QoSProfile(
+                depth=1,
+                reliability=QoSReliabilityPolicy.RELIABLE,
+                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.fa_state_sub = self.ros_node.create_subscription(
+                String, "/rmf/fleet_adapter_state", fa_state_cb, fa_state_qos
+            )
+
             # Start spinning in a background daemon thread
             spin_thread = threading.Thread(target=lambda: rclpy.spin(self.ros_node), daemon=True)
             spin_thread.start()
             print("[RMF Bridge] ✅ ROS 2 Bridge Node initialized and spinning.")
         except Exception as e:
             print(f"[RMF Bridge ERROR] Failed to initialize ROS 2 node: {e}")
+
+    def send_fleet_control(self, fleet_name: str, action: str, timeout_s: float = 4.0) -> bool:
+        """Sends fleet pause/resume to the Fleet Adapter via ROS 2 and waits for its state to confirm it.
+
+        Blocking; call from a worker thread. The FA owns paused_fleets.json, so nothing is persisted here.
+        """
+        if action not in ("pause", "resume"):
+            return False
+        if not self.fleet_control_pub or not rclpy.ok():
+            print("[RMF Bridge ERROR] Fleet control publisher not ready.")
+            return False
+
+        want_paused = action == "pause"
+        payload = json.dumps({"action": action, "fleet": fleet_name})
+        deadline = time.time() + timeout_s
+        next_publish = 0.0
+        while time.time() < deadline:
+            if (fleet_name in state.paused_fleets) == want_paused and state.fa_state_time > 0 \
+                    and (time.time() - state.fa_state_time) < state.FA_STATE_STALE_S:
+                print(f"[RMF Bridge] Fleet Adapter confirmed '{action}' for fleet [{fleet_name}].")
+                return True
+            if time.time() >= next_publish:
+                try:
+                    msg = String()
+                    msg.data = payload
+                    self.fleet_control_pub.publish(msg)
+                    print(f"[RMF Bridge] Published fleet control to /rmf/fleet_control: {payload}")
+                except Exception as e:
+                    print(f"[RMF Bridge ERROR] Failed to publish fleet control: {e}")
+                    return False
+                next_publish = time.time() + 1.0
+            time.sleep(0.1)
+        print(f"[RMF Bridge ERROR] Fleet Adapter did not confirm '{action}' for fleet [{fleet_name}] within {timeout_s}s.")
+        return False
+
+    def send_camera_control(self, camera_name: str, topic_prefix: str = "slam/cameras", enabled: bool = False) -> bool:
+        """Dispatches camera enable/disable control to Fleet Adapter via ROS 2."""
+        payload = {
+            "camera_name": camera_name,
+            "topic_prefix": topic_prefix,
+            "enabled": enabled,
+        }
+        if self.camera_control_pub and rclpy.ok():
+            try:
+                msg = String()
+                msg.data = json.dumps(payload)
+                self.camera_control_pub.publish(msg)
+                print(f"[RMF Bridge] Published camera control to /rmf/camera_control: {payload}")
+                return True
+            except Exception as e:
+                print(f"[RMF Bridge ERROR] Failed to publish camera control: {e}")
+                return False
+        return False
 
     def dispatch_task(
         self,
