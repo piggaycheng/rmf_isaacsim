@@ -450,28 +450,55 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         // Pulsing circle around robot
         const isMoving = robot.status === 'moving';
         const isEstopped = robot.status === 'emergency_stop' || !!robot.emergency_stop;
+        const statusColor = isEstopped ? '#ef4444' : isMoving ? '#06b6d4' : '#10b981';
+        const arrowColor = isEstopped ? '#f87171' : isMoving ? '#22d3ee' : '#34d399';
 
+        // 1. AMR Circular Footprint (Dark backdrop + glowing border for high contrast)
         ctx.beginPath();
-        ctx.arc(0, 0, 18, 0, Math.PI * 2);
+        ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        // Base dark circular pad to guarantee contrast against white SLAM maps
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.65)';
+        ctx.fill();
+
+        // Pulsing status aura
+        ctx.beginPath();
+        ctx.arc(0, 0, 20, 0, Math.PI * 2);
         ctx.fillStyle = isEstopped
           ? 'rgba(239, 68, 68, 0.35)'
           : isMoving
           ? 'rgba(6, 182, 212, 0.3)'
-          : 'rgba(16, 185, 129, 0.2)';
+          : 'rgba(16, 185, 129, 0.25)';
         ctx.fill();
-        ctx.strokeStyle = isEstopped ? '#ef4444' : isMoving ? '#06b6d4' : '#10b981';
+        ctx.strokeStyle = statusColor;
         ctx.lineWidth = isEstopped ? 3 : 2;
+        ctx.shadowColor = statusColor;
+        ctx.shadowBlur = 8;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        // 2. High-contrast Directional Arrow / Head
+        ctx.beginPath();
+        ctx.moveTo(17, 0);       // Arrow tip pointing forward
+        ctx.lineTo(-11, -11);    // Left fin
+        ctx.lineTo(-7, 0);       // Inner notch
+        ctx.lineTo(-11, 11);     // Right fin
+        ctx.closePath();
+
+        // Drop shadow for elevation
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.75)';
+        ctx.shadowBlur = 6;
+        ctx.shadowOffsetY = 1;
+
+        // Dark contrasting border so arrow never blends into white or light SLAM maps
+        ctx.strokeStyle = '#090d16';
+        ctx.lineWidth = 3;
+        ctx.lineJoin = 'round';
         ctx.stroke();
 
-        // Directional Triangle / Head
-        ctx.beginPath();
-        ctx.moveTo(14, 0);
-        ctx.lineTo(-10, -9);
-        ctx.lineTo(-6, 0);
-        ctx.lineTo(-10, 9);
-        ctx.closePath();
-        ctx.fillStyle = isEstopped ? '#f87171' : isMoving ? '#22d3ee' : '#34d399';
+        // Fill with bright status color
+        ctx.fillStyle = arrowColor;
         ctx.fill();
+        ctx.shadowBlur = 0;
 
         ctx.restore();
 
@@ -486,20 +513,23 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
           ? `${robot.name} 🛑 [急停]`
           : `${robot.name} (${Math.round(robot.battery)}%) ${isMoving ? '▶ 運行中' : ''}`;
         const textWidth = ctx.measureText(nameText).width;
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
         ctx.strokeStyle = isEstopped
           ? '#ef4444'
           : isMoving
           ? '#06b6d4'
           : (robot.battery > 30 ? '#10b981' : '#f43f5e');
-        ctx.lineWidth = 1;
+        ctx.lineWidth = 1.5;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = 4;
         ctx.beginPath();
-        ctx.roundRect(-textWidth / 2 - 6, -34, textWidth + 12, 16, 4);
+        ctx.roundRect(-textWidth / 2 - 7, -36, textWidth + 14, 17, 4);
         ctx.fill();
         ctx.stroke();
+        ctx.shadowBlur = 0;
 
         ctx.fillStyle = isEstopped ? '#fca5a5' : '#f8fafc';
-        ctx.fillText(nameText, 0, -22);
+        ctx.fillText(nameText, 0, -24);
 
         ctx.restore();
       });
