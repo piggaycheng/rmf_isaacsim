@@ -133,6 +133,68 @@ def is_robot_offline(fleet_name: str, robot_id: str) -> bool:
     return disc.get("status") == "offline" or (time.time() - disc.get("last_seen", 0)) > DISCOVERY_OFFLINE_S
 
 
+def nav_graph_file_sha(graph_idx: int) -> Optional[str]:
+    import hashlib
+    try:
+        with open(os.path.join(NAV_GRAPHS_DIR, f"{int(graph_idx)}.yaml"), "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def loaded_fleet_waypoints() -> Optional[Dict[str, set]]:
+    """Waypoints of each fleet's graph as actually loaded by the Fleet Adapter (None if not reported)."""
+    if not is_fa_state_fresh():
+        return None
+    fleets = fa_state.get("fleets")
+    if not isinstance(fleets, dict):
+        return None
+    return {name: set(info.get("waypoints") or []) for name, info in fleets.items() if isinstance(info, dict)}
+
+
+def adapter_diagnostics(adapter: Dict[str, Any]) -> Dict[str, Any]:
+    """Compares a configured adapter with what the running Fleet Adapter loaded.
+
+    status: "ok" | "stale" (restart needed for the new graph/config to take effect) | "unknown".
+    """
+    fleet = adapter.get("fleet_name", "")
+    graph_idx = adapter.get("graph_idx", 0)
+    issues: List[str] = []
+    warnings = [
+        w.get("message", "")
+        for w in fa_state.get("waypoint_warnings") or []
+        if isinstance(w, dict) and str(w.get("key", "")).startswith(f"{fleet}_")
+    ]
+    fleets = fa_state.get("fleets")
+    if not fa_state:
+        return {"status": "unknown", "issues": ["尚未收到 Fleet Adapter 狀態（Adapter 可能未啟動）"], "warnings": warnings}
+    if not is_fa_state_fresh():
+        return {"status": "unknown", "issues": ["Fleet Adapter 狀態已過期，無法確認目前載入路網，請檢查服務連線"], "warnings": warnings}
+    if not isinstance(fleets, dict):
+        return {"status": "unknown", "issues": ["Fleet Adapter 未回報已載入路網，請重啟 Adapter 以啟用路網檢查"], "warnings": warnings}
+
+    loaded = fleets.get(fleet)
+    if not isinstance(loaded, dict):
+        issues.append(f"車隊 '{fleet}' 尚未被 Fleet Adapter 載入，需重啟 Adapter")
+    else:
+        if loaded.get("graph_idx") != graph_idx:
+            issues.append(f"Adapter 仍使用 Graph {loaded.get('graph_idx')}，設定為 Graph {graph_idx}，需重啟 Adapter")
+        else:
+            disk_sha = nav_graph_file_sha(graph_idx)
+            if not disk_sha or not loaded.get("graph_sha"):
+                return {"status": "unknown", "issues": [f"無法比對 Graph {graph_idx} 路網版本，請檢查路網檔與 Adapter 回報"], "warnings": warnings}
+            if disk_sha != loaded.get("graph_sha"):
+                issues.append(f"Graph {graph_idx} 路網檔已更新，但 Adapter 仍使用舊版路網，需重啟 Adapter")
+    return {
+        "status": "stale" if issues else "ok",
+        "issues": issues,
+        "warnings": warnings,
+        "loaded_graph_idx": loaded.get("graph_idx") if isinstance(loaded, dict) else None,
+        "loaded_waypoints": len(loaded.get("waypoints") or []) if isinstance(loaded, dict) else 0,
+        "fa_state_fresh": is_fa_state_fresh(),
+    }
+
+
 def sync_robot_specs_to_adapters(discovered: Dict[str, Dict[str, Any]]) -> None:
     """Persist robot-reported footprint/velocity limits into fleet_adapters.json (read by the FA on start)."""
     changed_specs = {}
@@ -279,6 +341,7 @@ def save_fleet_adapters_data(adapters: List[Dict[str, Any]]) -> None:
         for a in adapters:
             item = dict(a)
             item.pop("logs", None)
+            item.pop("diagnostics", None)
             clean_adapters.append(item)
 
         with open(FLEET_ADAPTERS_FILE, "w", encoding="utf-8") as f:

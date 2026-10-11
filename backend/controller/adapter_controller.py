@@ -39,6 +39,7 @@ def get_fleet_adapters():
     # Dynamically inject in-memory live logs for UI consumption without polluting disk JSON
     for a in adapters:
         a["logs"] = get_adapter_logs(a.get("id", ""))
+        a["diagnostics"] = state.adapter_diagnostics(a)
     return adapters
 
 @router.get("/api/fleet-adapters/{adapter_id}/logs")
@@ -62,6 +63,7 @@ async def save_or_update_fleet_adapter(adapter: Dict[str, Any]):
     # Strip logs before saving
     adapter_clean = dict(adapter)
     adapter_clean.pop("logs", None)
+    adapter_clean.pop("diagnostics", None)
 
     idx = next((i for i, a in enumerate(adapters) if a.get("id") == adapter_id), -1)
     if idx >= 0:
@@ -166,13 +168,17 @@ async def fleet_adapter_action(adapter_id: str, payload: Dict[str, Any]):
     fleet_name = adapter.get("fleet_name", "")
 
     if action == "restart":
-        # The FA persists paused fleets across restarts, so keep the UI status consistent with it.
-        adapter["status"] = "standby" if fleet_name in state.paused_fleets else "online"
         try:
             from rmf_service import rmf_service
-            rmf_service.restart_fleet_adapter()
+            restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter)
         except Exception as e:
             print(f"[ERROR] Failed to restart fleet adapter process: {e}")
+            restarted = False
+        if not restarted:
+            append_adapter_log(adapter_id, "[ERROR] Fleet Adapter 重新載入失敗，請檢查服務日誌。")
+            return {"status": "error", "action": action, "message": "Fleet Adapter 重新載入失敗，路網尚未確認生效。"}
+        # Paused fleets survive process restarts.
+        adapter["status"] = "standby" if fleet_name in state.paused_fleets else "online"
         append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter.get('name')}' service reloaded.")
     elif action in ("pause", "resume"):
         try:

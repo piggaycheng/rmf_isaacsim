@@ -119,6 +119,17 @@ export interface FleetAdapter {
   latency_ms?: number;
   updated_at?: string;
   logs?: string[];
+  diagnostics?: FleetAdapterDiagnostics;
+}
+
+/** Runtime comparison between the configured adapter and what the running Fleet Adapter loaded. */
+export interface FleetAdapterDiagnostics {
+  status: 'ok' | 'stale' | 'unknown';
+  issues: string[];
+  warnings: string[];
+  loaded_graph_idx?: number | null;
+  loaded_waypoints?: number;
+  fa_state_fresh?: boolean;
 }
 
 export interface DiscoveredRobot {
@@ -166,6 +177,7 @@ export interface Task {
   progress: number; // 0 - 100
   created_at: string;
   error?: string;
+  detail?: string;
 }
 
 export interface SlamMap {

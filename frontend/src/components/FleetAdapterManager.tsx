@@ -236,7 +236,12 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
     fetchDiscovered();
     // Poll discovered robots every 2 seconds for real-time responsiveness
     const interval = setInterval(fetchDiscovered, 2000);
-    return () => clearInterval(interval);
+    // Refresh adapter diagnostics (loaded graph vs saved graph, waypoint fallbacks)
+    const adapterInterval = setInterval(fetchAdapters, 5000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(adapterInterval);
+    };
   }, []);
 
   const showToast = (msg: string) => {
@@ -970,6 +975,51 @@ ${
                     )}
                   </div>
                 </div>
+
+                {/* Section: Runtime diagnostics reported by the running Fleet Adapter */}
+                {adapter.diagnostics && adapter.diagnostics.status !== 'ok' && (
+                  <div
+                    className={`rounded-xl p-3 border text-xs space-y-1.5 ${
+                      adapter.diagnostics.status === 'stale'
+                        ? 'bg-amber-500/10 border-amber-500/40 text-amber-200'
+                        : 'bg-slate-800/40 border-slate-700 text-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 mt-px flex-shrink-0" />
+                        <div className="space-y-0.5">
+                          {adapter.diagnostics.issues.map((msg, i) => (
+                            <p key={i}>{msg}</p>
+                          ))}
+                          {adapter.diagnostics.status === 'stale' && (
+                            <p className="text-[11px] text-amber-300/80">此狀態下派往新站點的任務會被 Open-RMF 拒絕。</p>
+                          )}
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        disabled={isRestarting}
+                        onClick={() => handleAdapterAction(adapter.id, 'restart')}
+                        className="h-6 px-2 text-[11px] bg-amber-600 hover:bg-amber-500 text-white flex-shrink-0"
+                      >
+                        <RotateCcw className={`w-3 h-3 mr-1 ${isRestarting ? 'animate-spin' : ''}`} />
+                        {isRestarting ? '重新載入中...' : '重新載入 Adapter'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {adapter.diagnostics && adapter.diagnostics.warnings.length > 0 && (
+                  <div className="rounded-xl p-3 border bg-sky-500/10 border-sky-500/30 text-sky-200 text-xs space-y-0.5">
+                    <div className="flex items-center gap-1.5 font-semibold">
+                      <Info className="w-3.5 h-3.5" />
+                      <span>充電點 / 停車點設定未生效</span>
+                    </div>
+                    {adapter.diagnostics.warnings.map((msg, i) => (
+                      <p key={i} className="pl-5">{msg}</p>
+                    ))}
+                  </div>
+                )}
 
                 {/* Section: Associated Nav Graph & Dynamic set_graph */}
                 <div className="bg-slate-950/70 border border-slate-800/80 rounded-xl p-3.5 space-y-2.5">

@@ -148,6 +148,9 @@ class RMFService:
                     env=env,
                 )
                 time.sleep(1.0)
+                if self.adapter_process.poll() is not None:
+                    append_adapter_log("system", "Fleet Adapter 啟動後立即退出，請檢查 /tmp/adapter.log。")
+                    return False
                 print("[RMF FA] ✅ Open-RMF MQTT Fleet Adapter restarted successfully.")
                 append_adapter_log("system", "Fleet Adapter 重啟完成，已重新載入最新路網。")
                 return True
@@ -610,6 +613,35 @@ class RMFService:
         message = "; ".join(errors) if errors else "Open-RMF 未回應取消請求（任務可能不存在或已結束）。"
         return {"status": "error", "task_id": rmf_task_id, "message": f"取消失敗: {message}"}
 
+    @staticmethod
+    def _unknown_places_for_adapter(places: List[str], fleet: Optional[str]) -> Optional[str]:
+        """Error message if a place is missing from the graphs the Fleet Adapter actually loaded.
+
+        Open-RMF would otherwise reject the task with "No fleet adapters offered a bid".
+        """
+        loaded = state.loaded_fleet_waypoints()
+        if loaded is None:
+            return None
+        if fleet and fleet not in loaded:
+            return f"車隊 '{fleet}' 尚未被 Fleet Adapter 載入，請至車隊管理頁檢查設定並重新載入 Adapter"
+        candidates = [fleet] if fleet else [f for f in loaded if f not in state.paused_fleets]
+        if any(all(p in loaded[f] for p in places) for f in candidates):
+            return None
+        missing = [p for p in places if not any(p in loaded[f] for f in candidates)]
+        scope = f"車隊 '{fleet}'" if fleet else "任何可用車隊"
+        if missing:
+            msg = f"站點 {', '.join(repr(p) for p in missing)} 不在{scope}的 Fleet Adapter 已載入路網中"
+        else:
+            msg = "沒有同一個可用車隊的已載入路網涵蓋全部任務站點，請檢查取貨／卸貨或巡邏站點所屬路網"
+        stale = [
+            a.get("fleet_name", "")
+            for a in state.load_fleet_adapters_data()
+            if (not fleet or a.get("fleet_name") == fleet) and state.adapter_diagnostics(a).get("status") == "stale"
+        ]
+        if stale:
+            msg += f"；車隊 {', '.join(stale)} 的路網已更新但 Adapter 尚未重新載入，請至車隊管理頁按「重新載入」"
+        return msg
+
     def dispatch_task(
         self,
         task_type: str,
@@ -754,6 +786,15 @@ class RMFService:
                 "task_id": None,
                 "request_id": None,
                 "message": f"車輛 '{robot_id}' 處於緊急停車狀態，請先解除緊急停車。",
+            }
+
+        unreachable = self._unknown_places_for_adapter(places, target_fleet if robot_id and robot_id != "any" else None)
+        if unreachable:
+            return {
+                "status": "error",
+                "task_id": None,
+                "request_id": None,
+                "message": unreachable,
             }
 
         # Format Request JSON

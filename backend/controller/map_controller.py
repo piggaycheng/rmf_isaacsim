@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import io
@@ -190,21 +191,37 @@ async def save_map(req: MapSaveRequest):
             yaml.dump(g_data, f, allow_unicode=True, sort_keys=False)
         saved_graph_files.append(g_file)
 
+    restart_error = None
     if getattr(req, "restart_adapter", False):
         try:
             from rmf_service import rmf_service
-            rmf_service.restart_fleet_adapter()
+            if not await asyncio.to_thread(rmf_service.restart_fleet_adapter):
+                restart_error = "Fleet Adapter 重新載入失敗，路網已儲存但尚未確認生效"
         except Exception as e:
             print(f"[Map Save] Note: Fleet adapter reload: {e}")
+            restart_error = "Fleet Adapter 重新載入失敗，路網已儲存但尚未確認生效"
 
     await broadcast({
         "type": "map_updated",
         "map": map_data
     })
 
+    message = f"路網已成功儲存 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)"
+    stale_fleets = [
+        a.get("fleet_name", "")
+        for a in state.load_fleet_adapters_data()
+        if state.adapter_diagnostics(a).get("status") == "stale"
+    ]
+    if stale_fleets:
+        message += f"；車隊 {', '.join(stale_fleets)} 的 Fleet Adapter 仍使用舊路網，請至車隊管理頁重新載入 Adapter"
+    if restart_error:
+        message += f"；{restart_error}"
+
     return {
         "status": "success",
-        "message": f"路網已成功儲存 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)",
+        "message": message,
+        "adapter_restart_required": stale_fleets,
+        "adapter_restart_error": restart_error,
         "file_json": ACTIVE_MAP_FILE,
         "file_building_yaml": ACTIVE_YAML_FILE,
         "graph_indices": graph_indices,

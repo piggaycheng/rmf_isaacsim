@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
@@ -214,6 +214,8 @@ export function App() {
   const [isMockSimulation, setIsMockSimulation] = useState<boolean>(true);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  // Fleets whose running Fleet Adapter has not loaded the latest saved nav graph
+  const [staleAdapterFleets, setStaleAdapterFleets] = useState<string[]>([]);
   const [saveToast, setSaveToast] = useState<string | null>(null);
   const [cancelingTaskId, setCancelingTaskId] = useState<string | null>(null);
   const [actionPendingRobotId, setActionPendingRobotId] = useState<string | null>(null);
@@ -315,7 +317,14 @@ export function App() {
           body: JSON.stringify(payload),
         });
         if (res.ok) {
-          setSaveToast('已自動存檔');
+          const data = await res.json().catch(() => ({}));
+          const stale: string[] = data.adapter_restart_required || [];
+          setStaleAdapterFleets(stale);
+          setSaveToast(
+            stale.length > 0
+              ? '已自動存檔（尚未套用至 Fleet Adapter，按「儲存路網」套用）'
+              : '已自動存檔'
+          );
         } else {
           const data = await res.json().catch(() => ({}));
           setSaveToast(`自動存檔失敗：${data.detail || res.status}`);
@@ -835,6 +844,26 @@ export function App() {
   ).length;
   const hasEstoppedRobots = estoppedCount > 0;
 
+  // Poll Fleet Adapter diagnostics so an outdated loaded nav graph is visible without reading logs
+  useEffect(() => {
+    if (!isConnected) return;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/fleet-adapters');
+        if (!res.ok) return;
+        const adapters: FleetAdapter[] = await res.json();
+        setStaleAdapterFleets(
+          adapters.filter((a) => a.diagnostics?.status === 'stale').map((a) => a.fleet_name)
+        );
+      } catch (e) {
+        console.warn('Failed to refresh Fleet Adapter diagnostics:', e);
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => clearInterval(timer);
+  }, [isConnected]);
+
   // Save Map to Backend & LocalStorage
   const handleSaveMap = async () => {
     setIsSaving(true);
@@ -857,7 +886,8 @@ export function App() {
       });
       const data = await res.json();
       if (res.ok) {
-        setSaveToast(`已儲存並同步車隊路網 (${waypoints.length} 點, ${lanes.length} 線, ${graphs.length} 路網)`);
+        setStaleAdapterFleets(data.adapter_restart_required || []);
+        setSaveToast(data.message || '路網已儲存，請查看車隊管理頁確認 Adapter 狀態');
       } else {
         setSaveToast(`儲存失敗：${data.detail || res.status}`);
       }
@@ -1185,6 +1215,16 @@ export function App() {
                   <Download className="w-3.5 h-3.5 mr-1" />
                   Graph {activeGraphIdx}.yaml
                 </Button>
+
+                {staleAdapterFleets.length > 0 && (
+                  <span
+                    className="flex items-center text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/40 rounded px-2 h-7 flex-shrink-0"
+                    title={`Fleet Adapter 仍使用舊路網，派到新站點的任務會失敗。按「儲存路網」會儲存並重新載入 Adapter。`}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 mr-1" />
+                    {staleAdapterFleets.join(', ')} 尚未套用新路網
+                  </span>
+                )}
 
                 <Button
                   size="sm"
@@ -2245,6 +2285,12 @@ export function App() {
                                 <span>車輛: {task.robot_id || '自動'}</span>
                                 <span>{task.progress}%</span>
                               </div>
+                              {task.status === 'failed' && (task.error || task.detail) && (
+                                <div className="flex items-start gap-1 text-[10px] text-rose-300 bg-rose-950/30 border border-rose-900/40 rounded px-1.5 py-1 break-words">
+                                  <AlertTriangle className="w-3 h-3 mt-px flex-shrink-0" />
+                                  <span>{task.error || task.detail}</span>
+                                </div>
+                              )}
                             </div>
                           );
                         })}

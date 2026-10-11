@@ -5,13 +5,14 @@
 # ==============================================================================
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import sys
 import threading
 import time
-from typing import Dict, Optional, Any, Set, Tuple
+from typing import Dict, List, Optional, Any, Set, Tuple
 
 import numpy as np
 import paho.mqtt.client as mqtt
@@ -44,6 +45,16 @@ def find_backend_path(subpath: str) -> str:
         if os.path.exists(c):
             return c
     return candidates[0]
+
+
+def nav_graph_fingerprint(path: str) -> Optional[str]:
+    """Content hash of a nav graph file, so the backend can tell whether the loaded graph is outdated."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except OSError as e:
+        print(f"[WARN] Cannot fingerprint nav graph '{path}': {e}")
+        return None
 
 
 # Grace period before a dispatched command not reflected in heartbeats is considered lost.
@@ -125,6 +136,9 @@ class MqttFleetAdapter:
         self.paused_fleets: Set[str] = set()
         self.estopped_robots: Set[str] = set()  # "{fleet}/{robot}"
         self.fleet_waypoint_info: Dict[str, Dict[str, Any]] = {}
+        # "{fleet}_{robot}" -> messages about configured charger/parking waypoints missing from the graph
+        self.waypoint_warnings: Dict[str, List[str]] = {}
+        self.started_at = time.time()
 
         estop_file = find_backend_path("saved_maps/estopped_robots.json")
         if os.path.exists(estop_file):
@@ -363,6 +377,7 @@ class MqttFleetAdapter:
                     "chargers": charger_wps,
                     "parkings": parking_wps,
                     "graph_idx": g_idx,
+                    "graph_sha": nav_graph_fingerprint(nav_path),
                 }
 
                 try:
@@ -432,9 +447,11 @@ class MqttFleetAdapter:
                     "chargers": charger_wps,
                     "parkings": parking_wps,
                     "graph_idx": 0,
+                    "graph_sha": nav_graph_fingerprint(self.nav_graph_path),
                 }
 
             print(f"[INFO] Open-RMF EasyFullControl Adapter ready for fleets: {list(self.fleet_handles.keys())}")
+            self._publish_fa_state()
         except Exception as e:
             print(f"[ERROR] Failed to start live Open-RMF Adapter: {e}")
             print("[WARN] Switching to Mock/Standalone mode.")
@@ -608,6 +625,21 @@ class MqttFleetAdapter:
                 "mqtt_connected": self.mqtt_connected,
                 "paused_fleets": sorted(self.paused_fleets),
                 "estopped_robots": sorted(self.estopped_robots),
+                "started_at": self.started_at,
+                "fleets": {
+                    name: {
+                        "graph_idx": info.get("graph_idx", 0),
+                        "graph_sha": info.get("graph_sha"),
+                        "waypoints": info.get("all", []),
+                    }
+                    for name, info in list(self.fleet_waypoint_info.items())
+                    if not self.mock_rmf and getattr(self, "fleet_handles", {}).get(name)
+                },
+                "waypoint_warnings": [
+                    {"key": key, "message": m}
+                    for key, msgs in sorted(list(self.waypoint_warnings.items()))
+                    for m in msgs
+                ],
                 "timestamp": time.time(),
             })
             self.fa_state_pub.publish(msg)
@@ -637,7 +669,9 @@ class MqttFleetAdapter:
         except Exception as e:
             print(f"[FA WARN] Failed to save discovered robots: {e}")
 
-    def _resolve_charger_waypoint(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]) -> str:
+    def _resolve_charger_waypoint(
+        self, robot_id: str, fleet_name: str, payload: Dict[str, Any], rejected: Optional[List[str]] = None
+    ) -> str:
         fleet_info = self.fleet_waypoint_info.get(fleet_name, {})
         valid_wps = set(fleet_info.get("all", []))
         chargers = fleet_info.get("chargers", [])
@@ -646,6 +680,8 @@ class MqttFleetAdapter:
         req_charger = payload.get("default_charger")
         if req_charger and (not valid_wps or req_charger in valid_wps):
             return req_charger
+        if req_charger and rejected is not None:
+            rejected.append(req_charger)
 
         # 2. Check fleet_adapters.json
         adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
@@ -660,10 +696,14 @@ class MqttFleetAdapter:
                                 c = r.get("charger_waypoint")
                                 if not valid_wps or c in valid_wps:
                                     return c
+                                if rejected is not None:
+                                    rejected.append(c)
                         if item.get("default_charger"):
                             c = item.get("default_charger")
                             if not valid_wps or c in valid_wps:
                                 return c
+                            if rejected is not None:
+                                rejected.append(c)
             except Exception:
                 pass
 
@@ -677,7 +717,9 @@ class MqttFleetAdapter:
 
         return "charger_1"
 
-    def _resolve_parking_waypoint(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]) -> str:
+    def _resolve_parking_waypoint(
+        self, robot_id: str, fleet_name: str, payload: Dict[str, Any], rejected: Optional[List[str]] = None
+    ) -> str:
         fleet_info = self.fleet_waypoint_info.get(fleet_name, {})
         valid_wps = set(fleet_info.get("all", []))
         parkings = fleet_info.get("parkings", [])
@@ -685,6 +727,8 @@ class MqttFleetAdapter:
         req_parking = payload.get("default_parking")
         if req_parking and (not valid_wps or req_parking in valid_wps):
             return req_parking
+        if req_parking and rejected is not None:
+            rejected.append(req_parking)
 
         adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
         if os.path.exists(adapters_file):
@@ -698,10 +742,14 @@ class MqttFleetAdapter:
                                 p = r.get("parking_waypoint")
                                 if not valid_wps or p in valid_wps:
                                     return p
+                                if rejected is not None:
+                                    rejected.append(p)
                         if item.get("default_parking"):
                             p = item.get("default_parking")
                             if not valid_wps or p in valid_wps:
                                 return p
+                            if rejected is not None:
+                                rejected.append(p)
             except Exception:
                 pass
 
@@ -710,6 +758,29 @@ class MqttFleetAdapter:
         if valid_wps:
             return fleet_info.get("all", [])[0]
         return "parking_1"
+
+    def _record_waypoint_fallbacks(
+        self,
+        robot_id: str,
+        fleet_name: str,
+        rejected_chargers: List[str],
+        charger: str,
+        rejected_parkings: List[str],
+        parking: str,
+    ):
+        graph_idx = self.fleet_waypoint_info.get(fleet_name, {}).get("graph_idx", 0)
+        messages = []
+        for label, rejected, used in (("充電點", rejected_chargers, charger), ("停車點", rejected_parkings, parking)):
+            for wp in dict.fromkeys(rejected):
+                messages.append(f"{robot_id}: {label} '{wp}' 不在 Graph {graph_idx}，已改用 '{used}'")
+        key = f"{fleet_name}_{robot_id}"
+        if messages:
+            for m in messages:
+                print(f"[REGISTER WARN] {m}")
+            self.waypoint_warnings[key] = messages
+        else:
+            self.waypoint_warnings.pop(key, None)
+        self._publish_fa_state()
 
     # ==========================================================================
     # Handler 1: Robot Registration (開機註冊)
@@ -722,9 +793,14 @@ class MqttFleetAdapter:
         y = float(loc.get("y", 0.0))
         yaw = float(loc.get("yaw", 0.0))
         level_name = loc.get("level_name", "L1")
-        default_charger = self._resolve_charger_waypoint(robot_id, fleet_name, payload)
-        default_parking = self._resolve_parking_waypoint(robot_id, fleet_name, payload)
+        rejected_chargers: List[str] = []
+        rejected_parkings: List[str] = []
+        default_charger = self._resolve_charger_waypoint(robot_id, fleet_name, payload, rejected_chargers)
+        default_parking = self._resolve_parking_waypoint(robot_id, fleet_name, payload, rejected_parkings)
         print(f"[REGISTER] Resolved charger for '{robot_id}' ({fleet_name}): {default_charger}, parking: {default_parking}")
+        self._record_waypoint_fallbacks(
+            robot_id, fleet_name, rejected_chargers, default_charger, rejected_parkings, default_parking
+        )
         initial_pos = np.array([x, y, yaw], dtype=np.float64)
 
         # Track in discovered_robots dictionary
