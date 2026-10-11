@@ -172,7 +172,6 @@ class MqttFleetAdapter:
         self.fa_state_pub = None
         self.fleet_control_sub = None
         self.robot_control_sub = None
-        self.camera_control_sub = None
         self.mqtt_connected = False
 
         print(f"==================================================")
@@ -308,9 +307,6 @@ class MqttFleetAdapter:
             )
             self.robot_control_sub = self.node.create_subscription(
                 String, "/rmf/robot_control", self._on_ros2_robot_control, 10
-            )
-            self.camera_control_sub = self.node.create_subscription(
-                String, "/rmf/camera_control", self._on_ros2_camera_control, 10
             )
             self.adapter = Adapter.make("rmf_mqtt_fleet_adapter")
             if not self.adapter:
@@ -626,20 +622,6 @@ class MqttFleetAdapter:
                 self._handle_fleet_control(fleet_name, payload)
         except Exception as e:
             print(f"[FA ERROR] Failed to process ROS 2 fleet control: {e}")
-
-    def _on_ros2_camera_control(self, msg: String):
-        try:
-            payload = json.loads(msg.data)
-            camera_name = payload.get("camera_name", "")
-            topic_prefix = payload.get("topic_prefix", "slam/cameras")
-            enabled = payload.get("enabled", False)
-            clean_name = camera_name.lstrip("/")
-            topic = f"{topic_prefix.rstrip('/')}/{clean_name}/enable"
-            payload_str = "true" if enabled else "false"
-            self.mqtt_client.publish(topic, payload_str, qos=1)
-            print(f"[FA] Forwarded camera control via MQTT: {topic} -> {payload_str}")
-        except Exception as e:
-            print(f"[FA ERROR] Failed to process ROS 2 camera control: {e}")
 
     def _save_discovered_robots(self):
         try:

@@ -51,7 +51,6 @@ class RMFService:
         self.task_pub = None
         self.fleet_control_pub = None
         self.robot_control_pub = None
-        self.camera_control_pub = None
         self.discovered_sub = None
         self.running = False
         # request_id -> {"event": threading.Event, "responses": [payload, ...]} for Task API calls awaiting a reply
@@ -436,11 +435,6 @@ class RMFService:
                 String, "/rmf/robot_control", 10
             )
 
-            # Camera control publisher
-            self.camera_control_pub = self.ros_node.create_publisher(
-                String, "/rmf/camera_control", 10
-            )
-
             # Subscribe to discovered robots published by Fleet Adapter
             def discovered_cb(msg: String):
                 try:
@@ -615,25 +609,6 @@ class RMFService:
                 errors.append(err.get("detail") or err.get("category") or str(err) if isinstance(err, dict) else str(err))
         message = "; ".join(errors) if errors else "Open-RMF 未回應取消請求（任務可能不存在或已結束）。"
         return {"status": "error", "task_id": rmf_task_id, "message": f"取消失敗: {message}"}
-
-    def send_camera_control(self, camera_name: str, topic_prefix: str = "slam/cameras", enabled: bool = False) -> bool:
-        """Dispatches camera enable/disable control to Fleet Adapter via ROS 2."""
-        payload = {
-            "camera_name": camera_name,
-            "topic_prefix": topic_prefix,
-            "enabled": enabled,
-        }
-        if self.camera_control_pub and rclpy.ok():
-            try:
-                msg = String()
-                msg.data = json.dumps(payload)
-                self.camera_control_pub.publish(msg)
-                print(f"[RMF Bridge] Published camera control to /rmf/camera_control: {payload}")
-                return True
-            except Exception as e:
-                print(f"[RMF Bridge ERROR] Failed to publish camera control: {e}")
-                return False
-        return False
 
     def dispatch_task(
         self,

@@ -49,6 +49,16 @@ class CameraDisableRequest(BaseModel):
     camera_name: str
     topic_prefix: Optional[str] = "slam/cameras"
 
+class CameraPtzRequest(BaseModel):
+    camera_name: str
+    action: str = "step"  # 'step', 'continuous', 'preset', 'home', 'stop'
+    pan: float = 0.0      # -180.0 to 180.0 degrees
+    tilt: float = 0.0     # -90.0 to 90.0 degrees
+    zoom: float = 1.0     # 1.0 to 10.0
+    step: float = 5.0     # step size
+    speed: float = 1.0    # speed factor
+    topic_prefix: Optional[str] = "slam/cameras"
+
 # ==========================================
 # In-Memory Global State
 # ==========================================

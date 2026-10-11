@@ -206,10 +206,42 @@ export interface CameraInfo {
   height: number;
   fps: number;
   enabled: boolean;
+  gimbal_topic?: string;
 }
 
 export interface PlantCameraPayload {
   online: boolean;
   rtsp_port: number;
   cameras: CameraInfo[];
+}
+
+export interface GimbalCommandPayload {
+  cmd_id: number | string;
+  action: 'move' | 'rotate' | 'cancel';
+  pan_deg?: number;
+  tilt_deg?: number;
+}
+
+export interface GimbalStatePayload {
+  robot_id: string;
+  pan_deg: number;
+  tilt_deg: number;
+  busy: boolean;
+  current_cmd_id?: number | string | null;
+  timestamp: number;
+}
+
+export interface GimbalResultPayload {
+  robot_id: string;
+  cmd_id: number | string;
+  status: 'succeeded' | 'aborted' | 'canceled' | 'rejected';
+  message: string;
+  pan_deg?: number;
+  tilt_deg?: number;
+  timestamp: number;
+}
+
+export interface GimbalStatusPayload {
+  robot_id: string;
+  online: boolean;
 }

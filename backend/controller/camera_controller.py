@@ -5,7 +5,7 @@ import threading
 import urllib.request
 from typing import Dict
 from fastapi import APIRouter
-from state import CameraDisableRequest
+from state import CameraDisableRequest, CameraPtzRequest
 
 router = APIRouter(tags=["Cameras & Streams"])
 
@@ -15,18 +15,18 @@ router = APIRouter(tags=["Cameras & Streams"])
 # ==========================================
 
 def disable_camera_stream(camera_name: str, topic_prefix: str = "slam/cameras") -> bool:
-    """Instructs Fleet Adapter via ROS 2 to disable the camera stream over MQTT."""
+    """Publishes MQTT false payload directly to the camera's enable topic to turn off stream."""
     try:
-        from rmf_service import rmf_service
-        ok = rmf_service.send_camera_control(camera_name, topic_prefix, enabled=False)
-        if ok:
-            print(f"[Camera Watchdog] Dispatched disable control for '{camera_name}' via Fleet Adapter.")
-            return True
-        else:
-            print(f"[Camera Watchdog WARN] RMF service bridge not ready for camera '{camera_name}'.")
-            return False
+        clean_name = camera_name.lstrip("/")
+        topic = f"{topic_prefix.rstrip('/')}/{clean_name}/enable"
+        mqtt_host = os.environ.get("MQTT_HOST", "127.0.0.1")
+        mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
+        import paho.mqtt.publish as publish
+        publish.single(topic, payload="false", qos=1, hostname=mqtt_host, port=mqtt_port)
+        print(f"[Camera Watchdog] Dispatched disable control for '{clean_name}' via MQTT: {topic} -> false")
+        return True
     except Exception as e:
-        print(f"[Camera Watchdog ERROR] Failed to dispatch camera disable: {e}")
+        print(f"[Camera Watchdog ERROR] Failed to dispatch camera disable via MQTT: {e}")
         return False
 
 # Trackers for MediaMTX zero-reader idle monitoring
@@ -109,3 +109,40 @@ def get_stream_status(stream_name: str):
 def api_disable_camera(req: CameraDisableRequest):
     ok = disable_camera_stream(req.camera_name, req.topic_prefix or "slam/cameras")
     return {"status": "ok" if ok else "error", "camera": req.camera_name}
+
+@router.post("/api/stream/camera/ptz")
+def api_camera_ptz(req: CameraPtzRequest):
+    """Dispatches camera PTZ / Gimbal control command directly via MQTT."""
+    try:
+        import time
+        import paho.mqtt.publish as publish
+        clean_name = req.camera_name.lstrip("/")
+        # Target robot/gimbal namespace: e.g. "carter1" or "ceiling_cams/ceiling_cam_1"
+        if "ceiling_cams" in clean_name:
+            robot_ns = clean_name
+        elif "/" in clean_name:
+            robot_ns = clean_name.split("/")[0]
+        else:
+            robot_ns = clean_name
+
+        topic = f"slam/gimbal/{robot_ns}/command"
+        mqtt_host = os.environ.get("MQTT_HOST", "127.0.0.1")
+        mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
+        cmd_id = int(time.time() * 1000)
+
+        if req.action in ("cancel", "stop"):
+            payload = {"cmd_id": cmd_id, "action": "cancel"}
+        elif req.action in ("move", "preset", "home"):
+            payload = {"cmd_id": cmd_id, "action": "move", "pan_deg": float(req.pan), "tilt_deg": float(req.tilt)}
+        else:  # rotate / step
+            payload = {"cmd_id": cmd_id, "action": "rotate", "pan_deg": float(req.pan), "tilt_deg": float(req.tilt)}
+
+        publish.single(topic, payload=json.dumps(payload), qos=1, hostname=mqtt_host, port=mqtt_port)
+        return {
+            "status": "ok",
+            "camera": req.camera_name,
+            "topic": topic,
+            "payload": payload,
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}

@@ -18,6 +18,7 @@ import {
   Maximize2,
   Minimize2,
 } from 'lucide-react';
+import { CameraPtzController } from '@/components/CameraPtzController';
 
 interface CameraStreamModalProps {
   open: boolean;
@@ -291,6 +292,9 @@ export function CameraStreamModal({
             )}
           </div>
 
+          {/* PTZ / Gimbal Controller Panel */}
+          <CameraPtzController camera={camera} plant={plant} defaultExpanded={true} />
+
           {/* Footer Controls */}
           <div className="p-4 bg-[#0d1322] flex items-center justify-between">
             <Button
@@ -464,6 +468,9 @@ export function CameraStreamModal({
               </div>
             </div>
           </div>
+
+          {/* PTZ / Gimbal Controller Panel */}
+          <CameraPtzController camera={camera} plant={plant} defaultExpanded={true} />
 
           {/* Compact PiP Footer Bar */}
           <div className="px-3 py-1.5 bg-[#0d1322] flex items-center justify-between text-[11px] border-t border-slate-800/80">
