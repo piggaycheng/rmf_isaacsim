@@ -48,6 +48,9 @@ export function PlantCameraList({
 
   // 1. 開啟即時畫面時，自動發送 MQTT 指令啟動該相機 (true)
   const handleOpenStream = (camera: CameraInfo) => {
+    if (selectedCameraForStream && selectedCameraForStream.name !== camera.name) {
+      setCameraEnabled(selectedCameraForStream, false);
+    }
     setCameraEnabled(camera, true);
     setSelectedCameraForStream({ ...camera, enabled: true });
     setStreamModalOpen(true);
@@ -69,7 +72,12 @@ export function PlantCameraList({
   return (
     <div className={`bg-[#0d1424] border border-cyan-800/50 rounded-xl overflow-hidden shadow-lg ${className}`}>
       {/* Top Header / Bar */}
-      <div className={`flex items-center justify-between ${compact ? 'px-3 py-2 bg-[#0f182c]' : 'px-3.5 py-2.5 bg-[#0f182c]'} border-b border-slate-800/80`}>
+      <div
+        onClick={() => setIsExpanded(!isExpanded)}
+        className={`flex items-center justify-between ${
+          compact ? 'px-3 py-2 bg-[#0f182c]' : 'px-3.5 py-2.5 bg-[#0f182c]'
+        } border-b border-slate-800/80 cursor-pointer select-none`}
+      >
         <div className="flex items-center space-x-2.5 min-w-0 flex-1 mr-2">
           <div className={`${compact ? 'w-6 h-6' : 'w-7 h-7'} rounded-lg bg-cyan-500/20 text-cyan-400 flex items-center justify-center shrink-0`}>
             <Video className="w-3.5 h-3.5" />
@@ -118,7 +126,7 @@ export function PlantCameraList({
           </div>
         </div>
 
-        <div className="flex items-center space-x-1 shrink-0">
+        <div className="flex items-center space-x-1 shrink-0" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => setIsExpanded(!isExpanded)}
             className="text-slate-400 hover:text-white p-1 rounded-md hover:bg-slate-800 transition-colors"

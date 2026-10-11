@@ -520,6 +520,9 @@ export function WorldMap({
       <main className="flex-1 h-full relative">
         <div ref={mapContainerRef} className="w-full h-full" />
 
+        {/* Map Top-Right: Camera Stream PiP Mount Target */}
+        <div id="map-camera-pip-target" className="absolute top-4 right-4 z-20 pointer-events-auto" />
+
         {/* Floating Map Controls (Top-Left of map area) */}
         <div className="absolute top-4 left-4 z-10 flex items-center space-x-2 pointer-events-auto">
           {/* Style Selector */}
