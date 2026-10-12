@@ -450,8 +450,21 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         // Pulsing circle around robot
         const isMoving = robot.status === 'moving';
         const isEstopped = robot.status === 'emergency_stop' || !!robot.emergency_stop;
-        const statusColor = isEstopped ? '#ef4444' : isMoving ? '#06b6d4' : '#10b981';
-        const arrowColor = isEstopped ? '#f87171' : isMoving ? '#22d3ee' : '#34d399';
+        const isOffGraph = Boolean(robot.is_off_graph || robot.status === 'off_graph');
+        const statusColor = isEstopped ? '#ef4444' : isOffGraph ? '#f59e0b' : isMoving ? '#06b6d4' : '#10b981';
+        const arrowColor = isEstopped ? '#f87171' : isOffGraph ? '#fbbf24' : isMoving ? '#22d3ee' : '#34d399';
+
+        // Outer dashed warning circle for off-graph robots
+        if (isOffGraph && !isEstopped) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(0, 0, 27, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(245, 158, 11, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 4]);
+          ctx.stroke();
+          ctx.restore();
+        }
 
         // 1. AMR Circular Footprint (Dark backdrop + glowing border for high contrast)
         ctx.beginPath();
@@ -465,12 +478,14 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.arc(0, 0, 20, 0, Math.PI * 2);
         ctx.fillStyle = isEstopped
           ? 'rgba(239, 68, 68, 0.35)'
+          : isOffGraph
+          ? 'rgba(245, 158, 11, 0.3)'
           : isMoving
           ? 'rgba(6, 182, 212, 0.3)'
           : 'rgba(16, 185, 129, 0.25)';
         ctx.fill();
         ctx.strokeStyle = statusColor;
-        ctx.lineWidth = isEstopped ? 3 : 2;
+        ctx.lineWidth = isEstopped || isOffGraph ? 2.5 : 2;
         ctx.shadowColor = statusColor;
         ctx.shadowBlur = 8;
         ctx.stroke();
@@ -511,11 +526,15 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         // Background pill
         const nameText = isEstopped
           ? `${robot.name} 🛑 [急停]`
+          : isOffGraph
+          ? `${robot.name} ⚠️ [偏離路網 ${robot.off_graph_distance || '>3'}m]`
           : `${robot.name} (${Math.round(robot.battery)}%) ${isMoving ? '▶ 運行中' : ''}`;
         const textWidth = ctx.measureText(nameText).width;
         ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
         ctx.strokeStyle = isEstopped
           ? '#ef4444'
+          : isOffGraph
+          ? '#f59e0b'
           : isMoving
           ? '#06b6d4'
           : (robot.battery > 30 ? '#10b981' : '#f43f5e');
@@ -528,7 +547,7 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.stroke();
         ctx.shadowBlur = 0;
 
-        ctx.fillStyle = isEstopped ? '#fca5a5' : '#f8fafc';
+        ctx.fillStyle = isEstopped ? '#fca5a5' : isOffGraph ? '#fcd34d' : '#f8fafc';
         ctx.fillText(nameText, 0, -24);
 
         ctx.restore();

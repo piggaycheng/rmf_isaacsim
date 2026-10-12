@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from fastapi import WebSocket
 from pydantic import BaseModel
 from PIL import Image
@@ -131,6 +131,108 @@ def is_robot_offline(fleet_name: str, robot_id: str) -> bool:
     if not disc:
         return False
     return disc.get("status") == "offline" or (time.time() - disc.get("last_seen", 0)) > DISCOVERY_OFFLINE_S
+
+
+def _point_to_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+    import math
+    abx = bx - ax
+    aby = by - ay
+    seg_len_sq = abx * abx + aby * aby
+    if seg_len_sq < 1e-9:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / seg_len_sq))
+    proj_x = ax + t * abx
+    proj_y = ay + t * aby
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+def compute_nav_graph_distance(fleet_name: str, x: float, y: float) -> Optional[float]:
+    """Computes shortest distance from (x, y) to active navigation graph or 0.yaml."""
+    import math
+    if os.path.exists(ACTIVE_MAP_FILE):
+        try:
+            with open(ACTIVE_MAP_FILE, "r", encoding="utf-8") as mf:
+                mdata = json.load(mf)
+            wps = mdata.get("waypoints", [])
+            lanes = mdata.get("lanes", [])
+            wp_map = {w.get("id"): (float(w.get("x", 0.0)), float(w.get("y", 0.0))) for w in wps if w.get("id")}
+            min_dist = float("inf")
+            for wx, wy in wp_map.values():
+                d = math.hypot(x - wx, y - wy)
+                if d < min_dist:
+                    min_dist = d
+            for l in lanes:
+                sid, eid = l.get("start_id"), l.get("end_id")
+                if sid in wp_map and eid in wp_map:
+                    ax, ay = wp_map[sid]
+                    bx, by = wp_map[eid]
+                    d = _point_to_segment_distance(x, y, ax, ay, bx, by)
+                    if d < min_dist:
+                        min_dist = d
+            if min_dist != float("inf"):
+                return min_dist
+        except Exception:
+            pass
+
+    for fname in ["0.yaml"]:
+        ypath = os.path.join(NAV_GRAPHS_DIR, fname)
+        if os.path.exists(ypath):
+            try:
+                with open(ypath, "r", encoding="utf-8") as yf:
+                    yd = yaml.safe_load(yf) or {}
+                for lvl in yd.get("levels", {}).values():
+                    raw_v = lvl.get("vertices", [])
+                    raw_l = lvl.get("lanes", [])
+                    v_coords = [(float(v[0]), float(v[1])) for v in raw_v]
+                    min_dist = float("inf")
+                    for vx, vy in v_coords:
+                        d = math.hypot(x - vx, y - vy)
+                        if d < min_dist:
+                            min_dist = d
+                    for ln in raw_l:
+                        if len(ln) >= 2 and 0 <= ln[0] < len(v_coords) and 0 <= ln[1] < len(v_coords):
+                            (ax, ay), (bx, by) = v_coords[ln[0]], v_coords[ln[1]]
+                            d = _point_to_segment_distance(x, y, ax, ay, bx, by)
+                            if d < min_dist:
+                                min_dist = d
+                    if min_dist != float("inf"):
+                        return min_dist
+            except Exception:
+                pass
+    return None
+
+
+def is_robot_off_graph(fleet_name: str, robot_id: str, x: Optional[float] = None, y: Optional[float] = None) -> Tuple[bool, float]:
+    """Determines whether a robot is excessively off-graph (> 3.0m).
+
+    Returns: (is_off_graph: bool, distance: float)
+    """
+    off_robots = fa_state.get("off_graph_robots", {})
+    if isinstance(off_robots, dict):
+        key = f"{fleet_name}/{robot_id}"
+        if key in off_robots:
+            return True, float(off_robots[key].get("distance", 0.0))
+        for k, v in off_robots.items():
+            if isinstance(v, dict) and v.get("robot_id") == robot_id:
+                return True, float(v.get("distance", 0.0))
+
+    disc = discovered_robots.get(f"{fleet_name}_{robot_id}")
+    if disc and "is_off_graph" in disc:
+        return bool(disc.get("is_off_graph")), float(disc.get("off_graph_distance", 0.0))
+
+    if x is None or y is None:
+        rob = current_robots.get(robot_id)
+        if rob:
+            x, y = rob.get("x"), rob.get("y")
+        elif disc:
+            x, y = disc.get("x"), disc.get("y")
+
+    if x is not None and y is not None:
+        dist = compute_nav_graph_distance(fleet_name, float(x), float(y))
+        if dist is not None:
+            return dist > 3.0, round(dist, 2)
+
+    return False, 0.0
 
 
 def nav_graph_file_sha(graph_idx: int) -> Optional[str]:

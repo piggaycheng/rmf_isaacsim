@@ -2048,6 +2048,7 @@ export function App() {
                       <div className="space-y-2.5">
                         {robots.map((robot) => {
                           const isEstopped = robot.emergency_stop || robot.status === 'emergency_stop';
+                          const isOffGraph = Boolean(robot.is_off_graph || robot.status === 'off_graph');
                           const hasActiveTask = Boolean(
                             robot.task_id ||
                             (robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving')
@@ -2056,19 +2057,26 @@ export function App() {
                             <Card
                               key={robot.id}
                               className={`bg-slate-900/60 border-slate-800 shadow-none transition-colors ${
-                                isEstopped ? 'border-rose-800/80 bg-rose-950/20' : ''
+                                isEstopped
+                                  ? 'border-rose-800/80 bg-rose-950/20'
+                                  : isOffGraph
+                                  ? 'border-amber-500/60 bg-amber-950/20'
+                                  : ''
                               }`}
                             >
                               <CardContent className="p-3 space-y-2">
                                 <div className="flex items-center justify-between">
                                   <span className="font-semibold text-xs text-slate-200 flex items-center space-x-1.5">
                                     {isEstopped && <OctagonAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
+                                    {!isEstopped && isOffGraph && <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
                                     <span className="truncate">{robot.name}</span>
                                   </span>
                                   <Badge
                                     variant={
                                       isEstopped
                                         ? 'destructive'
+                                        : isOffGraph
+                                        ? 'warning'
                                         : robot.status === 'moving'
                                         ? 'success'
                                         : robot.status === 'charging' || robot.status === 'paused'
@@ -2078,11 +2086,17 @@ export function App() {
                                         : 'secondary'
                                     }
                                     className={`text-[10px] uppercase font-mono ${
-                                      isEstopped ? 'bg-rose-600 text-white animate-pulse' : ''
+                                      isEstopped
+                                        ? 'bg-rose-600 text-white animate-pulse'
+                                        : isOffGraph
+                                        ? 'bg-amber-600/30 text-amber-300 border-amber-500/50'
+                                        : ''
                                     }`}
                                   >
                                     {isEstopped
                                       ? 'EMERGENCY STOP'
+                                      : isOffGraph
+                                      ? `偏離路網 (${robot.off_graph_distance || '>3'}m)`
                                       : robot.status === 'idle'
                                       ? 'IDLE'
                                       : robot.status.toUpperCase()}
@@ -2095,17 +2109,30 @@ export function App() {
                                   </span>
                                 </div>
                                 <div
-                                  className={`text-[10px] px-2 py-1 rounded truncate ${
+                                  className={`text-[10px] px-2 py-1 rounded ${
                                     isEstopped
-                                      ? 'bg-rose-950/60 text-rose-300 border border-rose-900/50'
-                                      : 'bg-slate-950 text-slate-400'
+                                      ? 'bg-rose-950/60 text-rose-300 border border-rose-900/50 truncate'
+                                      : isOffGraph
+                                      ? 'bg-amber-950/60 text-amber-200 border border-amber-600/50 whitespace-normal leading-relaxed'
+                                      : 'bg-slate-950 text-slate-400 truncate'
                                   }`}
                                 >
-                                  {isEstopped
-                                    ? '🛑 緊急停車中（動作暫停等待解除）'
-                                    : robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving'
-                                    ? robot.current_task
-                                    : '在線待命中'}
+                                  {isEstopped ? (
+                                    '🛑 緊急停車中（動作暫停等待解除）'
+                                  ) : isOffGraph ? (
+                                    <div className="space-y-0.5">
+                                      <div className="font-semibold text-amber-300 flex items-center gap-1">
+                                        <span>⚠️ 偏離路網過遠 ({robot.off_graph_distance ? `${robot.off_graph_distance}m` : '>3.0m'})</span>
+                                      </div>
+                                      <div className="text-[10px] text-amber-300/80">
+                                        超出吸附上限 (3.0m)，無法操控接單。請手動移車或在路網編輯器中將路網連過去。
+                                      </div>
+                                    </div>
+                                  ) : robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving' ? (
+                                    robot.current_task
+                                  ) : (
+                                    '在線待命中'
+                                  )}
                                 </div>
 
                                 {/* Emergency Stop / Release Action Row */}

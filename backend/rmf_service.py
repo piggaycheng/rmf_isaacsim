@@ -308,10 +308,14 @@ class RMFService:
 
                     # Keep the previous task id while offline so completion is only inferred after reconnecting.
                     task_id = r.task_id or (prev_task_id if is_offline else "")
+                    is_off_graph, off_dist = state.is_robot_off_graph(fleet_name, r_id, float(r.location.x), float(r.location.y))
                     if is_estopped:
                         current_task = f"緊急停車（{task_id}）" if task_id else "緊急停車"
                     elif is_offline:
                         current_task = f"離線（{task_id}）" if task_id else "離線"
+                    elif is_off_graph:
+                        mode_str = "off_graph"
+                        current_task = f"偏離路網 ({off_dist}m) · 禁止派工"
                     else:
                         current_task = r.task_id or ("正在導航" if mode_str == "moving" else "已暫停" if mode_str == "paused" else "在線待命中")
 
@@ -328,6 +332,8 @@ class RMFService:
                         "task_id": task_id,
                         "emergency_stop": is_estopped,
                         "online": not is_offline,
+                        "is_off_graph": is_off_graph,
+                        "off_graph_distance": off_dist,
                     }
 
                     if is_offline:
@@ -787,6 +793,40 @@ class RMFService:
                 "request_id": None,
                 "message": f"車輛 '{robot_id}' 處於緊急停車狀態，請先解除緊急停車。",
             }
+
+        # Check if robot is off-graph
+        if robot_id and robot_id != "any":
+            is_off, off_dist = state.is_robot_off_graph(target_fleet or "", robot_id)
+            if is_off:
+                return {
+                    "status": "error",
+                    "task_id": None,
+                    "request_id": None,
+                    "message": f"車輛 '{robot_id}' 偏離路網過遠 ({off_dist}m > 3.0m)，無法操控接單！請手動移車或在路網編輯器中將路網連至車輛位置。",
+                }
+        else:
+            # Auto dispatch: check if all active robots are off-graph
+            online_robots = [
+                r for r in state.current_robots.values()
+                if (not target_fleet or r.get("fleet") == target_fleet)
+                and r.get("online", True)
+                and not r.get("emergency_stop", False)
+            ]
+            if online_robots:
+                all_off = True
+                for r in online_robots:
+                    is_off, _ = state.is_robot_off_graph(r.get("fleet", ""), r.get("id"))
+                    if not is_off:
+                        all_off = False
+                        break
+                if all_off:
+                    scope_str = f"車隊 '{target_fleet}' 內" if target_fleet else "目前系統中"
+                    return {
+                        "status": "error",
+                        "task_id": None,
+                        "request_id": None,
+                        "message": f"{scope_str}所有在線車輛皆偏離路網過遠 (> 3.0m)，無法操控接單！請先手動移車或在路網編輯器中將路網連過去。",
+                    }
 
         unreachable = self._unknown_places_for_adapter(places, target_fleet if robot_id and robot_id != "any" else None)
         if unreachable:

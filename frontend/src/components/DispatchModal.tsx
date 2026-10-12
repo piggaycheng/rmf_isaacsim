@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { Button } from './ui/button';
 import { Waypoint, Robot } from '@/types/rmf';
-import { Send, Navigation, PackageCheck, Repeat } from 'lucide-react';
+import { Send, Navigation, PackageCheck, Repeat, AlertTriangle } from 'lucide-react';
 
 interface DispatchModalProps {
   open: boolean;
@@ -32,6 +32,10 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
   const [selectedRobotId, setSelectedRobotId] = useState<string>('any');
   const [validationError, setValidationError] = useState<string>('');
 
+  const allRobotsOffGraph = robots.length > 0 && robots.every((r) => r.is_off_graph || r.status === 'off_graph');
+  const selectedRobot = robots.find((r) => r.id === selectedRobotId);
+  const isSelectedRobotOffGraph = Boolean(selectedRobot && (selectedRobot.is_off_graph || selectedRobot.status === 'off_graph'));
+
   React.useEffect(() => {
     if (selectedWaypoint) {
       setTargetWaypointId(selectedWaypoint.id);
@@ -40,11 +44,21 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
 
   React.useEffect(() => {
     setValidationError('');
-  }, [taskType, targetWaypointId, destinationWaypointId]);
+  }, [taskType, targetWaypointId, destinationWaypointId, selectedRobotId]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setValidationError('');
+
+    if (isSelectedRobotOffGraph) {
+      setValidationError(`車輛 '${selectedRobot?.name}' 偏離路網過遠 (${selectedRobot?.off_graph_distance || '>3'}m)，無法指派任務！`);
+      return;
+    }
+
+    if (selectedRobotId === 'any' && allRobotsOffGraph) {
+      setValidationError('目前所有車輛皆偏離路網過遠 (>3.0m)，無法派遣任務！');
+      return;
+    }
 
     if (!targetWaypointId) {
       setValidationError('請選擇目標站點！');
@@ -79,7 +93,11 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
     onOpenChange(false);
   };
 
-  const isSubmitDisabled = !targetWaypointId || (taskType === 'delivery' && (!destinationWaypointId || destinationWaypointId === targetWaypointId));
+  const isSubmitDisabled =
+    !targetWaypointId ||
+    (taskType === 'delivery' && (!destinationWaypointId || destinationWaypointId === targetWaypointId)) ||
+    (selectedRobotId === 'any' && allRobotsOffGraph) ||
+    isSelectedRobotOffGraph;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -197,17 +215,39 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
             onChange={(e) => setSelectedRobotId(e.target.value)}
             className="w-full bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-primary"
           >
-            <option value="any">由 RMF 最佳化指派 (Auto Optimal)</option>
+            <option value="any" disabled={allRobotsOffGraph}>
+              {allRobotsOffGraph
+                ? '由 RMF 最佳化指派 (Auto) - ⚠️ 全車偏離路網無法指派'
+                : '由 RMF 最佳化指派 (Auto Optimal)'}
+            </option>
             {robots.map((r) => {
               const isEstopped = r.emergency_stop || r.status === 'emergency_stop';
+              const isOff = Boolean(r.is_off_graph || r.status === 'off_graph');
+              const statusLabel = isEstopped
+                ? '🛑 緊急停車 (無法指派)'
+                : isOff
+                ? `⚠️ 偏離路網 (${r.off_graph_distance || '>3'}m - 無法操控)`
+                : r.status;
               return (
-                <option key={r.id} value={r.id} disabled={isEstopped}>
-                  {r.name} ({r.fleet}) - 電量 {Math.round(r.battery)}% [{isEstopped ? '🛑 緊急停車 (無法指派)' : r.status}]
+                <option key={r.id} value={r.id} disabled={isEstopped || isOff}>
+                  {r.name} ({r.fleet}) - 電量 {Math.round(r.battery)}% [{statusLabel}]
                 </option>
               );
             })}
           </select>
         </div>
+
+        {allRobotsOffGraph && (
+          <div className="p-2.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-medium space-y-1">
+            <div className="flex items-center gap-1 font-semibold">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>目前車隊所有在線車輛皆偏離路網過遠 (&gt;3.0m)</span>
+            </div>
+            <p className="text-[11px] text-amber-300/80 leading-relaxed">
+              Open-RMF 無法對偏離路網的車輛進行路徑規劃與操控接單。請手動移車至路網附近，或在路網編輯器中將路網連至車輛位置。
+            </p>
+          </div>
+        )}
 
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>

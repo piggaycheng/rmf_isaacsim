@@ -64,11 +64,13 @@ export interface Robot {
   y: number;
   yaw: number;
   battery: number; // 0 - 100
-  status: 'idle' | 'moving' | 'charging' | 'paused' | 'offline' | 'emergency_stop' | 'error';
+  status: 'idle' | 'moving' | 'charging' | 'paused' | 'offline' | 'emergency_stop' | 'error' | 'off_graph';
   current_task?: string;
   task_id?: string;
   emergency_stop?: boolean;
   online?: boolean;
+  is_off_graph?: boolean;
+  off_graph_distance?: number;
   path?: { x: number; y: number }[];
 }
 
@@ -162,6 +164,8 @@ export interface DiscoveredRobot {
   };
   default_parking?: string;
   default_charger?: string;
+  is_off_graph?: boolean;
+  off_graph_distance?: number;
 }
 
 export interface Task {

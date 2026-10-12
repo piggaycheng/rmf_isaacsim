@@ -84,6 +84,8 @@ class ManagedRobot:
         self.status = "idle"
         self.last_heartbeat = time.time()
         self.is_online = True
+        self.is_off_graph = False
+        self.off_graph_distance = 0.0
 
         # Navigation & Activity Execution State
         self.cmd_id = 0
@@ -301,6 +303,86 @@ class MqttFleetAdapter:
         print(f"[RMF -> AMR] Dispatched deferred {payload.get('action')} (cmd_id: {robot.cmd_id}) to '{robot.name}' via {cmd_topic}")
 
 
+    @staticmethod
+    def _point_to_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        abx = bx - ax
+        aby = by - ay
+        seg_len_sq = abx * abx + aby * aby
+        if seg_len_sq < 1e-9:
+            return math.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / seg_len_sq))
+        proj_x = ax + t * abx
+        proj_y = ay + t * aby
+        return math.hypot(px - proj_x, py - proj_y)
+
+    def _compute_distance_to_graph(self, fleet_name: str, x: float, y: float) -> float:
+        f_info = self.fleet_waypoint_info.get(fleet_name, {})
+        v_coords = f_info.get("vertex_coords", [])
+        segments = f_info.get("lane_segments", [])
+        if not v_coords and not segments:
+            coords = f_info.get("coords", {})
+            v_coords = list(coords.values())
+        if not v_coords and not segments:
+            return float("inf")
+        min_dist = float("inf")
+        for vx, vy in v_coords:
+            d = math.hypot(x - vx, y - vy)
+            if d < min_dist:
+                min_dist = d
+        for (ax, ay), (bx, by) in segments:
+            d = self._point_to_segment_distance(x, y, ax, ay, bx, by)
+            if d < min_dist:
+                min_dist = d
+        return min_dist
+
+    def _parse_nav_waypoints(self, nav_file: str):
+        all_wps = []
+        charger_wps = []
+        parking_wps = []
+        wp_coords: Dict[str, tuple] = {}
+        all_vertex_coords: List[Tuple[float, float]] = []
+        lane_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        if os.path.exists(nav_file):
+            try:
+                with open(nav_file, "r", encoding="utf-8") as yf:
+                    nav_dict = yaml.safe_load(yf) or {}
+                for lvl_data in nav_dict.get("levels", {}).values():
+                    raw_vertices = lvl_data.get("vertices", [])
+                    v_positions = []
+                    for v in raw_vertices:
+                        vx, vy = float(v[0]), float(v[1])
+                        v_positions.append((vx, vy))
+                        all_vertex_coords.append((vx, vy))
+                        wp_name = None
+                        is_chg = False
+                        is_park = False
+                        if len(v) >= 3 and isinstance(v[2], dict):
+                            wp_name = v[2].get("name")
+                            is_chg = v[2].get("is_charger", False)
+                            is_park = v[2].get("is_parking_spot", False)
+                        elif len(v) >= 4 and isinstance(v[3], str):
+                            wp_name = v[3]
+                            meta = v[4] if len(v) >= 5 and isinstance(v[4], dict) else {}
+                            is_chg = meta.get("is_charger", False)
+                            is_park = meta.get("is_parking_spot", False)
+
+                        if wp_name:
+                            all_wps.append(wp_name)
+                            wp_coords[wp_name] = (vx, vy)
+                            if is_chg:
+                                charger_wps.append(wp_name)
+                            if is_park:
+                                parking_wps.append(wp_name)
+
+                    for lane in lvl_data.get("lanes", []):
+                        if len(lane) >= 2:
+                            idx1, idx2 = lane[0], lane[1]
+                            if 0 <= idx1 < len(v_positions) and 0 <= idx2 < len(v_positions):
+                                lane_segments.append((v_positions[idx1], v_positions[idx2]))
+            except Exception as e:
+                print(f"[WARN] Failed to parse nav graph {nav_file}: {e}")
+        return all_wps, charger_wps, parking_wps, wp_coords, lane_segments, all_vertex_coords
+
     def _init_rmf(self):
         """Initializes ROS 2 and Open-RMF Adapter."""
         try:
@@ -351,31 +433,15 @@ class MqttFleetAdapter:
                 if not os.path.exists(nav_path):
                     nav_path = self.nav_graph_path
 
-                # Parse waypoints from nav_path
-                all_wps = []
-                charger_wps = []
-                parking_wps = []
-                if os.path.exists(nav_path):
-                    try:
-                        with open(nav_path, "r", encoding="utf-8") as yf:
-                            nav_dict = yaml.safe_load(yf) or {}
-                        for lvl_data in nav_dict.get("levels", {}).values():
-                            for v in lvl_data.get("vertices", []):
-                                if len(v) >= 3 and isinstance(v[2], dict):
-                                    wp_name = v[2].get("name")
-                                    if wp_name:
-                                        all_wps.append(wp_name)
-                                        if v[2].get("is_charger", False):
-                                            charger_wps.append(wp_name)
-                                        if v[2].get("is_parking_spot", False):
-                                            parking_wps.append(wp_name)
-                    except Exception as e:
-                        print(f"[WARN] Failed to parse nav graph {nav_path} for fleet [{f_name}]: {e}")
+                all_wps, charger_wps, parking_wps, wp_coords, lane_segments, vertex_coords = self._parse_nav_waypoints(nav_path)
 
                 self.fleet_waypoint_info[f_name] = {
                     "all": all_wps,
                     "chargers": charger_wps,
                     "parkings": parking_wps,
+                    "coords": wp_coords,
+                    "lane_segments": lane_segments,
+                    "vertex_coords": vertex_coords,
                     "graph_idx": g_idx,
                     "graph_sha": nav_graph_fingerprint(nav_path),
                 }
@@ -411,6 +477,7 @@ class MqttFleetAdapter:
                         cfg.default_max_merge_lane_distance = 5.0
                         handle = self.adapter.add_easy_fleet(cfg)
                         self.fleet_handles[f_name] = handle
+                        self._setup_fleet_consideration(handle, f_name)
                         print(f"[RMF] Successfully registered fleet [{f_name}] (Footprint: {radius}m, LinVel: {lin_v}m/s, AngVel: {ang_v}rad/s, Graph {g_idx}) into Open-RMF!")
                 except Exception as e:
                     print(f"[ERROR] Failed to register fleet [{f_name}]: {e}")
@@ -423,29 +490,16 @@ class MqttFleetAdapter:
                 self.fleet_handle = self.adapter.add_easy_fleet(self.fleet_config)
                 self.fleet_handles[self.fleet_name] = self.fleet_handle
                 self.configured_fleets = {self.fleet_name}
+                self._setup_fleet_consideration(self.fleet_handle, self.fleet_name)
 
-                # Parse fallback nav waypoints
-                all_wps, charger_wps, parking_wps = [], [], []
-                if os.path.exists(self.nav_graph_path):
-                    try:
-                        with open(self.nav_graph_path, "r", encoding="utf-8") as yf:
-                            nav_dict = yaml.safe_load(yf) or {}
-                        for lvl_data in nav_dict.get("levels", {}).values():
-                            for v in lvl_data.get("vertices", []):
-                                if len(v) >= 3 and isinstance(v[2], dict):
-                                    wp_name = v[2].get("name")
-                                    if wp_name:
-                                        all_wps.append(wp_name)
-                                        if v[2].get("is_charger", False):
-                                            charger_wps.append(wp_name)
-                                        if v[2].get("is_parking_spot", False):
-                                            parking_wps.append(wp_name)
-                    except Exception:
-                        pass
+                all_wps, charger_wps, parking_wps, wp_coords, lane_segments, vertex_coords = self._parse_nav_waypoints(self.nav_graph_path)
                 self.fleet_waypoint_info[self.fleet_name] = {
                     "all": all_wps,
                     "chargers": charger_wps,
                     "parkings": parking_wps,
+                    "coords": wp_coords,
+                    "lane_segments": lane_segments,
+                    "vertex_coords": vertex_coords,
                     "graph_idx": 0,
                     "graph_sha": nav_graph_fingerprint(self.nav_graph_path),
                 }
@@ -456,6 +510,51 @@ class MqttFleetAdapter:
             print(f"[ERROR] Failed to start live Open-RMF Adapter: {e}")
             print("[WARN] Switching to Mock/Standalone mode.")
             self.mock_rmf = True
+
+    def _setup_fleet_consideration(self, handle: Any, fleet_name: str):
+        """Register task consideration callbacks on FleetUpdateHandle to block bidding if all robots in fleet are off-graph."""
+        if not handle or not hasattr(handle, "more"):
+            return
+        try:
+            fuh = handle.more()
+            if not fuh:
+                return
+
+            def _check_fleet_availability(fn: str) -> bool:
+                with self.lock:
+                    fleet_robs = [r for r in self.robots.values() if r.fleet_name == fn]
+                    if not fleet_robs:
+                        return True
+                    eligible = [
+                        r for r in fleet_robs
+                        if r.is_online and not r.is_estopped and not r.is_off_graph
+                    ]
+                    return len(eligible) > 0
+
+            def _consider_patrol(req):
+                import rmf_adapter.fleet_update_handle as _fuh
+                c = _fuh.Confirmation()
+                if not _check_fleet_availability(fleet_name):
+                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>3.0m) 或無法運作，拒絕競標接單"])
+                    return c
+                c.accept()
+                return c
+
+            def _consider_delivery(req):
+                import rmf_adapter.fleet_update_handle as _fuh
+                c = _fuh.Confirmation()
+                if not _check_fleet_availability(fleet_name):
+                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>3.0m) 或無法運作，拒絕競標接單"])
+                    return c
+                c.accept()
+                return c
+
+            fuh.consider_patrol_requests(_consider_patrol)
+            fuh.consider_delivery_requests(_consider_delivery, _consider_delivery)
+            fuh.consider_composed_requests(_consider_patrol)
+            print(f"[RMF] Registered off-graph bid guard for fleet [{fleet_name}] successfully.")
+        except Exception as e:
+            print(f"[RMF WARN] Could not register consideration callbacks for [{fleet_name}]: {e}")
 
     # ==========================================================================
     # MQTT Callbacks & Connection
@@ -640,6 +739,15 @@ class MqttFleetAdapter:
                     for key, msgs in sorted(list(self.waypoint_warnings.items()))
                     for m in msgs
                 ],
+                "off_graph_robots": {
+                    f"{r.fleet_name}/{r.name}": {
+                        "fleet": r.fleet_name,
+                        "robot_id": r.name,
+                        "distance": r.off_graph_distance,
+                    }
+                    for r in list(self.robots.values())
+                    if r.is_off_graph
+                },
                 "timestamp": time.time(),
             })
             self.fa_state_pub.publish(msg)
@@ -820,10 +928,14 @@ class MqttFleetAdapter:
             "default_charger": default_charger,
             "first_seen": now,
         })
+        dist_to_graph = self._compute_distance_to_graph(fleet_name, x, y)
+        is_off_graph = dist_to_graph > 3.0
         disc["last_seen"] = now
         disc["x"] = x
         disc["y"] = y
         disc["yaw"] = yaw
+        disc["is_off_graph"] = is_off_graph
+        disc["off_graph_distance"] = round(dist_to_graph, 2)
         if "specs" in payload:
             disc["specs"] = payload["specs"]
         disc["status"] = "idle"
@@ -854,6 +966,8 @@ class MqttFleetAdapter:
                 existing_robot.position = initial_pos
                 existing_robot.map_name = level_name
                 existing_robot.fleet_name = fleet_name
+                existing_robot.is_off_graph = is_off_graph
+                existing_robot.off_graph_distance = round(dist_to_graph, 2)
                 if default_charger:
                     existing_robot.charger_waypoint = default_charger
                 existing_robot.last_heartbeat = time.time()
@@ -865,12 +979,6 @@ class MqttFleetAdapter:
                 # A deferred command was never sent to the robot, so it is not stale: dispatch it below.
                 if existing_robot.current_execution and existing_robot.deferred_cmd_payload is None:
                     print(f"[REGISTER WARN] Aborting stale execution for '{robot_id}' from prior session (cmd_id: {existing_robot.cmd_id}).")
-                    if existing_robot.update_handle:
-                        try:
-                            existing_robot.update_handle.more().log_error(f"Robot '{robot_id}' re-registered; aborting previous session execution.")
-                            existing_robot.update_handle.more().replan()
-                        except Exception as e:
-                            print(f"[RMF WARN] Error replanning on re-register: {e}")
                     existing_robot.current_execution = None
                     existing_robot.target_position = None
                     existing_robot.last_cmd_payload = None
@@ -919,7 +1027,36 @@ class MqttFleetAdapter:
                     self._send_register_ack(robot_id, success=False, msg=str(e), fleet_name=fleet_name)
                     return
 
-                # add_robot() 回傳 None 時應回錯誤，不要回 success
+                # 若直接 add_robot 回傳 None（例如車輛開機位置距離路網超過 RMF 3m 初始吸附上限），
+                # 嘗試使用該車隊路網最近站點作為初始錨點完成 Open-RMF 註冊，並立即以真實座標更新
+                if update_handle is None:
+                    f_info = self.fleet_waypoint_info.get(fleet_name, {})
+                    coords_dict = f_info.get("coords", {})
+                    if coords_dict:
+                        nearest_wp_name, (n_x, n_y) = min(
+                            coords_dict.items(),
+                            key=lambda item: (item[1][0] - x) ** 2 + (item[1][1] - y) ** 2,
+                        )
+                        dist = ((n_x - x) ** 2 + (n_y - y) ** 2) ** 0.5
+                        print(
+                            f"[REGISTER WARN] 車輛 '{robot_id}' 初始座標 ({x:.2f}, {y:.2f}) 距路網最近點 '{nearest_wp_name}' {dist:.2f}m (超出 RMF 吸附上限)。嘗試以 '{nearest_wp_name}' ({n_x:.2f}, {n_y:.2f}) 作為初始錨點註冊..."
+                        )
+                        snapped_state = rmf_easy.RobotState(
+                            level_name, np.array([n_x, n_y, yaw], dtype=np.float64), 1.0
+                        )
+                        try:
+                            update_handle = target_handle.add_robot(
+                                robot_id, snapped_state, robot_config, callbacks
+                            )
+                            if update_handle is not None:
+                                update_handle.update(initial_state, None)
+                                print(
+                                    f"[REGISTER SUCCESS] ✅ 車輛 '{robot_id}' 透過錨點 '{nearest_wp_name}' 成功完成 Open-RMF 納管並同步真實座標 ({x:.2f}, {y:.2f})！"
+                                )
+                        except Exception as snap_err:
+                            print(f"[REGISTER ERROR] Snapped registration failed for '{robot_id}': {snap_err}")
+
+                # add_robot() 與錨點 fallback 皆失敗時回傳錯誤
                 if update_handle is None:
                     print(f"[ERROR] target_handle.add_robot() returned None for '{robot_id}' in fleet [{fleet_name}]!")
                     self._send_register_ack(
@@ -942,6 +1079,10 @@ class MqttFleetAdapter:
                 update_handle=update_handle,
                 charger_waypoint=default_charger,
             )
+            managed_robot.is_off_graph = is_off_graph
+            managed_robot.off_graph_distance = round(dist_to_graph, 2)
+            if is_off_graph:
+                print(f"[OFF-GRAPH WARN] ⚠️ 車輛 '{robot_id}' 距離路網 {dist_to_graph:.2f}m > 3.0m，標記為偏離路網，禁止競標與操控！")
             self.robots[robot_key] = managed_robot
 
             # Restore fleet pause / persisted operator e-stop for a newly added robot
@@ -982,6 +1123,9 @@ class MqttFleetAdapter:
         bat_val = float(payload.get("battery", 100.0))
         status_val = payload.get("status", "idle")
 
+        dist_to_graph = self._compute_distance_to_graph(fleet_name, x_val, y_val)
+        is_off_graph = dist_to_graph > 3.0
+
         with self.lock:
             if robot_key in self.discovered_robots:
                 disc = self.discovered_robots[robot_key]
@@ -997,6 +1141,8 @@ class MqttFleetAdapter:
                     disc["status"] = status_val
                 disc["last_seen"] = now
                 disc["is_adopted"] = fleet_name in self.configured_fleets
+                disc["is_off_graph"] = is_off_graph
+                disc["off_graph_distance"] = round(dist_to_graph, 2)
             else:
                 self.discovered_robots[robot_key] = {
                     "robot_id": robot_id,
@@ -1009,6 +1155,8 @@ class MqttFleetAdapter:
                     "first_seen": now,
                     "last_seen": now,
                     "is_adopted": fleet_name in self.configured_fleets,
+                    "is_off_graph": is_off_graph,
+                    "off_graph_distance": round(dist_to_graph, 2),
                 }
 
             robot = self._get_robot(fleet_name, robot_id)
@@ -1033,6 +1181,8 @@ class MqttFleetAdapter:
             robot.status = status
             robot.last_heartbeat = time.time()
             robot.is_online = True
+            robot.is_off_graph = is_off_graph
+            robot.off_graph_distance = round(dist_to_graph, 2)
 
             if was_offline:
                 print(f"[HEARTBEAT] Robot '{robot_id}' came back online via heartbeat. Restoring RMF availability.")
@@ -1284,12 +1434,17 @@ class MqttFleetAdapter:
             dock_name = getattr(destination, "dock", None)
             speed_limit = getattr(destination, "speed_limit", None)
 
-            if not robot.is_online or robot.is_estopped:
+            if not robot.is_online or robot.is_estopped or robot.is_off_graph:
+                reason = (
+                    f"偏離路網過遠 ({robot.off_graph_distance}m > 3.0m)，無法操控"
+                    if robot.is_off_graph
+                    else ("emergency-stopped" if robot.is_estopped else "offline")
+                )
                 self._defer_command(
                     robot, execution,
                     self._navigate_payload(robot_id, None, target_pos, target_map, dock_name, speed_limit),
-                    f"Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' is "
-                    f"{'emergency-stopped' if robot.is_estopped else 'offline'}.")
+                    f"Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' is {reason}."
+                )
                 return
 
             # Check yaw alignment with [-pi, pi] wrap-around

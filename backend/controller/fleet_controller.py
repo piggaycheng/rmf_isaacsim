@@ -2,7 +2,7 @@ import asyncio
 import json
 import math
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
 import state
 from state import (
@@ -39,6 +39,8 @@ async def dispatch_task_endpoint(req: TaskRequest):
         destination_waypoint=req.destination_waypoint,
         robot_id=assigned_robot,
     )
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("message", "任務派遣失敗"))
     await broadcast({
         "type": "tasks",
         "tasks": current_tasks,
