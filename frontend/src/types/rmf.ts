@@ -64,7 +64,7 @@ export interface Robot {
   y: number;
   yaw: number;
   battery: number; // 0 - 100
-  status: 'idle' | 'moving' | 'charging' | 'paused' | 'offline' | 'emergency_stop' | 'error' | 'off_graph';
+  status: 'idle' | 'moving' | 'charging' | 'paused' | 'offline' | 'emergency_stop' | 'error' | 'off_graph' | 'waiting';
   current_task?: string;
   task_id?: string;
   emergency_stop?: boolean;
@@ -168,21 +168,63 @@ export interface DiscoveredRobot {
   off_graph_distance?: number;
 }
 
+export type MultiStepType = 'navigate' | 'gimbal_move' | 'gimbal_rotate';
+
+export interface MultiStepItem {
+  id: string;
+  type: MultiStepType;
+  // navigate:
+  place?: string;
+  x?: number;
+  y?: number;
+  yaw?: number;
+  // gimbal_move / gimbal_rotate:
+  pan_deg?: number;
+  tilt_deg?: number;
+  duration_s?: number;
+}
+
+export interface MultiStepTaskRequestData {
+  mode: 'compose' | 'direct';
+  robot_id?: string;
+  fleet_name?: string;
+  auto_proceed?: boolean;
+  step_delay?: number;
+  task_id?: string;
+  steps: {
+    type: MultiStepType;
+    place?: string;
+    x?: number;
+    y?: number;
+    yaw?: number;
+    pan_deg?: number;
+    tilt_deg?: number;
+    duration_s?: number;
+  }[];
+}
+
 export interface Task {
   id: string;
   request_id?: string;
   booking_id?: string;
-  type: 'patrol' | 'delivery' | 'goto';
+  type: 'patrol' | 'delivery' | 'goto' | 'compose' | 'multi_step' | string;
   target_waypoint: string;
   destination_waypoint?: string;
   robot_id?: string;
   fleet_name?: string;
-  status: 'queued' | 'active' | 'completed' | 'failed' | 'canceled';
+  status: 'queued' | 'active' | 'completed' | 'failed' | 'canceled' | 'waiting' | 'canceling' | string;
   progress: number; // 0 - 100
   created_at: string;
   error?: string;
   detail?: string;
+  cmd_id?: number;
+  current_step?: number;
+  total_steps?: number;
+  auto_proceed?: boolean;
+  step_delay?: number;
+  steps?: any[];
 }
+
 
 export interface SlamMap {
   name: string;

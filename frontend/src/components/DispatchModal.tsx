@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { Button } from './ui/button';
 import { Waypoint, Robot } from '@/types/rmf';
-import { Send, Navigation, PackageCheck, Repeat, AlertTriangle } from 'lucide-react';
+import { Send, Navigation, PackageCheck, Repeat, AlertTriangle, ListOrdered } from 'lucide-react';
 
 interface DispatchModalProps {
   open: boolean;
@@ -16,6 +16,7 @@ interface DispatchModalProps {
     destination_waypoint?: string;
     robot_id?: string;
   }) => void;
+  onOpenMultiStep?: () => void;
 }
 
 export const DispatchModal: React.FC<DispatchModalProps> = ({
@@ -25,6 +26,7 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
   waypoints,
   robots,
   onDispatchTask,
+  onOpenMultiStep,
 }) => {
   const [taskType, setTaskType] = useState<'goto' | 'patrol' | 'delivery'>('goto');
   const [targetWaypointId, setTargetWaypointId] = useState<string>(selectedWaypoint?.id || '');
@@ -123,43 +125,57 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
           <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5 block">
             任務類型
           </label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <button
               type="button"
               onClick={() => setTaskType('goto')}
-              className={`flex flex-col items-center justify-center p-3 rounded-lg border text-sm font-medium transition-all ${
+              className={`flex flex-col items-center justify-center p-2.5 rounded-lg border text-xs font-medium transition-all ${
                 taskType === 'goto'
                   ? 'border-primary bg-primary/10 text-primary shadow-sm'
                   : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'
               }`}
             >
-              <Navigation className="w-4 h-4 mb-1.5" />
+              <Navigation className="w-4 h-4 mb-1" />
               <span>單點前往 (Goto)</span>
             </button>
             <button
               type="button"
               onClick={() => setTaskType('patrol')}
-              className={`flex flex-col items-center justify-center p-3 rounded-lg border text-sm font-medium transition-all ${
+              className={`flex flex-col items-center justify-center p-2.5 rounded-lg border text-xs font-medium transition-all ${
                 taskType === 'patrol'
                   ? 'border-primary bg-primary/10 text-primary shadow-sm'
                   : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'
               }`}
             >
-              <Repeat className="w-4 h-4 mb-1.5" />
+              <Repeat className="w-4 h-4 mb-1" />
               <span>路網巡邏 (Patrol)</span>
             </button>
             <button
               type="button"
               onClick={() => setTaskType('delivery')}
-              className={`flex flex-col items-center justify-center p-3 rounded-lg border text-sm font-medium transition-all ${
+              className={`flex flex-col items-center justify-center p-2.5 rounded-lg border text-xs font-medium transition-all ${
                 taskType === 'delivery'
                   ? 'border-primary bg-primary/10 text-primary shadow-sm'
                   : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700'
               }`}
             >
-              <PackageCheck className="w-4 h-4 mb-1.5" />
+              <PackageCheck className="w-4 h-4 mb-1" />
               <span>物料配送 (Delivery)</span>
             </button>
+            {onOpenMultiStep && (
+              <button
+                type="button"
+                onClick={() => {
+                  onOpenChange(false);
+                  onOpenMultiStep();
+                }}
+                className="flex flex-col items-center justify-center p-2.5 rounded-lg border border-indigo-500/40 bg-indigo-950/30 text-indigo-300 hover:border-indigo-400 hover:bg-indigo-900/40 transition-all group"
+              >
+                <ListOrdered className="w-4 h-4 mb-1 text-indigo-400 group-hover:scale-110 transition-transform" />
+                <span className="font-semibold">多步任務</span>
+                <span className="text-[10px] text-indigo-400/80">雲台/導航連動</span>
+              </button>
+            )}
           </div>
         </div>
 

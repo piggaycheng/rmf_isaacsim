@@ -805,6 +805,7 @@ class RMFService:
             return [], [], "多步任務必須包含至少一個步驟 (steps)"
         waypoints = cls._active_map_waypoints()
         names = {w["name"] for w in waypoints} if waypoints else None
+        id_to_name = {w["id"]: w["name"] for w in waypoints if w.get("id") and w.get("name")} if waypoints else {}
         phases: List[Dict[str, Any]] = []
         places: List[str] = []
         for i, step in enumerate(steps):
@@ -828,8 +829,11 @@ class RMFService:
                                             f"'{nearest['name']}' 相距 {dist:.2f}m）；RMF 只能導航到路網站點")
                         place = nearest["name"]
                     place = str(place).strip()
+                    if place in id_to_name:
+                        place = id_to_name[place]
                     if names is not None and place not in names:
-                        return [], [], f"{label} 站點 '{place}' 不存在於目前導航地圖中"
+                        valid_list = ", ".join(sorted(names)) if names else "無"
+                        return [], [], f"{label} 站點 '{place}' 不存在於目前導航地圖中（可用站點：{valid_list}）"
                     destination: Dict[str, Any] = {"waypoint": place}
                     if step.get("yaw") is not None:
                         destination["orientation"] = float(step["yaw"])
@@ -1169,6 +1173,15 @@ class RMFService:
                 "task_id": req_id,
                 "message": "ROS 2 Task Command Publisher 尚未就緒，無法下派多步任務。",
             }
+
+        # Normalize navigate waypoint IDs to active map waypoint names
+        waypoints = self._active_map_waypoints()
+        id_to_name = {w["id"]: w["name"] for w in waypoints if w.get("id") and w.get("name")} if waypoints else {}
+        for s in steps:
+            if isinstance(s, dict) and s.get("type") == "navigate":
+                place = s.get("place") or s.get("waypoint")
+                if place and str(place).strip() in id_to_name:
+                    s["place"] = id_to_name[str(place).strip()]
 
         new_task = {
             "id": req_id,

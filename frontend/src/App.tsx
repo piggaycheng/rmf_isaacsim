@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MapCanvas, EditorTool } from '@/components/MapCanvas';
 import { DispatchModal } from '@/components/DispatchModal';
+import { MultiStepTaskModal } from '@/components/MultiStepTaskModal';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
@@ -46,6 +47,9 @@ import {
   Ban,
   ChevronDown,
   ChevronUp,
+  ListOrdered,
+  Workflow,
+  Clock,
 } from 'lucide-react';
 
 const DEFAULT_GRAPHS: NavGraph[] = [
@@ -194,6 +198,8 @@ export function App() {
   const [selectedLaneIds, setSelectedLaneIds] = useState<string[]>([]);
   const [dispatchModalOpen, setDispatchModalOpen] = useState<boolean>(false);
   const [dispatchPresetWp, setDispatchPresetWp] = useState<Waypoint | null>(null);
+  const [multiStepModalOpen, setMultiStepModalOpen] = useState<boolean>(false);
+  const [proceedPendingRobotId, setProceedPendingRobotId] = useState<string | null>(null);
 
   // SLAM Map state (Lazy initialized from localStorage for 0ms restoration)
   const [slamMap, setSlamMap] = useState<SlamMap | null>(() => {
@@ -366,6 +372,13 @@ export function App() {
                 setSaveToast(`任務派發失敗: ${data.message || '調度器拒絕'}`);
               } else if (data.status === 'success') {
                 setSaveToast(data.message || `任務 [${data.task_id}] 已成功提交`);
+              }
+            }
+            if (data.type === 'proceed_response') {
+              if (data.status === 'error') {
+                setSaveToast(`放行失敗: ${data.message || '指令被拒絕'}`);
+              } else {
+                setSaveToast(data.message || `車輛 ${data.robot_id} 放行指令已送出`);
               }
             }
             if (data.type === 'slam_map') {
@@ -695,6 +708,77 @@ export function App() {
       }
     } finally {
       setCancelingTaskId(null);
+      setTimeout(() => setSaveToast(null), 4000);
+    }
+  };
+
+  // Dispatch Multi-Step Task Action
+  const handleDispatchMultiStepTask = async (
+    payload: MultiStepTaskRequestData
+  ): Promise<{ success: boolean; message?: string }> => {
+    try {
+      const endpoint = payload.mode === 'compose' ? '/api/tasks/compose' : '/api/tasks/multi-step';
+      const bodyPayload =
+        payload.mode === 'compose'
+          ? {
+              steps: payload.steps,
+              robot_id: payload.robot_id,
+              fleet_name: payload.fleet_name,
+              task_id: payload.task_id,
+            }
+          : {
+              robot_id: payload.robot_id,
+              fleet_name: payload.fleet_name,
+              steps: payload.steps,
+              auto_proceed: payload.auto_proceed ?? false,
+              step_delay: payload.step_delay ?? 0.0,
+              task_id: payload.task_id,
+            };
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bodyPayload),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status !== 'error') {
+        const msg = data.message || `多步任務 [${data.task_id}] 已成功下派！`;
+        setSaveToast(msg);
+        return { success: true, message: msg };
+      } else {
+        const errMsg = data.detail || data.message || res.statusText || '調度器拒絕下派多步任務';
+        setSaveToast(`多步任務派送失敗：${errMsg}`);
+        return { success: false, message: errMsg };
+      }
+    } catch (err: any) {
+      const errMsg = err?.message || '無法連線至後端服務';
+      setSaveToast(`多步任務派送錯誤：${errMsg}`);
+      return { success: false, message: errMsg };
+    } finally {
+      setTimeout(() => setSaveToast(null), 5000);
+    }
+  };
+
+  // Proceed Release Gate Action
+  const handleProceedTask = async (robotId: string, cmdId?: number) => {
+    setProceedPendingRobotId(robotId);
+    try {
+      const res = await fetch(`/api/robots/${encodeURIComponent(robotId)}/proceed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd_id: cmdId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status !== 'error') {
+        setSaveToast(data.message || `已成功放行車輛 '${robotId}' 執行下一步！`);
+      } else {
+        setSaveToast(`放行失敗：${data.detail || data.message || res.statusText}`);
+      }
+    } catch (err: any) {
+      setSaveToast(`放行指令發送失敗：${err?.message || '連線錯誤'}`);
+    } finally {
+      setProceedPendingRobotId(null);
       setTimeout(() => setSaveToast(null), 4000);
     }
   };
@@ -1399,9 +1483,9 @@ export function App() {
             />
           </div>
 
-          {/* Monitor Mode: Floating Quick Dispatch & Safety Controls */}
+          {/* Monitor Mode: Floating Quick Dispatch */}
           {mode === 'monitor' && (
-            <div className="absolute top-4 left-4 flex flex-wrap items-center gap-3 pointer-events-auto z-20">
+            <div className="absolute top-4 left-4 flex items-center gap-3 pointer-events-auto z-20">
               {/* Quick Dispatch Card */}
               <div className="bg-slate-900/90 backdrop-blur border border-slate-800 p-2.5 px-3 rounded-xl shadow-xl flex items-center space-x-3">
                 <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary">
@@ -1421,62 +1505,6 @@ export function App() {
                   <Send className="w-3.5 h-3.5 mr-1" />
                   立即派單
                 </Button>
-              </div>
-
-              {/* Global Emergency Stop Control Card */}
-              <div
-                className={`p-2.5 px-3 rounded-xl shadow-xl backdrop-blur border flex items-center space-x-3 transition-all ${
-                  hasEstoppedRobots
-                    ? 'bg-rose-950/90 border-rose-600/70 shadow-rose-950/50'
-                    : 'bg-slate-900/90 border-slate-800'
-                }`}
-              >
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    hasEstoppedRobots
-                      ? 'bg-rose-500/20 text-rose-400 animate-pulse ring-2 ring-rose-500/40'
-                      : 'bg-rose-500/10 text-rose-400'
-                  }`}
-                >
-                  <OctagonAlert className="w-4 h-4" />
-                </div>
-                <div>
-                  <p className="text-xs font-semibold text-slate-200 flex items-center space-x-1.5">
-                    <span>{hasEstoppedRobots ? '⚠️ 全場緊急停車中' : '車隊緊急安全停車'}</span>
-                    {hasEstoppedRobots && (
-                      <Badge variant="destructive" className="text-[9px] px-1 py-0 h-4 animate-pulse">
-                        {estoppedCount} 台受阻
-                      </Badge>
-                    )}
-                  </p>
-                  <p className="text-[11px] text-slate-400">
-                    {hasEstoppedRobots
-                      ? '車輛指令已暫停保留，點擊以恢復運作'
-                      : '一鍵緊急煞停所有運作中的車輛'}
-                  </p>
-                </div>
-                {hasEstoppedRobots ? (
-                  <Button
-                    size="sm"
-                    disabled={isGlobalActionPending}
-                    onClick={() => handleGlobalEmergencyStop('release')}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium shadow-sm"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5 mr-1" />
-                    解除全場急停
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    disabled={isGlobalActionPending || robots.length === 0}
-                    onClick={() => handleGlobalEmergencyStop('estop')}
-                    className="bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shadow-md shadow-rose-950/50"
-                  >
-                    <OctagonAlert className="w-3.5 h-3.5 mr-1" />
-                    全場緊急停車
-                  </Button>
-                )}
               </div>
             </div>
           )}
@@ -2049,9 +2077,10 @@ export function App() {
                         {robots.map((robot) => {
                           const isEstopped = robot.emergency_stop || robot.status === 'emergency_stop';
                           const isOffGraph = Boolean(robot.is_off_graph || robot.status === 'off_graph');
+                          const isWaiting = robot.status === 'waiting' || Boolean(robot.current_task && robot.current_task.includes('等待放行'));
                           const hasActiveTask = Boolean(
                             robot.task_id ||
-                            (robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving')
+                            (robot.current_task && robot.current_task !== 'nothing' && (robot.status === 'moving' || isWaiting))
                           );
                           return (
                             <Card
@@ -2061,6 +2090,8 @@ export function App() {
                                   ? 'border-rose-800/80 bg-rose-950/20'
                                   : isOffGraph
                                   ? 'border-amber-500/60 bg-amber-950/20'
+                                  : isWaiting
+                                  ? 'border-amber-400/60 bg-amber-950/20'
                                   : ''
                               }`}
                             >
@@ -2069,6 +2100,7 @@ export function App() {
                                   <span className="font-semibold text-xs text-slate-200 flex items-center space-x-1.5">
                                     {isEstopped && <OctagonAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
                                     {!isEstopped && isOffGraph && <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                                    {!isEstopped && !isOffGraph && isWaiting && <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0 animate-pulse" />}
                                     <span className="truncate">{robot.name}</span>
                                   </span>
                                   <Badge
@@ -2076,6 +2108,8 @@ export function App() {
                                       isEstopped
                                         ? 'destructive'
                                         : isOffGraph
+                                        ? 'warning'
+                                        : isWaiting
                                         ? 'warning'
                                         : robot.status === 'moving'
                                         ? 'success'
@@ -2090,6 +2124,8 @@ export function App() {
                                         ? 'bg-rose-600 text-white animate-pulse'
                                         : isOffGraph
                                         ? 'bg-amber-600/30 text-amber-300 border-amber-500/50'
+                                        : isWaiting
+                                        ? 'bg-amber-500/30 text-amber-300 border-amber-400/50 animate-pulse'
                                         : ''
                                     }`}
                                   >
@@ -2097,6 +2133,8 @@ export function App() {
                                       ? 'EMERGENCY STOP'
                                       : isOffGraph
                                       ? `偏離路網 (${robot.off_graph_distance || '>3'}m)`
+                                      : isWaiting
+                                      ? 'WAITING (等待放行)'
                                       : robot.status === 'idle'
                                       ? 'IDLE'
                                       : robot.status.toUpperCase()}
@@ -2130,6 +2168,8 @@ export function App() {
                                     </div>
                                   ) : robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving' ? (
                                     robot.current_task
+                                  ) : isWaiting ? (
+                                    '⏸️ 步驟完成，等待操作員放行 (Waiting for Proceed)'
                                   ) : (
                                     '在線待命中'
                                   )}
@@ -2154,6 +2194,24 @@ export function App() {
                                       </Button>
                                     ) : (
                                       <>
+                                        {isWaiting && (
+                                          <Button
+                                            size="sm"
+                                            disabled={proceedPendingRobotId === robot.id}
+                                            onClick={() => handleProceedTask(robot.id)}
+                                            className="h-6 px-2 text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm animate-pulse"
+                                            title="放行並繼續執行多步任務的下一個步驟"
+                                          >
+                                            {proceedPendingRobotId === robot.id ? (
+                                              <span className="text-[9px]">放行中...</span>
+                                            ) : (
+                                              <>
+                                                <Play className="w-3 h-3 mr-1 fill-white" />
+                                                放行 (Proceed)
+                                              </>
+                                            )}
+                                          </Button>
+                                        )}
                                         {hasActiveTask && (
                                           <Button
                                             size="sm"
@@ -2249,20 +2307,31 @@ export function App() {
                     ) : (
                       <div className="space-y-2">
                         {tasks.map((task) => {
-                          const isCancellable = task.status === 'active' || task.status === 'queued';
+                          const isWaiting = task.status === 'waiting' || Boolean(task.detail && task.detail.includes('等待放行'));
+                          const isCancellable = task.status === 'active' || task.status === 'queued' || isWaiting;
+                          const isMultiStep = task.type === 'multi_step' || task.type === 'compose';
                           return (
                             <div
                               key={task.id}
                               className={`bg-slate-900/40 border p-2.5 rounded-lg text-xs space-y-1.5 ${
                                 task.status === 'canceled'
                                   ? 'border-rose-900/40 bg-rose-950/10'
+                                  : isWaiting
+                                  ? 'border-amber-500/50 bg-amber-950/20'
                                   : 'border-slate-800/80'
                               }`}
                             >
                               <div className="flex items-center justify-between">
-                                <span className="font-medium text-slate-300 capitalize truncate max-w-[130px]">
-                                  {task.type}: {task.target_waypoint}
-                                </span>
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  {isMultiStep && (
+                                    <Badge variant="outline" className="text-[9px] px-1 py-0 border-indigo-500/40 text-indigo-300 shrink-0 font-mono">
+                                      多步
+                                    </Badge>
+                                  )}
+                                  <span className="font-medium text-slate-300 capitalize truncate max-w-[130px]" title={task.target_waypoint}>
+                                    {task.type}: {task.target_waypoint}
+                                  </span>
+                                </div>
                                 <div className="flex items-center space-x-1.5">
                                   <Badge
                                     variant={
@@ -2270,14 +2339,28 @@ export function App() {
                                         ? 'success'
                                         : task.status === 'active'
                                         ? 'default'
+                                        : isWaiting
+                                        ? 'warning'
                                         : task.status === 'failed' || task.status === 'canceled'
                                         ? 'destructive'
                                         : 'outline'
                                     }
-                                    className="text-[10px]"
+                                    className={`text-[10px] ${isWaiting ? 'bg-amber-500/30 text-amber-300 border-amber-400/50 animate-pulse' : ''}`}
                                   >
-                                    {task.status === 'canceled' ? '已取消' : task.status}
+                                    {task.status === 'canceled' ? '已取消' : isWaiting ? '等待放行' : task.status}
                                   </Badge>
+                                  {isWaiting && task.robot_id && (
+                                    <Button
+                                      size="sm"
+                                      disabled={proceedPendingRobotId === task.robot_id}
+                                      onClick={() => handleProceedTask(task.robot_id!, task.cmd_id)}
+                                      className="h-5 px-1.5 text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white animate-pulse"
+                                      title="放行並執行下一步驟"
+                                    >
+                                      <Play className="w-2.5 h-2.5 mr-0.5 fill-white" />
+                                      放行
+                                    </Button>
+                                  )}
                                   {isCancellable && (
                                     <Button
                                       size="sm"
@@ -2303,15 +2386,30 @@ export function App() {
                               <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
                                 <div
                                   className={`h-full transition-all duration-300 ${
-                                    task.status === 'canceled' ? 'bg-rose-500' : 'bg-primary'
+                                    task.status === 'canceled'
+                                      ? 'bg-rose-500'
+                                      : isWaiting
+                                      ? 'bg-amber-400'
+                                      : 'bg-primary'
                                   }`}
                                   style={{ width: `${task.progress}%` }}
                                 />
                               </div>
                               <div className="flex justify-between text-[10px] text-slate-500">
                                 <span>車輛: {task.robot_id || '自動'}</span>
-                                <span>{task.progress}%</span>
+                                {task.total_steps ? (
+                                  <span className="text-indigo-400/90 font-mono">
+                                    步驟 {(task.current_step ?? 0) + 1} / {task.total_steps} ({task.progress}%)
+                                  </span>
+                                ) : (
+                                  <span>{task.progress}%</span>
+                                )}
                               </div>
+                              {task.detail && (
+                                <div className={`text-[10px] px-1.5 py-0.5 rounded truncate ${isWaiting ? 'text-amber-300 bg-amber-950/40 border border-amber-500/30' : 'text-slate-400 bg-slate-950/50'}`}>
+                                  {task.detail}
+                                </div>
+                              )}
                               {task.status === 'failed' && (task.error || task.detail) && (
                                 <div className="flex items-start gap-1 text-[10px] text-rose-300 bg-rose-950/30 border border-rose-900/40 rounded px-1.5 py-1 break-words">
                                   <AlertTriangle className="w-3 h-3 mt-px flex-shrink-0" />
@@ -2340,6 +2438,17 @@ export function App() {
         waypoints={waypoints}
         robots={robots}
         onDispatchTask={handleDispatchTask}
+        onOpenMultiStep={() => setMultiStepModalOpen(true)}
+      />
+
+      {/* Multi-Step Task Modal */}
+      <MultiStepTaskModal
+        open={multiStepModalOpen}
+        onOpenChange={setMultiStepModalOpen}
+        waypoints={waypoints}
+        robots={robots}
+        initialWaypoint={dispatchPresetWp}
+        onDispatch={handleDispatchMultiStepTask}
       />
 
       {/* Import SLAM Map Modal */}
