@@ -14,7 +14,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  RotateCcw,
   Target,
   Sliders,
   Compass,
@@ -264,8 +263,20 @@ export function CameraPtzController({
       action: 'cancel',
     };
     publishCommand(payload, '已發送急停 / 取消動作');
+
+    // Also immediately command the gimbal to hold at current real-time posture (pan, tilt).
+    // This updates the position drive target in Isaac Sim/hardware so physics motors brake immediately!
+    const freezeCmdId = ++cmdIdRef.current;
+    const freezePayload: GimbalCommandPayload = {
+      cmd_id: freezeCmdId,
+      action: 'move',
+      pan_deg: pan,
+      tilt_deg: tilt,
+    };
+    publishCommand(freezePayload);
+
     setTimeout(() => setActiveDirection(null), 200);
-  }, [publishCommand]);
+  }, [publishCommand, pan, tilt]);
 
   // Home reset
   const handleHome = useCallback(() => {
@@ -349,16 +360,31 @@ export function CameraPtzController({
               {gimbalName.includes('ceiling') ? '天花板相機雲台 (Ceiling PTZ)' : '車載雲台操控 (AMR Gimbal)'}
             </span>
 
-            {/* Real-time Posture Display */}
-            <Badge
-              variant="outline"
-              className="text-[9px] px-1.5 py-0 border-cyan-700/50 text-cyan-300 font-mono shrink-0 hidden sm:inline-flex"
-            >
-              Pan: {pan > 0 ? `+${pan}` : pan}° • Tilt: {tilt > 0 ? `+${tilt}` : tilt}°
-            </Badge>
-
-            {/* Busy / Running Badge */}
-            {isBusy ? (
+            {/* Busy / Running Badge OR Action Feedback Toast */}
+            {resultToast ? (
+              <Badge
+                className={`text-[9px] px-1.5 py-0 border shrink-0 flex items-center space-x-1 transition-all ${
+                  resultToast.status === 'succeeded'
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : resultToast.status === 'rejected'
+                    ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                    : resultToast.status === 'aborted'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40 animate-pulse'
+                }`}
+              >
+                {resultToast.status === 'succeeded' ? (
+                  <Check className="w-2.5 h-2.5 mr-0.5 text-emerald-400 shrink-0" />
+                ) : resultToast.status === 'rejected' ? (
+                  <XCircle className="w-2.5 h-2.5 mr-0.5 text-rose-400 shrink-0" />
+                ) : resultToast.status === 'aborted' ? (
+                  <AlertTriangle className="w-2.5 h-2.5 mr-0.5 text-amber-400 shrink-0" />
+                ) : (
+                  <Activity className="w-2.5 h-2.5 mr-0.5 text-cyan-400 animate-spin shrink-0" />
+                )}
+                <span className="truncate max-w-[120px] sm:max-w-[170px]">{resultToast.message}</span>
+              </Badge>
+            ) : isBusy ? (
               <Badge className="text-[9px] px-1.5 py-0 bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse shrink-0">
                 <Activity className="w-2.5 h-2.5 mr-0.5 animate-spin" />
                 運轉中 (Busy)
@@ -391,16 +417,6 @@ export function CameraPtzController({
             </button>
           )}
 
-          {/* Quick Home Reset button */}
-          <button
-            onClick={handleHome}
-            className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700/80 bg-slate-900/80 text-slate-300 hover:text-cyan-300 hover:border-cyan-600/60 flex items-center space-x-1 transition-colors"
-            title="視角重設為正前方原點 (0°, 0°)"
-          >
-            <RotateCcw className="w-2.5 h-2.5" />
-            <span>歸位</span>
-          </button>
-
           {/* Toggle Panel Chevron */}
           <button
             onClick={() => setIsExpanded(!isExpanded)}
@@ -415,38 +431,6 @@ export function CameraPtzController({
       {/* Expanded Controls Panel */}
       {isExpanded && (
         <div className="p-3 space-y-3">
-          {/* Status Message / Result Toast Bar */}
-          {resultToast && (
-            <div
-              className={`text-[11px] px-2.5 py-1 rounded flex items-center justify-between border ${
-                resultToast.status === 'succeeded'
-                  ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
-                  : resultToast.status === 'rejected'
-                  ? 'bg-rose-950/50 border-rose-500/40 text-rose-300'
-                  : resultToast.status === 'aborted'
-                  ? 'bg-amber-950/50 border-amber-500/40 text-amber-300'
-                  : resultToast.status === 'canceled'
-                  ? 'bg-slate-900 border-slate-700 text-slate-300'
-                  : 'bg-cyan-950/50 border-cyan-500/40 text-cyan-300'
-              }`}
-            >
-              <div className="flex items-center space-x-1.5 min-w-0">
-                {resultToast.status === 'succeeded' ? (
-                  <Check className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
-                ) : resultToast.status === 'rejected' ? (
-                  <XCircle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
-                ) : resultToast.status === 'aborted' ? (
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-amber-400" />
-                ) : (
-                  <Activity className="w-3.5 h-3.5 shrink-0 text-cyan-400" />
-                )}
-                <span className="truncate">{resultToast.message}</span>
-              </div>
-              <span className="text-[9px] uppercase font-mono opacity-70 ml-2 shrink-0">
-                {resultToast.status}
-              </span>
-            </div>
-          )}
 
           {/* D-Pad Matrix (Left) + Step Selector & Direct Inputs (Right) */}
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-[#0a1122]/90 border border-slate-800/80 rounded-xl p-2.5">
@@ -666,23 +650,9 @@ export function CameraPtzController({
 
           {/* Bottom Row: Quick Presets (視角預設位快捷標籤) */}
           <div className="space-y-1.5 pt-0.5">
-            <div className="flex items-center justify-between text-[10px] text-slate-400">
-              <span className="font-semibold text-slate-300 flex items-center space-x-1">
-                <span>預設視角捷徑 (Preset Angles)</span>
-              </span>
-              <div className="flex items-center space-x-2 text-[10px] text-slate-500">
-                <span className="flex items-center space-x-1">
-                  {mqttConnected ? (
-                    <Wifi className="w-2.5 h-2.5 text-emerald-400" />
-                  ) : (
-                    <WifiOff className="w-2.5 h-2.5 text-rose-400" />
-                  )}
-                  <span>MQTT {mqttConnected ? '連線' : '斷線'}</span>
-                </span>
-                <span>•</span>
-                <span className="font-mono text-slate-400">{commandTopic}</span>
-              </div>
-            </div>
+            <span className="text-[10px] font-semibold text-slate-300 block">
+              預設視角捷徑 (Preset Angles)
+            </span>
 
             <div className="grid grid-cols-5 gap-1 text-[10px]">
               <button
@@ -720,6 +690,41 @@ export function CameraPtzController({
               >
                 仰角 [-30°]
               </button>
+            </div>
+          </div>
+
+          {/* Bottom Telemetry Bar: Live Current Posture & Connection Status */}
+          <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[10px]">
+            <div className="flex items-center space-x-1.5">
+              <span className="text-slate-400 font-medium flex items-center">
+                <Compass className="w-3 h-3 mr-1 text-cyan-400" />
+                目前角度:
+              </span>
+              <span className="text-cyan-300 font-mono font-bold bg-slate-950 border border-cyan-500/40 rounded px-2 py-0.5 shadow-sm">
+                Pan: {pan > 0 ? `+${pan}` : pan}° • Tilt: {tilt > 0 ? `+${tilt}` : tilt}°
+              </span>
+            </div>
+
+            <div className="flex items-center space-x-2 text-slate-500 min-w-0">
+              {resultToast ? (
+                <span className="text-cyan-300 font-mono text-[9px] flex items-center space-x-1 truncate animate-in fade-in duration-150">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse shrink-0" />
+                  <span className="truncate">{resultToast.message}</span>
+                </span>
+              ) : (
+                <>
+                  <span className="flex items-center space-x-1 shrink-0">
+                    {mqttConnected ? (
+                      <Wifi className="w-2.5 h-2.5 text-emerald-400" />
+                    ) : (
+                      <WifiOff className="w-2.5 h-2.5 text-rose-400" />
+                    )}
+                    <span>MQTT {mqttConnected ? '連線' : '斷線'}</span>
+                  </span>
+                  <span className="shrink-0">•</span>
+                  <span className="font-mono text-slate-400 truncate">{commandTopic}</span>
+                </>
+              )}
             </div>
           </div>
         </div>
