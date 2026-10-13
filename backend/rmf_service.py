@@ -354,7 +354,31 @@ class RMFService:
                                     t["status"] = "active"
                                     t["robot_id"] = r_id
                                     t["fleet_name"] = fleet_name
-                                    if mode_str == "moving":
+
+                                    if t.get("type") == "compose" and t.get("steps"):
+                                        steps = t["steps"]
+                                        tot = t.get("total_steps") or len(steps)
+                                        curr = t.get("current_step", 0)
+                                        if curr < len(steps):
+                                            curr_step = steps[curr]
+                                            if curr_step.get("type") == "navigate" and "x" in curr_step and "y" in curr_step:
+                                                dist = math.hypot(float(r.location.x) - float(curr_step["x"]), float(r.location.y) - float(curr_step["y"]))
+                                                if dist < 0.25 and curr + 1 < tot:
+                                                    t["current_step"] = curr + 1
+                                                    curr = curr + 1
+                                                    next_desc = steps[curr].get("place") or steps[curr].get("type", "執行中")
+                                                    t["detail"] = f"步驟 {curr + 1}/{tot} ({next_desc}) 執行中..."
+                                            elif not t.get("detail") or "等待排程" in t.get("detail", ""):
+                                                desc = curr_step.get("place") or curr_step.get("type", "執行中")
+                                                t["detail"] = f"步驟 {curr + 1}/{tot} ({desc}) 執行中..."
+
+                                        if tot > 0:
+                                            step_prog = (curr / tot) * 100
+                                            if mode_str == "moving":
+                                                t["progress"] = min(95, max(int(step_prog) + 5, t.get("progress", 0) + 1))
+                                            else:
+                                                t["progress"] = min(95, max(int(step_prog), t.get("progress", 0)))
+                                    elif mode_str == "moving":
                                         t["progress"] = min(95, max(15, t.get("progress", 0) + 2))
                                 break
                         # If robot transitioned directly to a new task, complete the previous task
@@ -364,6 +388,9 @@ class RMFService:
                                     if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested"):
                                         t["status"] = "completed"
                                         t["progress"] = 100
+                                        if t.get("total_steps"):
+                                            t["current_step"] = t["total_steps"] - 1
+                                            t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
                                         append_adapter_log(
                                             fleet_name,
                                             f"[INFO] Task [{prev_task_id}] completed by robot [{r_id}].",
@@ -378,6 +405,9 @@ class RMFService:
                                     if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested"):
                                         t["status"] = "completed"
                                         t["progress"] = 100
+                                        if t.get("total_steps"):
+                                            t["current_step"] = t["total_steps"] - 1
+                                            t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
                                         t["robot_id"] = r_id
                                         t["fleet_name"] = fleet_name
                                         append_adapter_log(
@@ -397,6 +427,9 @@ class RMFService:
                                 ):
                                     t["status"] = "completed"
                                     t["progress"] = 100
+                                    if t.get("total_steps"):
+                                        t["current_step"] = t["total_steps"] - 1
+                                        t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
                                     append_adapter_log(
                                         fleet_name,
                                         f"[INFO] Task [{t.get('booking_id') or t.get('id')}] confirmed completed by robot [{r_id}].",
@@ -430,6 +463,9 @@ class RMFService:
                                 t["fleet_name"] = ts.fleet_name
                             if stat == "completed":
                                 t["progress"] = 100
+                                if t.get("total_steps"):
+                                    t["current_step"] = t["total_steps"] - 1
+                                    t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
                             elif stat in ["failed", "canceled"]:
                                 if ts.status:
                                     t["error"] = ts.status
@@ -468,47 +504,91 @@ class RMFService:
                     msg_text = data.get("message", "")
                     t_id = data.get("task_id")
 
+                    target_task = None
                     for t in state.current_tasks:
-                        matched = task_matches(t, t_id) if t_id else (
-                            cmd_id is not None and t.get("robot_id") == r_id and t.get("cmd_id") == cmd_id)
-                        if matched:
-                            if cmd_id is not None:
-                                t["cmd_id"] = cmd_id
-                            t["current_step"] = step
-                            t["total_steps"] = steps_count
-                            if steps_count > 0:
-                                t["progress"] = min(100, max(0, round(((step + (1 if stat in ("waiting", "succeeded") else 0.5)) / steps_count) * 100)))
+                        if t_id and task_matches(t, t_id):
+                            target_task = t
+                            break
+                        if cmd_id is not None and t.get("robot_id") == r_id and t.get("cmd_id") == cmd_id:
+                            target_task = t
+                            break
+                    if not target_task and r_id:
+                        for t in state.current_tasks:
+                            if t.get("robot_id") == r_id and t.get("status") in ("active", "waiting", "queued") and t.get("total_steps"):
+                                target_task = t
+                                break
 
-                            if stat in ("dispatched", "running"):
-                                if t.get("status") not in state.TERMINAL_STATES and t.get("status") != "canceling":
-                                    t["status"] = "active"
-                                    t["detail"] = f"步驟 {step + 1}/{steps_count} 執行中..."
-                            elif stat == "waiting":
-                                if t.get("status") not in state.TERMINAL_STATES and t.get("status") != "canceling":
-                                    t["status"] = "active"
-                                    t["detail"] = f"步驟 {step + 1}/{steps_count} 完成，等待放行..."
-                            elif stat == "held":
-                                if t.get("status") not in state.TERMINAL_STATES:
-                                    t["status"] = "active"
-                                    t["detail"] = f"急停中斷，解除後從步驟 {step + 1}/{steps_count} 續行"
-                            elif stat == "canceling":
-                                if t.get("status") not in state.TERMINAL_STATES:
-                                    t["status"] = "canceling"
-                                    t["detail"] = "取消中，等待車端確認"
-                            elif stat == "succeeded":
+                    if target_task:
+                        t = target_task
+                        if cmd_id is not None:
+                            t["cmd_id"] = cmd_id
+
+                        # Compose task phase event handling
+                        if t.get("type") == "compose" and t.get("steps"):
+                            steps = t["steps"]
+                            tot = t.get("total_steps") or len(steps)
+                            curr = t.get("current_step", 0)
+
+                            if msg_text.startswith("action:"):
+                                action_cat = msg_text.split(":", 1)[1]
+                                if curr + 1 < tot and steps[curr + 1].get("type") == action_cat:
+                                    t["current_step"] = curr + 1
+                                    curr = curr + 1
+                                t["status"] = "active"
+                                t["detail"] = f"步驟 {curr + 1}/{tot} ({action_cat}) 執行中..."
+                                t["progress"] = min(95, max(10, round(((curr + 0.5) / tot) * 100)))
+                            elif msg_text.startswith("navigate:"):
+                                if curr < len(steps) and steps[curr].get("type") in ("gimbal_move", "gimbal_rotate"):
+                                    if curr + 1 < tot:
+                                        t["current_step"] = curr + 1
+                                        curr = curr + 1
+                                next_place = steps[curr].get("place", "") if curr < len(steps) else ""
+                                t["status"] = "active"
+                                t["detail"] = f"步驟 {curr + 1}/{tot} (導航至 {next_place}) 執行中..."
+                                t["progress"] = min(95, max(10, round(((curr + 0.3) / tot) * 100)))
+                            elif stat in ("completed", "succeeded"):
                                 t["status"] = "completed"
                                 t["progress"] = 100
-                                t["detail"] = f"全部 {steps_count} 步驟已完成"
-                                append_adapter_log(f_name or "system", f"[INFO] Multi-step task [{t.get('id')}] succeeded on {r_id}.")
-                            elif stat in ["aborted", "rejected"]:
-                                t["status"] = "failed"
-                                t["error"] = msg_text or "步驟執行失敗"
-                                t["detail"] = f"步驟 {step + 1} 失敗: {msg_text}"
-                                append_adapter_log(f_name or "system", f"[ERROR] Multi-step task [{t.get('id')}] failed on {r_id}: {msg_text}")
-                            elif stat == "canceled":
-                                t["status"] = "canceled"
-                                t["detail"] = "已取消"
-                            break
+                                t["current_step"] = tot - 1
+                                t["detail"] = f"全部 {tot} 個步驟已完成"
+                            return
+
+                        # Standard direct multi-step task handling
+                        t["current_step"] = step
+                        t["total_steps"] = steps_count
+                        if steps_count > 0:
+                            t["progress"] = min(100, max(0, round(((step + (1 if stat in ("waiting", "succeeded") else 0.5)) / steps_count) * 100)))
+
+                        if stat in ("dispatched", "running"):
+                            if t.get("status") not in state.TERMINAL_STATES and t.get("status") != "canceling":
+                                t["status"] = "active"
+                                t["detail"] = f"步驟 {step + 1}/{steps_count} 執行中..."
+                        elif stat == "waiting":
+                            if t.get("status") not in state.TERMINAL_STATES and t.get("status") != "canceling":
+                                t["status"] = "waiting"
+                                t["detail"] = f"步驟 {step + 1}/{steps_count} 完成，等待放行..."
+                        elif stat == "held":
+                            if t.get("status") not in state.TERMINAL_STATES:
+                                t["status"] = "active"
+                                t["detail"] = f"急停中斷，解除後從步驟 {step + 1}/{steps_count} 續行"
+                        elif stat == "canceling":
+                            if t.get("status") not in state.TERMINAL_STATES:
+                                t["status"] = "canceling"
+                                t["detail"] = "取消中，等待車端確認"
+                        elif stat == "succeeded":
+                            t["status"] = "completed"
+                            t["progress"] = 100
+                            t["current_step"] = max(0, steps_count - 1)
+                            t["detail"] = f"全部 {steps_count} 個步驟已完成"
+                            append_adapter_log(f_name or "system", f"[INFO] Multi-step task [{t.get('id')}] succeeded on {r_id}.")
+                        elif stat in ["aborted", "rejected"]:
+                            t["status"] = "failed"
+                            t["error"] = msg_text or "步驟執行失敗"
+                            t["detail"] = f"步驟 {step + 1} 失敗: {msg_text}"
+                            append_adapter_log(f_name or "system", f"[ERROR] Multi-step task [{t.get('id')}] failed on {r_id}: {msg_text}")
+                        elif stat == "canceled":
+                            t["status"] = "canceled"
+                            t["detail"] = "已取消"
                 except Exception as ex:
                     print(f"[RMF Bridge] Error updating task status: {ex}")
 
@@ -806,6 +886,7 @@ class RMFService:
         waypoints = cls._active_map_waypoints()
         names = {w["name"] for w in waypoints} if waypoints else None
         id_to_name = {w["id"]: w["name"] for w in waypoints if w.get("id") and w.get("name")} if waypoints else {}
+        name_to_wp = {w["name"]: w for w in waypoints if w.get("name")} if waypoints else {}
         phases: List[Dict[str, Any]] = []
         places: List[str] = []
         for i, step in enumerate(steps):
@@ -834,6 +915,10 @@ class RMFService:
                     if names is not None and place not in names:
                         valid_list = ", ".join(sorted(names)) if names else "無"
                         return [], [], f"{label} 站點 '{place}' 不存在於目前導航地圖中（可用站點：{valid_list}）"
+                    step["place"] = place
+                    if place in name_to_wp:
+                        step["x"] = float(name_to_wp[place].get("x", 0.0))
+                        step["y"] = float(name_to_wp[place].get("y", 0.0))
                     destination: Dict[str, Any] = {"waypoint": place}
                     if step.get("yaw") is not None:
                         destination["orientation"] = float(step["yaw"])
@@ -906,6 +991,8 @@ class RMFService:
                 request["fleet_name"] = target_fleet
             payload_json = {"type": "dispatch_task_request", "request": request}
 
+        first_step = steps[0] if steps else {}
+        first_desc = first_step.get("place") or first_step.get("type", "執行中")
         new_task = {
             "id": req_id,
             "request_id": req_id,
@@ -918,9 +1005,10 @@ class RMFService:
             "status": "queued",
             "progress": 0,
             "total_steps": len(steps),
+            "current_step": 0,
             "steps": steps,
             "created_at": time.strftime("%H:%M:%S"),
-            "detail": f"共 {len(steps)} 個步驟，由 Open-RMF 排程",
+            "detail": f"步驟 1/{len(steps)} ({first_desc}) 等待排程...",
         }
         state.current_tasks.insert(0, new_task)
 
@@ -1231,6 +1319,19 @@ class RMFService:
         target_fleet = fleet_name or state.find_robot_fleet(robot_id) or "fleet1"
         if not self.task_cmd_pub or not rclpy.ok():
             return {"status": "error", "message": "ROS 2 Task Command Publisher 尚未就緒"}
+
+        # Immediately update status and advance step in state.current_tasks
+        for t in state.current_tasks:
+            if t.get("robot_id") == robot_id and t.get("status") in ("waiting", "active") and t.get("total_steps"):
+                curr = t.get("current_step", 0)
+                tot = t.get("total_steps", 1)
+                next_step = min(curr + 1, tot - 1)
+                t["status"] = "active"
+                t["current_step"] = next_step
+                t["detail"] = f"步驟 {next_step + 1}/{tot} 執行中..."
+                t["progress"] = min(99, max(0, round(((next_step + 0.3) / tot) * 100)))
+                break
+
         msg = String()
         msg.data = json.dumps({
             "action": "proceed",

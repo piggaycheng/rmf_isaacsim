@@ -106,6 +106,40 @@ class TestComposeTask(unittest.TestCase):
         self.assertEqual(res["status"], "error")
         self.assertIn("暫停", res["message"])
 
+    def test_compose_task_initializes_current_step_and_coords(self):
+        steps = [
+            {"type": "navigate", "place": "wp_2"},
+            {"type": "gimbal_move", "pan_deg": 30},
+            {"type": "navigate", "place": "wp_1"},
+        ]
+        res = rmf_service.dispatch_compose_task(steps, robot_id="carter1", task_id="step_test_1")
+        self.assertEqual(res["status"], "success")
+        task = state.current_tasks[0]
+        self.assertEqual(task["current_step"], 0)
+        self.assertEqual(task["total_steps"], 3)
+        self.assertIn("步驟 1/3", task["detail"])
+        self.assertEqual(task["steps"][0]["x"], 5.0)
+        self.assertEqual(task["steps"][2]["x"], 0.0)
+
+    def test_proceed_task_advances_current_step(self):
+        state.current_tasks.append({
+            "id": "direct_1",
+            "type": "multi_step",
+            "robot_id": "carter1",
+            "status": "waiting",
+            "total_steps": 3,
+            "current_step": 0,
+            "detail": "步驟 1/3 完成，等待放行...",
+        })
+        with patch.object(rmf_service, "task_cmd_pub", MagicMock()):
+            res = rmf_service.proceed_task("carter1")
+        self.assertEqual(res["status"], "success")
+        task = state.current_tasks[0]
+        self.assertEqual(task["current_step"], 1)
+        self.assertEqual(task["status"], "active")
+        self.assertIn("步驟 2/3", task["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1910,6 +1910,10 @@ class MqttFleetAdapter:
         }), qos=1)
         task["step_status"] = "releasing"
         task["release_pending"] = False
+        task["current_step"] = min(task.get("current_step", 0) + 1, len(task["all_steps"]) - 1)
+        step = task["step_offset"] + task["current_step"]
+        total = len(task["all_steps"])
+        self._publish_task_status(robot.fleet_name, robot.name, task["cmd_id"], "running", step, total, "Proceeded to next step", task["task_id"])
         print(f"[RMF -> AMR] Dispatched PROCEED (cmd_id: {task['cmd_id']}) to '{robot.name}' via {cmd_topic}")
         return True
 
@@ -2062,6 +2066,7 @@ class MqttFleetAdapter:
             if can_finish_in_place:
                 print(f"[RMF -> AMR] Robot '{robot_id}' already at destination [{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_yaw:.2f}] (dist: {dist:.3f}m, yaw_diff: {yaw_diff:.3f}rad, map: '{target_map}', status: '{robot.status}'). Fulfilling in-place execution.")
                 robot.cmd_id += 1
+                self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "nav_completed", -1, -1, f"navigate:{target_map}:{target_pos[0]:.2f},{target_pos[1]:.2f}")
                 robot.nav_retries = 0
                 robot.last_cmd_payload = None
                 robot.current_execution = execution
@@ -2096,6 +2101,7 @@ class MqttFleetAdapter:
             robot.last_dispatch_time = time.time()
 
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+            self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "nav_started", -1, -1, f"navigate:{target_map}:{target_pos[0]:.2f},{target_pos[1]:.2f}")
             action_label = f"DOCK ({dock_name})" if dock_name else "NAVIGATE"
             print(f"[RMF -> AMR] Dispatched {action_label} (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}: target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}], map='{target_map}'")
 
@@ -2237,6 +2243,7 @@ class MqttFleetAdapter:
             robot.last_cmd_payload = cmd_payload
             robot.last_dispatch_time = time.time()
             self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+            self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "action_started", -1, -1, f"action:{category}")
             print(f"[RMF -> AMR] Dispatched ACTION '{category}' (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}")
 
     # ==========================================================================
