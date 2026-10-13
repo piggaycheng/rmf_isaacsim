@@ -1160,14 +1160,14 @@ ${
                                   className={`w-2 h-2 rounded-full shrink-0 ${
                                     isEstopped
                                       ? 'bg-rose-500 animate-pulse ring-2 ring-rose-500/50'
+                                      : !liveRobot || liveRobot?.status === 'offline'
+                                      ? 'bg-slate-500'
                                       : liveRobot?.status === 'moving'
                                       ? 'bg-cyan-400 animate-pulse'
                                       : liveRobot?.status === 'charging'
                                       ? 'bg-amber-400 animate-pulse'
                                       : liveRobot?.status === 'paused'
                                       ? 'bg-violet-400'
-                                      : liveRobot?.status === 'offline'
-                                      ? 'bg-slate-500'
                                       : 'bg-emerald-400'
                                   }`}
                                 />
@@ -1175,10 +1175,14 @@ ${
                                   {cfg.name}
                                 </span>
                               </div>
-                              {liveRobot && (
+                              {liveRobot ? (
                                 <span className="text-[10px] text-slate-400 flex items-center font-mono shrink-0 ml-1">
                                   <BatteryCharging className="w-2.5 h-2.5 mr-0.5 text-emerald-400" />
                                   {Math.round(liveRobot.battery)}%
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-500 font-mono shrink-0 ml-1">
+                                  離線
                                 </span>
                               )}
                             </div>
