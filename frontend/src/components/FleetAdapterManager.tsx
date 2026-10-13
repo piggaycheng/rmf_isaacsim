@@ -822,10 +822,17 @@ ${
                     </div>
                     <div className="min-w-0">
                       <span className="text-slate-500 block text-[10px]">連線信號</span>
-                      <span className="text-emerald-400 text-[10px] flex items-center truncate">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse shrink-0" />
-                        良好 (即時)
-                      </span>
+                      {robot.connection_status === 'offline' || robot.status === 'offline' ? (
+                        <span className="text-slate-400 text-[10px] flex items-center truncate">
+                          <span className="w-1.5 h-1.5 rounded-full bg-slate-500 mr-1 shrink-0" />
+                          離線 (失聯)
+                        </span>
+                      ) : (
+                        <span className="text-emerald-400 text-[10px] flex items-center truncate">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1 animate-pulse shrink-0" />
+                          良好 (即時)
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -1148,6 +1155,7 @@ ${
                       adapter.robots.map((robotItem) => {
                         const cfg = normalizeRobotConfig(robotItem, adapter.default_parking, adapter.default_charger);
                         const liveRobot = robots.find((r) => r.id === cfg.name);
+                        const isOffline = !liveRobot || liveRobot.status === 'offline' || liveRobot.online === false;
                         const isEstopped = liveRobot?.emergency_stop || liveRobot?.status === 'emergency_stop';
                         return (
                           <div
@@ -1160,7 +1168,7 @@ ${
                                   className={`w-2 h-2 rounded-full shrink-0 ${
                                     isEstopped
                                       ? 'bg-rose-500 animate-pulse ring-2 ring-rose-500/50'
-                                      : !liveRobot || liveRobot?.status === 'offline'
+                                      : isOffline
                                       ? 'bg-slate-500'
                                       : liveRobot?.status === 'moving'
                                       ? 'bg-cyan-400 animate-pulse'
@@ -1175,7 +1183,7 @@ ${
                                   {cfg.name}
                                 </span>
                               </div>
-                              {liveRobot ? (
+                              {!isOffline && liveRobot ? (
                                 <span className="text-[10px] text-slate-400 flex items-center font-mono shrink-0 ml-1">
                                   <BatteryCharging className="w-2.5 h-2.5 mr-0.5 text-emerald-400" />
                                   {Math.round(liveRobot.battery)}%
