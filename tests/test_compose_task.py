@@ -139,6 +139,108 @@ class TestComposeTask(unittest.TestCase):
         self.assertEqual(task["status"], "active")
         self.assertIn("步驟 2/3", task["detail"])
 
+    def test_multi_step_distance_progress_and_step_transition(self):
+        steps = [
+            {"type": "navigate", "place": "wp_2"},
+            {"type": "navigate", "place": "wp_1"},
+        ]
+        res = rmf_service.dispatch_compose_task(steps, robot_id="carter1", task_id="multi_1")
+        self.assertEqual(res["status"], "success")
+        task = state.current_tasks[0]
+        self.assertEqual(task["progress"], 0)
+
+        def make_fleet(x, y, tid="multi_1", mode=2):
+            msg = MagicMock()
+            msg.name = "fleet1"
+            r = MagicMock()
+            r.name = "carter1"
+            r.location.x = x
+            r.location.y = y
+            r.location.yaw = 0.0
+            r.battery_percent = 88.0
+            r.task_id = tid
+            r.mode.mode = mode
+            msg.robots = [r]
+            return msg
+
+        # Initial at (0, 0): dist=5.0m to wp_2
+        rmf_service.fleet_callback(make_fleet(0.0, 0.0))
+        self.assertEqual(task["current_step"], 0)
+        self.assertEqual(task["progress"], 0)
+        self.assertIn("步驟 1/2", task["detail"])
+        self.assertIn("剩餘 5.0m", task["detail"])
+
+        # Halfway in step 0: (2.5, 0.0) -> 25% overall
+        rmf_service.fleet_callback(make_fleet(2.5, 0.0))
+        self.assertEqual(task["current_step"], 0)
+        self.assertEqual(task["progress"], 25)
+        self.assertIn("步驟 1/2", task["detail"])
+        self.assertIn("剩餘 2.5m", task["detail"])
+
+        # Reach wp_2 at (4.8, 0.0) -> advances to step 1, base progress is 50%, NOT 0%
+        rmf_service.fleet_callback(make_fleet(4.8, 0.0))
+        self.assertEqual(task["current_step"], 1)
+        self.assertGreaterEqual(task["progress"], 50)
+        self.assertIn("步驟 2/2", task["detail"])
+
+        # Halfway back in step 1: (2.4, 0.0) -> 75% overall
+        rmf_service.fleet_callback(make_fleet(2.4, 0.0))
+        self.assertEqual(task["current_step"], 1)
+        self.assertEqual(task["progress"], 75)
+        self.assertIn("步驟 2/2", task["detail"])
+        self.assertIn("剩餘 2.4m", task["detail"])
+
+        # Near wp_1 at (0.1, 0.0) -> 99% overall
+        rmf_service.fleet_callback(make_fleet(0.1, 0.0))
+        self.assertEqual(task["progress"], 99)
+
+        # Robot finishes task, tid empty, robot idle -> completed 100%
+        rmf_service.fleet_callback(make_fleet(0.1, 0.0, tid="", mode=0))
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["progress"], 100)
+        self.assertIn("全部 2 個步驟已完成", task["detail"])
+
+    def test_single_step_distance_progress_and_completion(self):
+        res = rmf_service.dispatch_task("goto", "wp_2", robot_id="carter1")
+        self.assertEqual(res["status"], "success")
+        task = state.current_tasks[0]
+        self.assertIsNone(task.get("total_steps"))
+        self.assertEqual(task["progress"], 0)
+
+        def make_fleet(x, y, tid=task["id"], mode=2):
+            msg = MagicMock()
+            msg.name = "fleet1"
+            r = MagicMock()
+            r.name = "carter1"
+            r.location.x = x
+            r.location.y = y
+            r.location.yaw = 0.0
+            r.battery_percent = 88.0
+            r.task_id = tid
+            r.mode.mode = mode
+            msg.robots = [r]
+            return msg
+
+        # Start at (0, 0): 5.0m away
+        rmf_service.fleet_callback(make_fleet(0.0, 0.0))
+        self.assertEqual(task["progress"], 0)
+        self.assertIn("前往 wp_2 (剩餘 5.0m)", task["detail"])
+
+        # Halfway at (2.5, 0): 2.5m away -> 50%
+        rmf_service.fleet_callback(make_fleet(2.5, 0.0))
+        self.assertEqual(task["progress"], 50)
+        self.assertIn("前往 wp_2 (剩餘 2.5m)", task["detail"])
+
+        # Arrive at (4.9, 0): 0.1m away (<0.25m) -> 98%
+        rmf_service.fleet_callback(make_fleet(4.9, 0.0))
+        self.assertEqual(task["progress"], 98)
+
+        # Task completes
+        rmf_service.fleet_callback(make_fleet(5.0, 0.0, tid="", mode=0))
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["progress"], 100)
+        self.assertEqual(task["detail"], "已抵達 wp_2")
+
 
 if __name__ == "__main__":
     unittest.main()

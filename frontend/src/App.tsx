@@ -2398,7 +2398,7 @@ export function App() {
                               </div>
                               <div className="flex justify-between text-[10px] text-slate-500">
                                 <span>車輛: {task.robot_id || '自動'}</span>
-                                {task.total_steps ? (
+                                {task.total_steps && task.total_steps > 1 ? (
                                   <span className="text-indigo-400/90 font-mono">
                                     步驟 {task.status === 'completed' ? task.total_steps : ((task.current_step ?? 0) + 1)} / {task.total_steps} ({task.progress}%)
                                   </span>
