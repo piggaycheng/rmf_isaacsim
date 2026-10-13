@@ -7,7 +7,8 @@ import itertools
 import asyncio
 import subprocess
 import threading
-from typing import Dict, Any, List, Optional
+import math
+from typing import Dict, Any, List, Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -20,6 +21,10 @@ import state
 from controller.adapter_controller import append_adapter_log
 
 _task_counter = itertools.count(1)
+
+# Max distance (m) between a navigate step's x/y and the nav-graph waypoint it is mapped to for RMF.
+COMPOSE_WAYPOINT_TOLERANCE_M = 0.5
+
 
 def generate_task_id() -> str:
     """Generates guaranteed collision-free task ID: task_<timestamp_ms>_<counter>_<hex8>."""
@@ -51,6 +56,7 @@ class RMFService:
         self.task_pub = None
         self.fleet_control_pub = None
         self.robot_control_pub = None
+        self.task_cmd_pub = None
         self.discovered_sub = None
         self.running = False
         # request_id -> {"event": threading.Event, "responses": [payload, ...]} for Task API calls awaiting a reply
@@ -444,6 +450,72 @@ class RMFService:
                 String, "/rmf/robot_control", 10
             )
 
+            # Multi-step task command publisher to Fleet Adapter
+            self.task_cmd_pub = self.ros_node.create_publisher(
+                String, "/rmf/task_command", 10
+            )
+
+            # Subscribe to multi-step task status published by Fleet Adapter
+            def task_status_cb(msg: String):
+                try:
+                    data = json.loads(msg.data)
+                    r_id = data.get("robot_id")
+                    f_name = data.get("fleet_name")
+                    cmd_id = data.get("cmd_id")
+                    stat = data.get("status")
+                    step = data.get("step", 0)
+                    steps_count = data.get("steps", 0)
+                    msg_text = data.get("message", "")
+                    t_id = data.get("task_id")
+
+                    for t in state.current_tasks:
+                        matched = task_matches(t, t_id) if t_id else (
+                            cmd_id is not None and t.get("robot_id") == r_id and t.get("cmd_id") == cmd_id)
+                        if matched:
+                            if cmd_id is not None:
+                                t["cmd_id"] = cmd_id
+                            t["current_step"] = step
+                            t["total_steps"] = steps_count
+                            if steps_count > 0:
+                                t["progress"] = min(100, max(0, round(((step + (1 if stat in ("waiting", "succeeded") else 0.5)) / steps_count) * 100)))
+
+                            if stat in ("dispatched", "running"):
+                                if t.get("status") not in state.TERMINAL_STATES and t.get("status") != "canceling":
+                                    t["status"] = "active"
+                                    t["detail"] = f"步驟 {step + 1}/{steps_count} 執行中..."
+                            elif stat == "waiting":
+                                if t.get("status") not in state.TERMINAL_STATES and t.get("status") != "canceling":
+                                    t["status"] = "active"
+                                    t["detail"] = f"步驟 {step + 1}/{steps_count} 完成，等待放行..."
+                            elif stat == "held":
+                                if t.get("status") not in state.TERMINAL_STATES:
+                                    t["status"] = "active"
+                                    t["detail"] = f"急停中斷，解除後從步驟 {step + 1}/{steps_count} 續行"
+                            elif stat == "canceling":
+                                if t.get("status") not in state.TERMINAL_STATES:
+                                    t["status"] = "canceling"
+                                    t["detail"] = "取消中，等待車端確認"
+                            elif stat == "succeeded":
+                                t["status"] = "completed"
+                                t["progress"] = 100
+                                t["detail"] = f"全部 {steps_count} 步驟已完成"
+                                append_adapter_log(f_name or "system", f"[INFO] Multi-step task [{t.get('id')}] succeeded on {r_id}.")
+                            elif stat in ["aborted", "rejected"]:
+                                t["status"] = "failed"
+                                t["error"] = msg_text or "步驟執行失敗"
+                                t["detail"] = f"步驟 {step + 1} 失敗: {msg_text}"
+                                append_adapter_log(f_name or "system", f"[ERROR] Multi-step task [{t.get('id')}] failed on {r_id}: {msg_text}")
+                            elif stat == "canceled":
+                                t["status"] = "canceled"
+                                t["detail"] = "已取消"
+                            break
+                except Exception as ex:
+                    print(f"[RMF Bridge] Error updating task status: {ex}")
+
+            self.task_status_sub = self.ros_node.create_subscription(
+                String, "/rmf/task_status", task_status_cb, 10
+            )
+
             # Subscribe to discovered robots published by Fleet Adapter
             def discovered_cb(msg: String):
                 try:
@@ -582,6 +654,28 @@ class RMFService:
             if task.get("status") in state.TERMINAL_STATES:
                 return {"status": "error", "task_id": identifier,
                         "message": f"任務已結束 ({task.get('status')})，無法取消。"}
+            if task.get("type") == "multi_step":
+                # The robot confirms the cancel (task_status 'canceled') once the running step has stopped.
+                task["cancel_requested"] = True
+                task["status"] = "canceling"
+                task["detail"] = "取消中，等待車端確認"
+                if self.task_cmd_pub and rclpy.ok():
+                    try:
+                        msg = String()
+                        msg.data = json.dumps({
+                            "action": "stop",
+                            "fleet_name": task.get("fleet_name"),
+                            "robot_id": task.get("robot_id"),
+                            "task_id": task.get("id"),
+                        })
+                        self.task_cmd_pub.publish(msg)
+                    except Exception as ex:
+                        print(f"[RMF Dispatcher WARN] Failed to send stop for multi-step task: {ex}")
+                append_adapter_log(
+                    task.get("fleet_name") or "system",
+                    f"[WARN] Multi-step task [{identifier}] cancel requested by operator.",
+                )
+                return {"status": "success", "task_id": identifier, "message": f"多步任務 [{identifier}] 取消中，等待車端確認。"}
             rmf_task_id = task.get("booking_id")
             if not rmf_task_id:
                 return {"status": "error", "task_id": identifier,
@@ -647,6 +741,201 @@ class RMFService:
         if stale:
             msg += f"；車隊 {', '.join(stale)} 的路網已更新但 Adapter 尚未重新載入，請至車隊管理頁按「重新載入」"
         return msg
+
+    @staticmethod
+    def _resolve_dispatch_target(robot_id: Optional[str], fleet_name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve the target fleet for an RMF task and check it can take work. Returns (fleet, error)."""
+        target_fleet = fleet_name
+        if not target_fleet and robot_id and robot_id != "any":
+            rob = state.current_robots.get(robot_id)
+            if rob:
+                target_fleet = rob.get("fleet")
+            else:
+                disc = state.discovered_robots.get(f"fleet1_{robot_id}") or state.discovered_robots.get(f"fleet2_{robot_id}")
+                if disc:
+                    target_fleet = disc.get("fleet_name")
+            if not target_fleet:
+                target_fleet = "fleet1" if "1" in robot_id else ("fleet2" if "2" in robot_id else "tinyRobot")
+
+        if target_fleet and target_fleet in state.paused_fleets:
+            print(f"[RMF Dispatcher WARN] Fleet [{target_fleet}] is paused, rejecting task dispatch.")
+            return target_fleet, f"車隊 '{target_fleet}' 目前處於暫停狀態 (paused)，無法受理調度任務。請先至車隊管理介面恢復車隊。"
+
+        if robot_id and robot_id != "any" and target_fleet and state.is_robot_estopped(target_fleet, robot_id):
+            return target_fleet, f"車輛 '{robot_id}' 處於緊急停車狀態，請先解除緊急停車。"
+
+        if robot_id and robot_id != "any":
+            is_off, off_dist = state.is_robot_off_graph(target_fleet or "", robot_id)
+            if is_off:
+                return target_fleet, f"車輛 '{robot_id}' 偏離路網過遠 ({off_dist}m > 3.0m)，無法操控接單！請手動移車或在路網編輯器中將路網連至車輛位置。"
+        else:
+            # Auto dispatch: check if all active robots are off-graph
+            online_robots = [
+                r for r in state.current_robots.values()
+                if (not target_fleet or r.get("fleet") == target_fleet)
+                and r.get("online", True)
+                and not r.get("emergency_stop", False)
+            ]
+            if online_robots and all(state.is_robot_off_graph(r.get("fleet", ""), r.get("id"))[0] for r in online_robots):
+                scope_str = f"車隊 '{target_fleet}' 內" if target_fleet else "目前系統中"
+                return target_fleet, f"{scope_str}所有在線車輛皆偏離路網過遠 (> 3.0m)，無法操控接單！請先手動移車或在路網編輯器中將路網連過去。"
+        return target_fleet, None
+
+    @staticmethod
+    def _active_map_waypoints() -> Optional[List[Dict[str, Any]]]:
+        if not os.path.exists(state.ACTIVE_MAP_FILE):
+            return None
+        try:
+            with open(state.ACTIVE_MAP_FILE, "r", encoding="utf-8") as mf:
+                return [w for w in json.load(mf).get("waypoints", []) if w.get("name")]
+        except Exception as e:
+            print(f"[RMF Dispatcher WARN] Cannot read active map waypoints: {e}")
+            return None
+
+    @classmethod
+    def steps_to_compose_phases(cls, steps: Any) -> Tuple[List[Dict[str, Any]], List[str], Optional[str]]:
+        """Convert multi-step task steps into Open-RMF compose phases. Returns (phases, places, error).
+
+        - navigate -> go_to_place: RMF plans the route and negotiates traffic, so it alone releases
+          each navigation. The step needs a nav-graph waypoint: 'place', or x/y that lies on one.
+        - gimbal_move / gimbal_rotate -> perform_action: executed by the fleet adapter's action
+          executor, which sends the robot a gimbal_move / gimbal_rotate command.
+        """
+        if not isinstance(steps, list) or not steps:
+            return [], [], "多步任務必須包含至少一個步驟 (steps)"
+        waypoints = cls._active_map_waypoints()
+        names = {w["name"] for w in waypoints} if waypoints else None
+        phases: List[Dict[str, Any]] = []
+        places: List[str] = []
+        for i, step in enumerate(steps):
+            label = f"步驟 {i + 1}"
+            if not isinstance(step, dict):
+                return [], [], f"{label} 格式錯誤，必須為物件"
+            stype = step.get("type")
+            try:
+                if stype == "navigate":
+                    place = step.get("place") or step.get("waypoint")
+                    if place is None:
+                        if "x" not in step or "y" not in step:
+                            return [], [], f"{label} navigate 需指定站點 'place' 或座標 x/y"
+                        if not waypoints:
+                            return [], [], f"{label} 無法以座標對應站點：目前沒有導航路網"
+                        x, y = float(step["x"]), float(step["y"])
+                        nearest = min(waypoints, key=lambda w: math.hypot(float(w["x"]) - x, float(w["y"]) - y))
+                        dist = math.hypot(float(nearest["x"]) - x, float(nearest["y"]) - y)
+                        if dist > COMPOSE_WAYPOINT_TOLERANCE_M:
+                            return [], [], (f"{label} 座標 ({x:.2f}, {y:.2f}) 不在路網站點上（最近站點 "
+                                            f"'{nearest['name']}' 相距 {dist:.2f}m）；RMF 只能導航到路網站點")
+                        place = nearest["name"]
+                    place = str(place).strip()
+                    if names is not None and place not in names:
+                        return [], [], f"{label} 站點 '{place}' 不存在於目前導航地圖中"
+                    destination: Dict[str, Any] = {"waypoint": place}
+                    if step.get("yaw") is not None:
+                        destination["orientation"] = float(step["yaw"])
+                    activity = {"category": "go_to_place", "description": destination}
+                    places.append(place)
+                elif stype in ("gimbal_move", "gimbal_rotate"):
+                    activity = {
+                        "category": "perform_action",
+                        "description": {
+                            "unix_millis_action_duration_estimate": int(float(step.get("duration_s", 10.0)) * 1000),
+                            "category": stype,
+                            "description": {
+                                "pan_deg": float(step.get("pan_deg", 0.0)),
+                                "tilt_deg": float(step.get("tilt_deg", 0.0)),
+                            },
+                            "use_tool_sink": False,
+                        },
+                    }
+                else:
+                    return [], [], f"{label} 不支援的步驟類型 '{stype}'（可用：navigate、gimbal_move、gimbal_rotate）"
+            except (TypeError, ValueError) as e:
+                return [], [], f"{label} 參數格式錯誤: {e}"
+            phases.append({"activity": {"category": "sequence", "description": {"activities": [activity]}}})
+        return phases, places, None
+
+    def dispatch_compose_task(
+        self,
+        steps: List[Dict[str, Any]],
+        robot_id: Optional[str] = None,
+        fleet_name: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Submit a multi-step task (navigate / gimbal) to Open-RMF as one compose task.
+
+        Unlike dispatch_multi_step_task (sent straight to the robot), RMF schedules every
+        navigation phase against the traffic of the other robots. Without robot_id RMF picks the robot.
+        """
+        req_id = task_id or generate_task_id()
+        phases, places, err = self.steps_to_compose_phases(steps)
+        if err:
+            return {"status": "error", "task_id": None, "request_id": None, "message": err}
+
+        robot_id = robot_id if robot_id and robot_id != "any" else None
+        target_fleet, err = self._resolve_dispatch_target(robot_id, fleet_name)
+        if err:
+            return {"status": "error", "task_id": None, "request_id": None, "message": err}
+
+        if places:
+            unreachable = self._unknown_places_for_adapter(places, target_fleet if robot_id else None)
+            if unreachable:
+                return {"status": "error", "task_id": None, "request_id": None, "message": unreachable}
+
+        if not self.task_pub or not rclpy.ok():
+            return {
+                "status": "error",
+                "task_id": req_id,
+                "request_id": req_id,
+                "message": "ROS 2 Task Publisher 尚未就緒，無法受理調度請求。請確認 RMF 核心服務已啟動。",
+            }
+
+        request: Dict[str, Any] = {
+            "category": "compose",
+            "description": {"category": "multi_step", "phases": phases},
+            "requester": "rmf_web_studio",
+        }
+        if robot_id and target_fleet:
+            payload_json = {"type": "robot_task_request", "robot": robot_id, "fleet": target_fleet, "request": request}
+        else:
+            if target_fleet:
+                request["fleet_name"] = target_fleet
+            payload_json = {"type": "dispatch_task_request", "request": request}
+
+        new_task = {
+            "id": req_id,
+            "request_id": req_id,
+            "booking_id": None,
+            "type": "compose",
+            "target_waypoint": " → ".join(
+                s.get("place") or s.get("waypoint") or s.get("type", "?") if isinstance(s, dict) else "?" for s in steps),
+            "robot_id": robot_id or "Auto (RMF)",
+            "fleet_name": target_fleet or "Auto (RMF)",
+            "status": "queued",
+            "progress": 0,
+            "total_steps": len(steps),
+            "steps": steps,
+            "created_at": time.strftime("%H:%M:%S"),
+            "detail": f"共 {len(steps)} 個步驟，由 Open-RMF 排程",
+        }
+        state.current_tasks.insert(0, new_task)
+
+        msg = ApiRequest()
+        msg.request_id = req_id
+        msg.json_msg = json.dumps(payload_json)
+        self.task_pub.publish(msg)
+        print(f"[RMF Dispatcher] Published compose ApiRequest [{req_id}] to Open-RMF: {msg.json_msg}")
+        append_adapter_log(
+            target_fleet or "system",
+            f"[INFO] [RMF Dispatcher]: Compose task [{req_id}] ({len(steps)} steps) submitted to Open-RMF scheduler.",
+        )
+        return {
+            "status": "success",
+            "task_id": req_id,
+            "request_id": req_id,
+            "payload": payload_json,
+            "message": f"多步任務 [{req_id}] 已提交至 Open-RMF 調度器（compose）！",
+        }
 
     def dispatch_task(
         self,
@@ -763,70 +1052,14 @@ class RMFService:
                 "rounds": 1,
             }
 
-        # Determine target fleet
-        target_fleet = fleet_name
-        if not target_fleet and robot_id and robot_id != "any":
-            rob = state.current_robots.get(robot_id)
-            if rob:
-                target_fleet = rob.get("fleet")
-            else:
-                disc = state.discovered_robots.get(f"fleet1_{robot_id}") or state.discovered_robots.get(f"fleet2_{robot_id}")
-                if disc:
-                    target_fleet = disc.get("fleet_name")
-            if not target_fleet:
-                target_fleet = "fleet1" if "1" in robot_id else ("fleet2" if "2" in robot_id else "tinyRobot")
-
-        # Check if target fleet is paused
-        if target_fleet and target_fleet in state.paused_fleets:
-            print(f"[RMF Dispatcher WARN] Fleet [{target_fleet}] is paused, rejecting task dispatch.")
+        target_fleet, target_err = self._resolve_dispatch_target(robot_id, fleet_name)
+        if target_err:
             return {
                 "status": "error",
                 "task_id": None,
                 "request_id": None,
-                "message": f"車隊 '{target_fleet}' 目前處於暫停狀態 (paused)，無法受理調度任務。請先至車隊管理介面恢復車隊。",
+                "message": target_err,
             }
-
-        if robot_id and robot_id != "any" and target_fleet and state.is_robot_estopped(target_fleet, robot_id):
-            return {
-                "status": "error",
-                "task_id": None,
-                "request_id": None,
-                "message": f"車輛 '{robot_id}' 處於緊急停車狀態，請先解除緊急停車。",
-            }
-
-        # Check if robot is off-graph
-        if robot_id and robot_id != "any":
-            is_off, off_dist = state.is_robot_off_graph(target_fleet or "", robot_id)
-            if is_off:
-                return {
-                    "status": "error",
-                    "task_id": None,
-                    "request_id": None,
-                    "message": f"車輛 '{robot_id}' 偏離路網過遠 ({off_dist}m > 3.0m)，無法操控接單！請手動移車或在路網編輯器中將路網連至車輛位置。",
-                }
-        else:
-            # Auto dispatch: check if all active robots are off-graph
-            online_robots = [
-                r for r in state.current_robots.values()
-                if (not target_fleet or r.get("fleet") == target_fleet)
-                and r.get("online", True)
-                and not r.get("emergency_stop", False)
-            ]
-            if online_robots:
-                all_off = True
-                for r in online_robots:
-                    is_off, _ = state.is_robot_off_graph(r.get("fleet", ""), r.get("id"))
-                    if not is_off:
-                        all_off = False
-                        break
-                if all_off:
-                    scope_str = f"車隊 '{target_fleet}' 內" if target_fleet else "目前系統中"
-                    return {
-                        "status": "error",
-                        "task_id": None,
-                        "request_id": None,
-                        "message": f"{scope_str}所有在線車輛皆偏離路網過遠 (> 3.0m)，無法操控接單！請先手動移車或在路網編輯器中將路網連過去。",
-                    }
 
         unreachable = self._unknown_places_for_adapter(places, target_fleet if robot_id and robot_id != "any" else None)
         if unreachable:
@@ -902,6 +1135,99 @@ class RMFService:
             "payload": payload_json,
             "message": f"任務 [{req_id}] 已成功提交至 Open-RMF 調度器！",
         }
+
+    def dispatch_multi_step_task(
+        self,
+        robot_id: str,
+        steps: List[Dict[str, Any]],
+        fleet_name: Optional[str] = None,
+        auto_proceed: bool = False,
+        step_delay: float = 0.0,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Dispatches a multi-step task directly to the Fleet Adapter via ROS 2.
+        By default each step waits for an operator proceed (auto_proceed=False)."""
+        if not robot_id or robot_id == "any":
+            return {"status": "error", "message": "多步任務必須指定特定車輛 (robot_id)"}
+        if not steps or not isinstance(steps, list):
+            return {"status": "error", "message": "多步任務必須包含至少一個步驟 (steps)"}
+
+        req_id = task_id or generate_task_id()
+        target_fleet = fleet_name
+        if not target_fleet:
+            rob = state.current_robots.get(robot_id)
+            if rob:
+                target_fleet = rob.get("fleet")
+            else:
+                target_fleet = state.find_robot_fleet(robot_id)
+        if not target_fleet:
+            target_fleet = "fleet1" if "1" in robot_id else ("fleet2" if "2" in robot_id else "tinyRobot")
+
+        if not self.task_cmd_pub or not rclpy.ok():
+            return {
+                "status": "error",
+                "task_id": req_id,
+                "message": "ROS 2 Task Command Publisher 尚未就緒，無法下派多步任務。",
+            }
+
+        new_task = {
+            "id": req_id,
+            "request_id": req_id,
+            "booking_id": req_id,
+            "type": "multi_step",
+            "target_waypoint": f"{len(steps)} steps",
+            "robot_id": robot_id,
+            "fleet_name": target_fleet,
+            "status": "queued",
+            "progress": 0,
+            "total_steps": len(steps),
+            "current_step": 0,
+            "steps": steps,
+            "auto_proceed": auto_proceed,
+            "step_delay": step_delay,
+            "created_at": time.strftime("%H:%M:%S"),
+            "detail": f"共 {len(steps)} 個步驟下派中",
+        }
+        state.current_tasks.insert(0, new_task)
+
+        msg = String()
+        msg.data = json.dumps({
+            "action": "dispatch_task",
+            "fleet_name": target_fleet,
+            "robot_id": robot_id,
+            "steps": steps,
+            "auto_proceed": auto_proceed,
+            "step_delay": step_delay,
+            "task_id": req_id,
+        })
+        self.task_cmd_pub.publish(msg)
+        print(f"[RMF Dispatcher] 🚀 Published multi-step task [{req_id}] to /rmf/task_command: {msg.data}")
+        append_adapter_log(
+            target_fleet,
+            f"[INFO] Multi-step task [{req_id}] ({len(steps)} steps) dispatched to {robot_id}."
+        )
+        return {
+            "status": "success",
+            "task_id": req_id,
+            "request_id": req_id,
+            "message": f"多步任務 [{req_id}] 已下派至車輛 {robot_id}！",
+        }
+
+    def proceed_task(self, robot_id: str, fleet_name: Optional[str] = None, cmd_id: Optional[int] = None) -> Dict[str, Any]:
+        """Dispatches 'proceed' action to release the next step for a waiting multi-step task."""
+        target_fleet = fleet_name or state.find_robot_fleet(robot_id) or "fleet1"
+        if not self.task_cmd_pub or not rclpy.ok():
+            return {"status": "error", "message": "ROS 2 Task Command Publisher 尚未就緒"}
+        msg = String()
+        msg.data = json.dumps({
+            "action": "proceed",
+            "fleet_name": target_fleet,
+            "robot_id": robot_id,
+            "cmd_id": cmd_id,
+        })
+        self.task_cmd_pub.publish(msg)
+        print(f"[RMF Dispatcher] ⏩ Published proceed to /rmf/task_command for {robot_id}")
+        return {"status": "success", "message": f"已發送 proceed 放行指令給車輛 {robot_id}"}
 
     def shutdown(self):
         """Terminates processes gracefully."""

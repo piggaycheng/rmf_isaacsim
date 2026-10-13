@@ -102,6 +102,76 @@ class ManagedRobot:
         # RMF command received while offline; held (not sent) until the robot is back online.
         self.deferred_cmd_payload: Optional[Dict[str, Any]] = None
         self.last_dispatch_time: float = 0.0
+        # Multi-Step Task Tracking (per multi_step_task.md specification)
+        self.active_task: Optional[Dict[str, Any]] = None
+        # cmd_id -> backend task info, kept until the robot reports a terminal state so that a
+        # task superseded by RMF still reports its final state to the backend.
+        self.task_refs: Dict[Any, Dict[str, Any]] = {}
+
+
+def validate_task_steps(steps: Any) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """Validates multi-step task steps per multi_step_task.md specification.
+    
+    Supported types:
+      - navigate: x (float), y (float), yaw (float, optional default 0.0)
+      - gimbal_move: pan_deg (float), tilt_deg (float)
+      - gimbal_rotate: pan_deg (float, optional default 0.0, |pan_deg| <= 180), tilt_deg (float, optional default 0.0)
+    Planned but not implemented (rejected per spec):
+      - rotate, take_photo
+    """
+    if not isinstance(steps, list) or not steps:
+        return False, "'steps' must be a non-empty list", []
+    validated: List[Dict[str, Any]] = []
+    for idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            return False, f"Step {idx} must be a dictionary", []
+        step_type = step.get("type")
+        if not step_type:
+            return False, f"Step {idx} missing 'type'", []
+
+        if step_type == "navigate":
+            if "x" not in step or "y" not in step:
+                return False, f"Step {idx} ('navigate') requires 'x' and 'y'", []
+            try:
+                x = float(step["x"])
+                y = float(step["y"])
+                yaw = float(step.get("yaw", 0.0))
+                if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw)):
+                    return False, f"Step {idx} ('navigate') coordinates must be finite numbers", []
+            except (ValueError, TypeError):
+                return False, f"Step {idx} ('navigate') coordinates must be numbers", []
+            validated.append({"type": "navigate", "x": x, "y": y, "yaw": yaw})
+
+        elif step_type == "gimbal_move":
+            if "pan_deg" not in step or "tilt_deg" not in step:
+                return False, f"Step {idx} ('gimbal_move') requires 'pan_deg' and 'tilt_deg'", []
+            try:
+                pan = float(step["pan_deg"])
+                tilt = float(step["tilt_deg"])
+                if not (math.isfinite(pan) and math.isfinite(tilt)):
+                    return False, f"Step {idx} ('gimbal_move') angles must be finite numbers", []
+            except (ValueError, TypeError):
+                return False, f"Step {idx} ('gimbal_move') angles must be numbers", []
+            validated.append({"type": "gimbal_move", "pan_deg": pan, "tilt_deg": tilt})
+
+        elif step_type == "gimbal_rotate":
+            try:
+                pan = float(step.get("pan_deg", 0.0))
+                tilt = float(step.get("tilt_deg", 0.0))
+                if not (math.isfinite(pan) and math.isfinite(tilt)):
+                    return False, f"Step {idx} ('gimbal_rotate') angles must be finite numbers", []
+                if abs(pan) > 180.0:
+                    return False, f"Step {idx} ('gimbal_rotate') |pan_deg| must be <= 180", []
+            except (ValueError, TypeError):
+                return False, f"Step {idx} ('gimbal_rotate') angles must be numbers", []
+            validated.append({"type": "gimbal_rotate", "pan_deg": pan, "tilt_deg": tilt})
+
+        elif step_type in ("rotate", "take_photo"):
+            return False, f"Step {idx} ('{step_type}') is planned in protocol but not implemented on robot", []
+        else:
+            return False, f"Step {idx} has unknown type '{step_type}'", []
+
+    return True, "", validated
 
 
 class MqttFleetAdapter:
@@ -290,6 +360,15 @@ class MqttFleetAdapter:
             print(f"[RMF -> AMR] Dropping deferred command for '{robot.name}': RMF execution no longer active.")
             robot.current_execution = None
             return
+        if payload.get("action") == "task":
+            res = self._dispatch_multi_step_task_locked(
+                robot, payload["steps"], execution=execution,
+                auto_proceed=payload.get("auto_proceed", True), step_delay=payload.get("step_delay", 0.0),
+                task_id=payload.get("task_id"), step_offset=payload.get("step_offset", 0),
+                all_steps=payload.get("all_steps"))
+            if res["status"] == "error":
+                self._escalate_rmf_failure(robot, f"Deferred task for '{robot.name}' could not be dispatched: {res['message']}")
+            return
         robot.cmd_id += 1
         payload = dict(payload, cmd_id=robot.cmd_id, timestamp=time.time())
         target = payload.get("target")
@@ -403,6 +482,12 @@ class MqttFleetAdapter:
             )
             self.robot_control_sub = self.node.create_subscription(
                 String, "/rmf/robot_control", self._on_ros2_robot_control, 10
+            )
+            self.task_command_sub = self.node.create_subscription(
+                String, "/rmf/task_command", self._on_ros2_task_command, 10
+            )
+            self.task_status_pub = self.node.create_publisher(
+                String, "/rmf/task_status", 10
             )
             self.adapter = Adapter.make("rmf_mqtt_fleet_adapter")
             if not self.adapter:
@@ -535,7 +620,7 @@ class MqttFleetAdapter:
                 import rmf_adapter.fleet_update_handle as _fuh
                 c = _fuh.Confirmation()
                 if not _check_fleet_availability(fleet_name):
-                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>3.0m) 或無法運作，拒絕競標接單"])
+                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>5.0m) 或無法運作，拒絕競標接單"])
                     return c
                 c.accept()
                 return c
@@ -544,7 +629,7 @@ class MqttFleetAdapter:
                 import rmf_adapter.fleet_update_handle as _fuh
                 c = _fuh.Confirmation()
                 if not _check_fleet_availability(fleet_name):
-                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>3.0m) 或無法運作，拒絕競標接單"])
+                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>5.0m) 或無法運作，拒絕競標接單"])
                     return c
                 c.accept()
                 return c
@@ -570,6 +655,7 @@ class MqttFleetAdapter:
             client.subscribe(f"{self.topic_prefix}/+/robot/+/deregister", qos=1)
             client.subscribe(f"{self.topic_prefix}/+/robot/+/status", qos=1)
             client.subscribe(f"{self.topic_prefix}/+/robot/+/command_result", qos=1)
+            client.subscribe(f"{self.topic_prefix}/+/robot/+/task_state", qos=1)
             client.subscribe(f"{self.topic_prefix}/+/control", qos=1)
             print(f"[MQTT] Subscribed to wildcard -> {self.topic_prefix}/+/robot/+/* and {self.topic_prefix}/+/control")
         else:
@@ -617,6 +703,8 @@ class MqttFleetAdapter:
             self._handle_status(robot_id, fleet_name, payload)
         elif action == "command_result":
             self._handle_command_result(robot_id, fleet_name, payload)
+        elif action == "task_state":
+            self._handle_task_state(robot_id, fleet_name, payload)
 
     def _handle_fleet_control(self, fleet_name: str, payload: Dict[str, Any]):
         action = payload.get("action")
@@ -635,6 +723,7 @@ class MqttFleetAdapter:
                     if f_name == fleet_name:
                         robot.is_paused = False
                         self._sync_rmf_availability(robot)
+                        self._resume_held_release_locked(robot)
                 print(f"[FLEET CONTROL] Fleet [{fleet_name}] resumed in Fleet Adapter.")
 
         self._persist_set("saved_maps/paused_fleets.json", self.paused_fleets)
@@ -671,6 +760,7 @@ class MqttFleetAdapter:
                     print(f"[ROBOT CONTROL] E-stop released for '{key}'.")
                     # Resume the RMF command that was interrupted/held by the e-stop (if its task is still active).
                     self._dispatch_deferred_command(robot)
+                    self._resume_held_release_locked(robot)
             else:
                 print(f"[ROBOT CONTROL WARN] Unknown action '{action}' for '{key}'. Ignoring.")
                 return
@@ -680,7 +770,22 @@ class MqttFleetAdapter:
     def _apply_estop(self, robot: ManagedRobot):
         """Halt the robot now; keep the RMF execution and hold its command for re-dispatch on release."""
         robot.is_estopped = True
-        if robot.current_execution and robot.deferred_cmd_payload is None and robot.last_cmd_payload:
+        task = robot.active_task
+        owned_task = False
+        if task:
+            self._cancel_proceed_timer(task)
+            if task.get("execution") is not None and task["execution"] is robot.current_execution:
+                owned_task = True
+                # Resume the RMF-owned task from the interrupted step on release, not from step 0.
+                index = task["step_offset"] + task["current_step"] + (1 if task["step_status"] == "waiting" else 0)
+                remaining = task["all_steps"][index:]
+                if remaining:
+                    task["estopped"] = True
+                    robot.deferred_cmd_payload = self._task_payload(
+                        robot.name, None, remaining, step_offset=index, all_steps=task["all_steps"],
+                        auto_proceed=task["auto_proceed"], step_delay=task["step_delay"],
+                        task_id=task["task_id"])
+        if robot.current_execution and not owned_task and robot.deferred_cmd_payload is None and robot.last_cmd_payload:
             robot.deferred_cmd_payload = dict(robot.last_cmd_payload, cmd_id=None)
         robot.is_retrying = False
         robot.nav_retries = 0
@@ -713,6 +818,78 @@ class MqttFleetAdapter:
                 self._handle_robot_control(fleet_name, robot_id, payload.get("action"))
         except Exception as e:
             print(f"[FA ERROR] Failed to process ROS 2 robot control: {e}")
+
+    def _on_ros2_task_command(self, msg: String):
+        """Processes task commands from backend/operator via /rmf/task_command."""
+        try:
+            payload = json.loads(msg.data)
+            action = payload.get("action", "dispatch_task")
+            fleet_name = payload.get("fleet_name") or payload.get("fleet")
+            robot_id = payload.get("robot_id") or payload.get("robot")
+            if not robot_id:
+                print(f"[TASK COMMAND WARN] Missing 'robot_id' in task command: {payload}")
+                return
+            if not fleet_name:
+                fleet_name = self._find_robot_fleet(robot_id)
+            if not fleet_name:
+                print(f"[TASK COMMAND WARN] Cannot determine fleet for robot '{robot_id}'.")
+                return
+
+            if action in ("dispatch_task", "task"):
+                steps = payload.get("steps", [])
+                task_id = payload.get("task_id")
+                # The adapter decides when the next step starts: default is to wait for an operator proceed.
+                res = self.dispatch_multi_step_task(
+                    fleet_name=fleet_name,
+                    robot_id=robot_id,
+                    steps=steps,
+                    auto_proceed=bool(payload.get("auto_proceed", False)),
+                    step_delay=float(payload.get("step_delay", 0.0) or 0.0),
+                    task_id=task_id,
+                )
+                if res.get("status") == "error":
+                    self._publish_task_status(
+                        fleet_name, robot_id, None, "rejected", 0,
+                        len(steps) if isinstance(steps, list) else 0, res.get("message", ""), task_id)
+            elif action == "proceed":
+                self._dispatch_proceed(fleet_name, robot_id, payload.get("cmd_id"), manual=True)
+            elif action == "stop":
+                self._dispatch_stop(fleet_name, robot_id, payload.get("task_id"))
+            else:
+                print(f"[TASK COMMAND WARN] Unknown action '{action}' in task command: {payload}")
+        except Exception as e:
+            print(f"[FA ERROR] Failed to process ROS 2 task command: {e}")
+
+    def _publish_task_status(
+        self,
+        fleet_name: str,
+        robot_id: str,
+        cmd_id: Any,
+        status: str,
+        step: int,
+        total_steps: int,
+        message: str,
+        task_id: Optional[str] = None,
+    ):
+        """Publishes multi-step task status to ROS 2 /rmf/task_status topic."""
+        if not hasattr(self, "task_status_pub") or not self.task_status_pub or not rclpy.ok():
+            return
+        try:
+            msg = String()
+            msg.data = json.dumps({
+                "fleet_name": fleet_name,
+                "robot_id": robot_id,
+                "cmd_id": cmd_id,
+                "status": status,
+                "step": step,
+                "steps": total_steps,
+                "message": message,
+                "task_id": task_id,
+                "timestamp": time.time(),
+            })
+            self.task_status_pub.publish(msg)
+        except Exception as e:
+            print(f"[FA WARN] Failed to publish task status: {e}")
 
     def _publish_fa_state(self):
         """Publish FA runtime state (latched); doubles as the ACK for fleet pause/resume."""
@@ -929,7 +1106,7 @@ class MqttFleetAdapter:
             "first_seen": now,
         })
         dist_to_graph = self._compute_distance_to_graph(fleet_name, x, y)
-        is_off_graph = dist_to_graph > 3.0
+        is_off_graph = dist_to_graph > 5.0
         disc["last_seen"] = now
         disc["x"] = x
         disc["y"] = y
@@ -1082,7 +1259,7 @@ class MqttFleetAdapter:
             managed_robot.is_off_graph = is_off_graph
             managed_robot.off_graph_distance = round(dist_to_graph, 2)
             if is_off_graph:
-                print(f"[OFF-GRAPH WARN] ⚠️ 車輛 '{robot_id}' 距離路網 {dist_to_graph:.2f}m > 3.0m，標記為偏離路網，禁止競標與操控！")
+                print(f"[OFF-GRAPH WARN] ⚠️ 車輛 '{robot_id}' 距離路網 {dist_to_graph:.2f}m > 5.0m，標記為偏離路網，禁止競標與操控！")
             self.robots[robot_key] = managed_robot
 
             # Restore fleet pause / persisted operator e-stop for a newly added robot
@@ -1124,7 +1301,7 @@ class MqttFleetAdapter:
         status_val = payload.get("status", "idle")
 
         dist_to_graph = self._compute_distance_to_graph(fleet_name, x_val, y_val)
-        is_off_graph = dist_to_graph > 3.0
+        is_off_graph = dist_to_graph > 5.0
 
         with self.lock:
             if robot_key in self.discovered_robots:
@@ -1193,8 +1370,8 @@ class MqttFleetAdapter:
             reported_cmd_id = payload.get("current_cmd_id")
             self._resend_if_lost(robot, reported_cmd_id)
             if robot.current_execution and robot.target_position is not None and not robot.is_holding:
-                # 1. Heartbeat must NEVER complete docking or actions (docking and actions require explicit command_result)
-                is_docking_or_action = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") in ["dock", "action"])
+                # 1. Heartbeat must NEVER complete docking, actions, or multi-step tasks (these require explicit command_result/task_state)
+                is_docking_or_action = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") in ["dock", "action", "task", "gimbal_move", "gimbal_rotate"]) or (robot.active_task is not None)
 
                 # 2. Check floor / level matches target
                 target_level = robot.last_cmd_payload.get("target", {}).get("level_name") if robot.last_cmd_payload else robot.map_name
@@ -1340,6 +1517,14 @@ class MqttFleetAdapter:
                 robot.stop_cmd_id = None
                 return
 
+            # Multi-step task result (task_state carries the same outcome; whichever arrives first wins)
+            if robot.active_task and cmd_id == robot.active_task.get("cmd_id"):
+                print(f"[CMD_RESULT] Robot '{robot_id}' ({fleet_name}) multi-step task (cmd_id: {cmd_id}) reported status: {status}")
+                outcome = {"completed": "succeeded", "success": "succeeded",
+                           "canceled": "canceled", "cancelled": "canceled"}.get(status, "aborted")
+                self._finish_task_locked(robot, outcome, payload.get("message", ""))
+                return
+
             if robot.current_execution and not robot.is_holding:
                 if cmd_id == robot.cmd_id and status in ["completed", "success"]:
                     print(f"[NAV] Verified completion of cmd_id {cmd_id} for '{robot_id}'.")
@@ -1395,6 +1580,397 @@ class MqttFleetAdapter:
                                 print(f"[RMF ERROR] Error escalating failure to RMF: {e}")
 
     # ==========================================================================
+    # Handler 4: Multi-Step Task Progress & Gate Release (多步任務與步驟放行)
+    #
+    # Per multi_step_task.md the robot never advances on its own: after each step it
+    # reports 'waiting' and the adapter alone decides when to send 'proceed'.
+    # Methods suffixed with _locked must be called with self.lock held (it is not reentrant).
+    # ==========================================================================
+    TASK_TERMINAL_STATES = ("succeeded", "aborted", "rejected", "canceled")
+
+    @staticmethod
+    def _cancel_proceed_timer(task: Dict[str, Any]):
+        timer = task.get("proceed_timer")
+        if timer:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        task["proceed_timer"] = None
+
+    @staticmethod
+    def _task_payload(robot_id, cmd_id, steps, step_offset=0, all_steps=None,
+                      auto_proceed=False, step_delay=0.0, task_id=None) -> Dict[str, Any]:
+        """Deferred task command; the meta keys are adapter-internal and never sent over MQTT."""
+        return {
+            "robot_id": robot_id,
+            "cmd_id": cmd_id,
+            "action": "task",
+            "steps": steps,
+            "step_offset": step_offset,
+            "all_steps": all_steps if all_steps is not None else steps,
+            "auto_proceed": auto_proceed,
+            "step_delay": step_delay,
+            "task_id": task_id,
+            "timestamp": time.time(),
+        }
+
+    def _escalate_rmf_failure(self, robot: ManagedRobot, message: str):
+        """easy_full_control has no execution-failure API: report the error and mark the robot failed.
+        The execution is kept so the RMF task stays visible until it is canceled/replanned in RMF."""
+        print(f"[RMF ERROR] {message}")
+        if robot.update_handle:
+            try:
+                robot.update_handle.more().log_error(message)
+                robot.update_handle.more().override_status("failed")
+            except Exception as e:
+                print(f"[RMF WARN] Error escalating task failure for '{robot.name}': {e}")
+
+    def _detach_active_task_locked(self, robot: ManagedRobot, reason: str):
+        """Stop tracking the active task as current (a newer command replaces it). Its task_refs entry
+        stays so the robot's final report for it still reaches the backend."""
+        task = robot.active_task
+        if not task:
+            return
+        self._cancel_proceed_timer(task)
+        robot.active_task = None
+        print(f"[TASK] Detached task '{task['task_id']}' (cmd_id: {task['cmd_id']}) from '{robot.name}': {reason}")
+
+    def _handle_task_state(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
+        """Handles task progress published on rmf/<fleet>/robot/<robot>/task_state.
+
+        - running: current step executing
+        - waiting: step finished, robot holds at the release gate until 'proceed'
+        - succeeded / aborted / rejected / canceled: terminal
+        - canceling: stop received, waiting for the step to end
+        """
+        cmd_id = payload.get("cmd_id")
+        status = payload.get("status")
+        rel_step = int(payload.get("step", 0) or 0)
+        message = payload.get("message", "")
+        print(f"[TASK_STATE] Robot '{robot_id}' ({fleet_name}) cmd_id={cmd_id} status='{status}' step={rel_step}/{payload.get('steps', 0)} msg='{message}'")
+
+        with self.lock:
+            robot = self._get_robot(fleet_name, robot_id)
+            if not robot:
+                print(f"[TASK_STATE WARN] Robot '{robot_id}' ({fleet_name}) not found. Ignoring.")
+                return
+
+            task = robot.active_task
+            if not task or cmd_id != task["cmd_id"]:
+                ref = robot.task_refs.get(cmd_id)
+                if ref is None:
+                    print(f"[TASK_STATE] Ignoring state for unknown/stale cmd_id {cmd_id} on '{robot_id}'.")
+                    return
+                # Superseded task: only forward its progress / final state to the backend.
+                if status in self.TASK_TERMINAL_STATES:
+                    robot.task_refs.pop(cmd_id, None)
+                self._publish_task_status(fleet_name, robot_id, cmd_id, status, ref["step_offset"] + rel_step,
+                                          ref["total"], message, ref["task_id"])
+                return
+
+            if status in self.TASK_TERMINAL_STATES:
+                task["current_step"] = rel_step
+                self._finish_task_locked(robot, status, message)
+                return
+
+            task["current_step"] = rel_step
+            task["step_status"] = status
+            task["message"] = message
+            task["last_update"] = time.time()
+            step = task["step_offset"] + rel_step
+            total = len(task["all_steps"])
+            self._publish_task_status(fleet_name, robot_id, cmd_id, status, step, total, message, task["task_id"])
+
+            if status == "running":
+                robot.status = "moving"
+                current = task["steps"][rel_step] if 0 <= rel_step < len(task["steps"]) else None
+                if current and current.get("type") == "navigate":
+                    robot.target_position = np.array(
+                        [current["x"], current["y"], current.get("yaw", 0.0)], dtype=np.float64)
+                else:
+                    robot.target_position = None
+            elif status == "waiting":
+                robot.status = "waiting"
+                robot.target_position = None
+                print(f"[TASK_STATE] Robot '{robot_id}' finished step {step + 1}/{total}, holding at release gate.")
+                if not task["auto_proceed"]:
+                    print(f"[TASK_STATE] Awaiting operator proceed for '{robot_id}' (cmd_id: {cmd_id}).")
+                elif task["step_delay"] > 0.0:
+                    timer = threading.Timer(task["step_delay"], self._dispatch_proceed, args=[fleet_name, robot_id, cmd_id])
+                    timer.daemon = True
+                    task["proceed_timer"] = timer
+                    timer.start()
+                else:
+                    self._send_proceed_locked(robot, cmd_id)
+            elif status == "canceling":
+                robot.status = "canceling"
+
+    def _finish_task_locked(self, robot: ManagedRobot, outcome: str, message: str = ""):
+        """Single, idempotent terminal handling for the active task (task_state and command_result
+        both report the outcome; whichever arrives first finishes it)."""
+        task = robot.active_task
+        if task is None:
+            return
+        self._cancel_proceed_timer(task)
+        robot.active_task = None
+        robot.task_refs.pop(task["cmd_id"], None)
+        execution = task.get("execution")
+        owns_execution = execution is not None and execution is robot.current_execution
+        step = task["step_offset"] + task.get("current_step", 0)
+        total = len(task["all_steps"])
+        robot.target_position = None
+        robot.last_cmd_payload = None
+        robot.nav_retries = 0
+        robot.is_retrying = False
+
+        if outcome == "canceled" and task.get("estopped") and owns_execution and robot.deferred_cmd_payload is not None:
+            # Interrupted by e-stop: RMF still owns the task; remaining steps resume on release.
+            robot.status = "idle"
+            resume_at = robot.deferred_cmd_payload.get("step_offset", step)
+            msg = f"E-stop interrupted; resumes from step {resume_at + 1}/{total} on release"
+            print(f"[TASK HELD] '{robot.name}' task '{task['task_id']}': {msg}")
+            self._publish_task_status(robot.fleet_name, robot.name, task["cmd_id"], "held", step, total, msg, task["task_id"])
+            return
+
+        if outcome == "succeeded":
+            robot.status = "idle"
+            print(f"[TASK_STATE SUCCESS] '{robot.name}' completed task '{task['task_id']}' ({total} steps).")
+            if owns_execution:
+                robot.deferred_cmd_payload = None
+                try:
+                    execution.finished()
+                except Exception as ex:
+                    print(f"[TASK NOTICE] execution finish notice: {ex}")
+                robot.current_execution = None
+        elif outcome == "canceled":
+            robot.status = "idle"
+            print(f"[TASK_STATE CANCELED] '{robot.name}' task '{task['task_id']}' canceled at step {step}.")
+            if owns_execution:
+                # RMF did not ask for this cancel (an RMF stop detaches the task first).
+                robot.deferred_cmd_payload = None
+                self._escalate_rmf_failure(robot, f"Task '{task['task_id']}' on '{robot.name}' was canceled by the robot at step {step}: {message}")
+        else:
+            robot.status = "failed"
+            print(f"[TASK_STATE FAILED] '{robot.name}' task '{task['task_id']}' {outcome} at step {step}: {message}")
+            if owns_execution:
+                robot.deferred_cmd_payload = None
+                self._escalate_rmf_failure(robot, f"Task '{task['task_id']}' on '{robot.name}' {outcome} at step {step}: {message}")
+
+        self._publish_task_status(robot.fleet_name, robot.name, task["cmd_id"], outcome, step, total, message, task["task_id"])
+
+    def _dispatch_multi_step_task_locked(
+        self,
+        robot: ManagedRobot,
+        steps: Any,
+        execution: Any = None,
+        auto_proceed: bool = False,
+        step_delay: float = 0.0,
+        task_id: Optional[str] = None,
+        step_offset: int = 0,
+        all_steps: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        fleet_name, robot_id = robot.fleet_name, robot.name
+        if not robot.is_online or robot.is_estopped:
+            reason = "emergency-stopped" if robot.is_estopped else "offline"
+            return {"status": "error", "message": f"Cannot execute task: robot '{robot_id}' in fleet '{fleet_name}' is {reason}."}
+
+        ok, err_msg, validated_steps = validate_task_steps(steps)
+        if not ok:
+            return {"status": "error", "message": f"Steps validation failed: {err_msg}"}
+
+        if execution is None and (robot.current_execution is not None or robot.deferred_cmd_payload is not None):
+            # Direct (non-RMF) tasks must not pre-empt work that RMF has scheduled on this robot.
+            return {"status": "error", "message": f"Robot '{robot_id}' is executing an Open-RMF task; direct task rejected."}
+
+        if robot.is_off_graph:
+            print(f"[TASK DISPATCH WARN] Robot '{robot_id}' is off-graph ({robot.off_graph_distance}m), executing direct multi-step task.")
+
+        self._detach_active_task_locked(robot, "superseded by a new task")
+        all_steps = list(all_steps) if all_steps is not None else validated_steps
+        task_id = task_id or f"task_{robot.cmd_id + 1}"
+
+        robot.cmd_id += 1
+        cmd_id = robot.cmd_id
+        cmd_payload = {
+            "robot_id": robot_id,
+            "cmd_id": cmd_id,
+            "action": "task",
+            "steps": validated_steps,
+            "timestamp": time.time(),
+        }
+        robot.active_task = {
+            "task_id": task_id,
+            "cmd_id": cmd_id,
+            "steps": validated_steps,
+            "all_steps": all_steps,
+            "step_offset": step_offset,
+            "total_steps": len(all_steps),
+            "current_step": 0,
+            "step_status": "dispatched",
+            "auto_proceed": bool(auto_proceed),
+            "step_delay": max(0.0, float(step_delay)),
+            "execution": execution,
+            "proceed_timer": None,
+            "release_pending": False,
+            "estopped": False,
+            "message": "",
+            "started_at": time.time(),
+            "last_update": time.time(),
+        }
+        robot.task_refs[cmd_id] = {"task_id": task_id, "step_offset": step_offset, "total": len(all_steps)}
+        if execution is not None:
+            robot.current_execution = execution
+            robot.deferred_cmd_payload = None
+        robot.nav_retries = 0
+        robot.is_retrying = False
+        robot.last_cmd_payload = cmd_payload
+        robot.last_dispatch_time = time.time()
+        robot.is_holding = False
+
+        first = validated_steps[0]
+        if first["type"] == "navigate":
+            robot.target_position = np.array([first["x"], first["y"], first.get("yaw", 0.0)], dtype=np.float64)
+        else:
+            robot.target_position = None
+
+        cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
+        self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+        print(f"[RMF -> AMR] Dispatched TASK '{task_id}' (cmd_id: {cmd_id}, steps: {step_offset + 1}-{step_offset + len(validated_steps)}/{len(all_steps)}, auto_proceed: {auto_proceed}) to '{robot_id}' via {cmd_topic}")
+        self._publish_task_status(fleet_name, robot_id, cmd_id, "dispatched", step_offset, len(all_steps), "Task dispatched", task_id)
+        return {
+            "status": "success",
+            "cmd_id": cmd_id,
+            "robot_id": robot_id,
+            "fleet_name": fleet_name,
+            "task_id": task_id,
+            "total_steps": len(all_steps),
+        }
+
+    def dispatch_multi_step_task(
+        self,
+        fleet_name: str,
+        robot_id: str,
+        steps: List[Dict[str, Any]],
+        execution: Any = None,
+        auto_proceed: bool = False,
+        step_delay: float = 0.0,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Dispatches a multi-step task to the robot via MQTT 'action': 'task'.
+        The robot halts at the release gate after every step until this adapter sends 'proceed'."""
+        with self.lock:
+            robot = self._get_robot(fleet_name, robot_id)
+            if not robot:
+                res = {"status": "error", "message": f"Robot '{robot_id}' in fleet '{fleet_name}' not found."}
+            else:
+                res = self._dispatch_multi_step_task_locked(
+                    robot, steps, execution=execution, auto_proceed=auto_proceed,
+                    step_delay=step_delay, task_id=task_id)
+        if res["status"] == "error":
+            print(f"[TASK DISPATCH ERROR] {res['message']}")
+        return res
+
+    def _send_proceed_locked(self, robot: ManagedRobot, cmd_id: Optional[int] = None) -> bool:
+        """Release the gate of the active task. Only valid while the robot reports 'waiting'."""
+        task = robot.active_task
+        if not task:
+            print(f"[PROCEED WARN] '{robot.name}' has no active multi-step task. Ignoring proceed.")
+            return False
+        if cmd_id is not None and cmd_id != task["cmd_id"]:
+            print(f"[PROCEED WARN] cmd_id {cmd_id} does not match active task cmd_id {task['cmd_id']} on '{robot.name}'. Ignoring.")
+            return False
+        if task["step_status"] != "waiting":
+            print(f"[PROCEED WARN] '{robot.name}' task is '{task['step_status']}', not waiting at a release gate. Ignoring.")
+            return False
+        task["proceed_timer"] = None
+        if robot.is_paused or robot.is_estopped:
+            task["release_pending"] = True
+            print(f"[PROCEED HOLD] '{robot.name}' is paused or emergency-stopped; release held until resumed.")
+            return False
+        cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
+        self.mqtt_client.publish(cmd_topic, json.dumps({
+            "robot_id": robot.name,
+            "cmd_id": task["cmd_id"],
+            "action": "proceed",
+            "timestamp": time.time(),
+        }), qos=1)
+        task["step_status"] = "releasing"
+        task["release_pending"] = False
+        print(f"[RMF -> AMR] Dispatched PROCEED (cmd_id: {task['cmd_id']}) to '{robot.name}' via {cmd_topic}")
+        return True
+
+    def _resume_held_release_locked(self, robot: ManagedRobot):
+        """After pause/e-stop is lifted, send a release that was held (auto mode or operator proceed)."""
+        task = robot.active_task
+        if (task and task["step_status"] == "waiting" and not robot.is_paused and not robot.is_estopped
+                and (task["auto_proceed"] or task["release_pending"])):
+            print(f"[TASK] Sending held release for '{robot.name}' (cmd_id: {task['cmd_id']}).")
+            self._send_proceed_locked(robot, task["cmd_id"])
+
+    def _dispatch_proceed(self, fleet_name: str, robot_id: str, cmd_id: Optional[int] = None, manual: bool = False):
+        """Thread-safe proceed entry point (operator command or auto-proceed timer)."""
+        with self.lock:
+            robot = self._get_robot(fleet_name, robot_id)
+            if not robot:
+                print(f"[PROCEED WARN] Robot '{robot_id}' not found in fleet '{fleet_name}'.")
+                return
+            task = robot.active_task
+            if not manual and (task is None or task["cmd_id"] != cmd_id):
+                return  # stale auto-proceed timer
+            self._send_proceed_locked(robot, cmd_id)
+
+    def _send_stop_locked(self, robot: ManagedRobot, task_id: Optional[str] = None):
+        task = robot.active_task
+        if task_id is not None and (task is None or task["task_id"] != task_id):
+            # The task is no longer running on the robot (finished, superseded or never started).
+            stale = [c for c, ref in robot.task_refs.items() if ref["task_id"] == task_id]
+            for c in stale:
+                robot.task_refs.pop(c, None)
+            print(f"[TASK STOP] Task '{task_id}' is not active on '{robot.name}'; reporting canceled without stopping the robot.")
+            self._publish_task_status(robot.fleet_name, robot.name, stale[0] if stale else None,
+                                      "canceled", 0, 0, "Task not active on robot", task_id)
+            return
+        if task:
+            self._cancel_proceed_timer(task)
+            if task.get("execution") is not None:
+                print(f"[TASK STOP WARN] Canceling RMF-owned task '{task['task_id']}' on '{robot.name}' from the backend; RMF will be told it failed.")
+        robot.cmd_id += 1
+        robot.stop_cmd_id = robot.cmd_id
+        cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
+        self.mqtt_client.publish(cmd_topic, json.dumps({
+            "robot_id": robot.name,
+            "cmd_id": robot.cmd_id,
+            "action": "stop",
+            "reason": "Operator / Scheduler STOP command",
+            "timestamp": time.time(),
+        }), qos=1)
+        print(f"[RMF -> AMR] Dispatched STOP (cmd_id: {robot.cmd_id}) to '{robot.name}' via {cmd_topic}")
+        if task:
+            self._publish_task_status(robot.fleet_name, robot.name, task["cmd_id"], "canceling",
+                                      task["step_offset"] + task.get("current_step", 0), len(task["all_steps"]),
+                                      "Stop sent, waiting for robot confirmation", task["task_id"])
+
+    def _dispatch_stop(self, fleet_name: str, robot_id: str, task_id: Optional[str] = None):
+        """Thread-safe stop entry point; with task_id only that task is stopped."""
+        with self.lock:
+            robot = self._get_robot(fleet_name, robot_id)
+            if not robot:
+                print(f"[TASK STOP WARN] Robot '{robot_id}' not found in fleet '{fleet_name}'.")
+                return
+            self._send_stop_locked(robot, task_id)
+
+    def _find_robot_fleet(self, robot_id: str) -> Optional[str]:
+        """Finds the fleet name for a robot ID."""
+        for (f_name, r_id) in self.robots.keys():
+            if r_id == robot_id:
+                return f_name
+        for disc in self.discovered_robots.values():
+            if disc.get("robot_id") == robot_id:
+                return disc.get("fleet_name")
+        return self.fleet_name
+
+    # ==========================================================================
     # RMF -> Robot Outbound Callbacks (調度下發指令)
     # ==========================================================================
     @staticmethod
@@ -1420,7 +1996,7 @@ class MqttFleetAdapter:
             if not robot:
                 print(f"[RMF -> AMR WARN] Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' not found.")
                 return
-
+            self._detach_active_task_locked(robot, "superseded by RMF navigate")
             target_pos = np.array(
                 [destination.position[0], destination.position[1], destination.position[2]],
                 dtype=np.float64,
@@ -1532,7 +2108,8 @@ class MqttFleetAdapter:
             was_deferred = robot.deferred_cmd_payload is not None
             robot.is_holding = False
             robot.deferred_cmd_payload = None
-            # Invalidate current execution, target position, and any pending retry payloads
+            # The RMF activity being stopped owns the active task (if any); its final state still reaches the backend via task_refs.
+            self._detach_active_task_locked(robot, "stopped by RMF")
             robot.current_execution = None
             robot.target_position = None
             robot.last_cmd_payload = None
@@ -1563,14 +2140,74 @@ class MqttFleetAdapter:
                 print(f"[RMF -> AMR WARN] Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' not found.")
                 return
 
-            cmd_payload = {
-                "robot_id": robot_id,
-                "cmd_id": None,
-                "action": "action",
-                "category": category,
-                "description": description,
-                "timestamp": time.time(),
-            }
+            # Parse description; a malformed description fails the RMF action instead of raising in the callback.
+            steps: List[Dict[str, Any]] = []
+            gimbal_fields: Optional[Dict[str, float]] = None
+            try:
+                desc_obj = json.loads(description) if isinstance(description, str) else description
+                if desc_obj is None:
+                    desc_obj = {}
+                if category in ("gimbal_move", "gimbal_rotate"):
+                    gimbal_fields = {
+                        "pan_deg": float(desc_obj.get("pan_deg", desc_obj.get("pan", 0.0))),
+                        "tilt_deg": float(desc_obj.get("tilt_deg", desc_obj.get("tilt", 0.0))),
+                    }
+                    ok, err_msg, _ = validate_task_steps([dict(gimbal_fields, type=category)])
+                    if not ok:
+                        raise ValueError(err_msg)
+                elif category in ("task", "multi_step_task", "multi_step") or (isinstance(desc_obj, dict) and "steps" in desc_obj):
+                    steps = desc_obj.get("steps", [])
+                    if not steps:
+                        raise ValueError("'steps' is empty")
+            except Exception as e:
+                robot.current_execution = execution
+                self._escalate_rmf_failure(robot, f"Invalid description for RMF action '{category}' on '{robot_id}': {e}")
+                return
+
+            if steps:
+                ok, err_msg, validated = validate_task_steps(steps)
+                if ok and any(s["type"] == "navigate" for s in validated):
+                    ok, err_msg = False, "navigate steps are not allowed inside an RMF action; use go_to_place phases so RMF schedules the traffic"
+                if not ok:
+                    robot.current_execution = execution
+                    self._escalate_rmf_failure(robot, f"Rejected RMF action '{category}' on '{robot_id}': {err_msg}")
+                    return
+                self._detach_active_task_locked(robot, f"superseded by RMF action '{category}'")
+                # In-place actions have no traffic impact, so the adapter releases each gate itself.
+                if not robot.is_online or robot.is_estopped:
+                    self._defer_command(
+                        robot, execution,
+                        self._task_payload(robot_id, None, validated, auto_proceed=True, task_id=f"rmf_{category}_{robot.cmd_id + 1}"),
+                        f"Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' is "
+                        f"{'emergency-stopped' if robot.is_estopped else 'offline'}.")
+                    return
+                print(f"[RMF -> AMR] Routing RMF action '{category}' ({len(validated)} steps) to multi-step task for '{robot_id}'.")
+                res = self._dispatch_multi_step_task_locked(
+                    robot, validated, execution=execution, auto_proceed=True,
+                    task_id=f"rmf_{category}_{robot.cmd_id + 1}")
+                if res["status"] == "error":
+                    robot.current_execution = execution
+                    self._escalate_rmf_failure(robot, f"RMF action '{category}' on '{robot_id}' could not be dispatched: {res['message']}")
+                return
+            self._detach_active_task_locked(robot, f"superseded by RMF action '{category}'")
+            if gimbal_fields is not None:
+                # Gimbal actions have their own robot-side action type (like navigate), completed via command_result.
+                cmd_payload = {
+                    "robot_id": robot_id,
+                    "cmd_id": None,
+                    "action": category,
+                    **gimbal_fields,
+                    "timestamp": time.time(),
+                }
+            else:
+                cmd_payload = {
+                    "robot_id": robot_id,
+                    "cmd_id": None,
+                    "action": "action",
+                    "category": category,
+                    "description": description,
+                    "timestamp": time.time(),
+                }
             if not robot.is_online or robot.is_estopped:
                 self._defer_command(
                     robot, execution, cmd_payload,

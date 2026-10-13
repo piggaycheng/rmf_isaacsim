@@ -31,7 +31,7 @@ rmf_fleet:
   task_capabilities:
     loop: true
     delivery: true
-  actions: ["teleop"]
+  actions: ["teleop", "gimbal_move", "gimbal_rotate", "task", "multi_step_task"]
   finishing_request: "nothing" # Options: park, charge, nothing
   responsive_wait: false
   reassign_task_interval: 60 # seconds

@@ -33,10 +33,29 @@ FLEET_ADAPTERS_FILE = os.path.join(MAPS_DIR, "fleet_adapters.json")
 # Pydantic Request / Data Models
 # ==========================================
 class TaskRequest(BaseModel):
-    type: str  # 'patrol', 'delivery', 'goto'
-    target_waypoint: str
+    type: str  # 'patrol', 'delivery', 'goto', 'multi_step'
+    target_waypoint: Optional[str] = None
     destination_waypoint: Optional[str] = None
     robot_id: Optional[str] = None
+
+class MultiStepTaskRequest(BaseModel):
+    robot_id: str
+    fleet_name: Optional[str] = None
+    steps: List[Dict[str, Any]]
+    auto_proceed: bool = False
+    step_delay: float = 0.0
+    task_id: Optional[str] = None
+
+class ComposeTaskRequest(BaseModel):
+    """Multi-step task scheduled by Open-RMF (compose). robot_id omitted/'any' lets RMF choose."""
+    steps: List[Dict[str, Any]]
+    robot_id: Optional[str] = None
+    fleet_name: Optional[str] = None
+    task_id: Optional[str] = None
+
+class StepProceedRequest(BaseModel):
+    fleet_name: Optional[str] = None
+    cmd_id: Optional[int] = None
 
 class MapSaveRequest(BaseModel):
     name: str = "office_map"
@@ -230,7 +249,7 @@ def is_robot_off_graph(fleet_name: str, robot_id: str, x: Optional[float] = None
     if x is not None and y is not None:
         dist = compute_nav_graph_distance(fleet_name, float(x), float(y))
         if dist is not None:
-            return dist > 3.0, round(dist, 2)
+            return dist > 5.0, round(dist, 2)
 
     return False, 0.0
 

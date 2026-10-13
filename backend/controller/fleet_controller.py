@@ -12,6 +12,9 @@ from state import (
     broadcast,
     get_discovered_robots_list,
     TaskRequest,
+    MultiStepTaskRequest,
+    ComposeTaskRequest,
+    StepProceedRequest,
 )
 from rmf_service import rmf_service
 
@@ -45,6 +48,50 @@ async def dispatch_task_endpoint(req: TaskRequest):
         "type": "tasks",
         "tasks": current_tasks,
     })
+    return res
+
+
+@router.post("/api/tasks/multi-step")
+async def dispatch_multi_step_task_endpoint(req: MultiStepTaskRequest):
+    """Submits a multi-step task (navigate, gimbal_move, gimbal_rotate, etc.) to a specific robot."""
+    steps_data = [s.model_dump() if hasattr(s, "model_dump") else s for s in req.steps]
+    res = rmf_service.dispatch_multi_step_task(
+        robot_id=req.robot_id,
+        steps=steps_data,
+        fleet_name=req.fleet_name,
+        auto_proceed=req.auto_proceed,
+        step_delay=req.step_delay,
+        task_id=req.task_id,
+    )
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("message", "多步任務派遣失敗"))
+    await _broadcast_fleet_and_tasks()
+    return res
+
+
+@router.post("/api/tasks/compose")
+async def dispatch_compose_task_endpoint(req: ComposeTaskRequest):
+    """Submits a multi-step task to Open-RMF as a compose task (RMF schedules each navigation)."""
+    res = rmf_service.dispatch_compose_task(
+        steps=req.steps,
+        robot_id=req.robot_id,
+        fleet_name=req.fleet_name,
+        task_id=req.task_id,
+    )
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("message", "多步任務派遣失敗"))
+    await _broadcast_fleet_and_tasks()
+    return res
+
+
+@router.post("/api/robots/{robot_id}/proceed")
+async def proceed_task_endpoint(robot_id: str, req: Optional[StepProceedRequest] = None):
+    """Releases the gate after a step completion to continue to the next step."""
+    cmd_id = req.cmd_id if req else None
+    res = rmf_service.proceed_task(robot_id=robot_id, cmd_id=cmd_id)
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("message", "Proceed 指令發送失敗"))
+    await _broadcast_fleet_and_tasks()
     return res
 
 class EmergencyStopRequest(BaseModel):
@@ -182,6 +229,49 @@ async def websocket_endpoint(websocket: WebSocket):
                     "type": "fleet_states",
                     "robots": list(current_robots.values()),
                 })
+            elif action == "dispatch_multi_step_task":
+                robot_id = payload.get("robot_id")
+                steps = payload.get("steps", [])
+                auto_proceed = payload.get("auto_proceed", False)
+                task_id = payload.get("task_id")
+                res = rmf_service.dispatch_multi_step_task(
+                    robot_id=robot_id,
+                    steps=steps,
+                    auto_proceed=auto_proceed,
+                    task_id=task_id,
+                )
+                await websocket.send_json({
+                    "type": "dispatch_response",
+                    "status": res.get("status"),
+                    "task_id": res.get("task_id"),
+                    "message": res.get("message"),
+                })
+                await _broadcast_fleet_and_tasks()
+            elif action == "dispatch_compose_task":
+                res = rmf_service.dispatch_compose_task(
+                    steps=payload.get("steps", []),
+                    robot_id=payload.get("robot_id"),
+                    fleet_name=payload.get("fleet_name"),
+                    task_id=payload.get("task_id"),
+                )
+                await websocket.send_json({
+                    "type": "dispatch_response",
+                    "status": res.get("status"),
+                    "task_id": res.get("task_id"),
+                    "message": res.get("message"),
+                })
+                await _broadcast_fleet_and_tasks()
+            elif action == "proceed_task":
+                robot_id = payload.get("robot_id")
+                cmd_id = payload.get("cmd_id")
+                res = rmf_service.proceed_task(robot_id=robot_id, cmd_id=cmd_id)
+                await websocket.send_json({
+                    "type": "proceed_response",
+                    "status": res.get("status"),
+                    "robot_id": robot_id,
+                    "message": res.get("message"),
+                })
+                await _broadcast_fleet_and_tasks()
     except WebSocketDisconnect:
         if websocket in active_connections:
             active_connections.remove(websocket)
