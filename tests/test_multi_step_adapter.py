@@ -217,16 +217,33 @@ class TestMultiStepAdapter(unittest.TestCase):
         self.robot.update_handle.more().override_status.assert_called_with("failed")
         self.assertIn("aborted", self.statuses())
 
-    def test_rmf_gimbal_action_failure_is_escalated_after_retries(self):
+    def test_rmf_gimbal_action_failure_is_escalated_without_retry(self):
         ex = self.execution()
         self.call(self.adapter._on_rmf_action, "fleet1", "carter1", "gimbal_rotate", {"pan_deg": 10}, ex)
         cmd_id = self.commands()[-1]["cmd_id"]
-        self.robot.nav_retries = 2  # retries exhausted
-        self.call(self.adapter._handle_command_result, "carter1", "fleet1",
-                  {"cmd_id": cmd_id, "status": "failed", "message": "gimbal timeout"})
+        sent = len(self.commands())
+        with patch.object(mfa.threading, "Timer") as timer:
+            self.call(self.adapter._handle_command_result, "carter1", "fleet1",
+                      {"cmd_id": cmd_id, "status": "failed", "message": "gimbal timeout"})
+        timer.assert_not_called()
+        self.assertEqual(len(self.commands()), sent)
+        self.assertEqual(self.robot.nav_retries, 0)
         ex.finished.assert_not_called()
         self.assertEqual(self.robot.status, "failed")  # RMF escalation itself is skipped in mock mode
         self.assertIsNone(self.robot.last_cmd_payload)
+
+    def test_rmf_navigate_failure_is_still_retried(self):
+        dest = MagicMock()
+        dest.position = [3.0, 0.0, 0.0]
+        dest.map = self.robot.map_name
+        dest.dock = None
+        dest.speed_limit = None
+        self.call(self.adapter._on_rmf_navigate, "fleet1", "carter1", dest, self.execution())
+        cmd_id = self.commands()[-1]["cmd_id"]
+        with patch.object(mfa.threading, "Timer") as timer:
+            self.call(self.adapter._handle_command_result, "carter1", "fleet1", {"cmd_id": cmd_id, "status": "failed"})
+        timer.assert_called_once()
+        self.assertEqual(self.robot.nav_retries, 1)
 
     # ---- ownership / superseding ------------------------------------------
     def test_rmf_navigate_supersedes_direct_task_without_losing_execution(self):

@@ -60,6 +60,10 @@ def nav_graph_fingerprint(path: str) -> Optional[str]:
 # Grace period before a dispatched command not reflected in heartbeats is considered lost.
 LOST_CMD_RESEND_S = 5.0
 
+# A robot farther than this from the nav graph is off-graph (no bidding / commands). Matches RMF's
+# max merge distance below, beyond which RMF cannot snap the robot onto the graph.
+OFF_GRAPH_THRESHOLD_M = 5.0
+
 
 class ManagedRobot:
     """Tracks state and command execution handles for a single robot."""
@@ -558,8 +562,8 @@ class MqttFleetAdapter:
                     cfg = rmf_easy.FleetConfiguration.from_config_files(fleet_cfg_path, nav_path)
                     if cfg:
                         cfg.fleet_name = f_name
-                        cfg.default_max_merge_waypoint_distance = 5.0
-                        cfg.default_max_merge_lane_distance = 5.0
+                        cfg.default_max_merge_waypoint_distance = OFF_GRAPH_THRESHOLD_M
+                        cfg.default_max_merge_lane_distance = OFF_GRAPH_THRESHOLD_M
                         handle = self.adapter.add_easy_fleet(cfg)
                         self.fleet_handles[f_name] = handle
                         self._setup_fleet_consideration(handle, f_name)
@@ -620,7 +624,7 @@ class MqttFleetAdapter:
                 import rmf_adapter.fleet_update_handle as _fuh
                 c = _fuh.Confirmation()
                 if not _check_fleet_availability(fleet_name):
-                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>5.0m) 或無法運作，拒絕競標接單"])
+                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>{OFF_GRAPH_THRESHOLD_M}m) 或無法運作，拒絕競標接單"])
                     return c
                 c.accept()
                 return c
@@ -629,7 +633,7 @@ class MqttFleetAdapter:
                 import rmf_adapter.fleet_update_handle as _fuh
                 c = _fuh.Confirmation()
                 if not _check_fleet_availability(fleet_name):
-                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>5.0m) 或無法運作，拒絕競標接單"])
+                    c.set_errors([f"車隊 [{fleet_name}] 內所有車輛皆偏離路網 (>{OFF_GRAPH_THRESHOLD_M}m) 或無法運作，拒絕競標接單"])
                     return c
                 c.accept()
                 return c
@@ -1106,7 +1110,7 @@ class MqttFleetAdapter:
             "first_seen": now,
         })
         dist_to_graph = self._compute_distance_to_graph(fleet_name, x, y)
-        is_off_graph = dist_to_graph > 5.0
+        is_off_graph = dist_to_graph > OFF_GRAPH_THRESHOLD_M
         disc["last_seen"] = now
         disc["x"] = x
         disc["y"] = y
@@ -1204,7 +1208,7 @@ class MqttFleetAdapter:
                     self._send_register_ack(robot_id, success=False, msg=str(e), fleet_name=fleet_name)
                     return
 
-                # 若直接 add_robot 回傳 None（例如車輛開機位置距離路網超過 RMF 3m 初始吸附上限），
+                # 若直接 add_robot 回傳 None（例如車輛開機位置距離路網超過 RMF 初始吸附上限 OFF_GRAPH_THRESHOLD_M），
                 # 嘗試使用該車隊路網最近站點作為初始錨點完成 Open-RMF 註冊，並立即以真實座標更新
                 if update_handle is None:
                     f_info = self.fleet_waypoint_info.get(fleet_name, {})
@@ -1259,7 +1263,7 @@ class MqttFleetAdapter:
             managed_robot.is_off_graph = is_off_graph
             managed_robot.off_graph_distance = round(dist_to_graph, 2)
             if is_off_graph:
-                print(f"[OFF-GRAPH WARN] ⚠️ 車輛 '{robot_id}' 距離路網 {dist_to_graph:.2f}m > 5.0m，標記為偏離路網，禁止競標與操控！")
+                print(f"[OFF-GRAPH WARN] ⚠️ 車輛 '{robot_id}' 距離路網 {dist_to_graph:.2f}m > {OFF_GRAPH_THRESHOLD_M}m，標記為偏離路網，禁止競標與操控！")
             self.robots[robot_key] = managed_robot
 
             # Restore fleet pause / persisted operator e-stop for a newly added robot
@@ -1301,7 +1305,7 @@ class MqttFleetAdapter:
         status_val = payload.get("status", "idle")
 
         dist_to_graph = self._compute_distance_to_graph(fleet_name, x_val, y_val)
-        is_off_graph = dist_to_graph > 5.0
+        is_off_graph = dist_to_graph > OFF_GRAPH_THRESHOLD_M
 
         with self.lock:
             if robot_key in self.discovered_robots:
@@ -1551,7 +1555,11 @@ class MqttFleetAdapter:
                         print(f"[NAV RETRY] Retry already in progress for '{robot_id}'. Ignoring duplicate failure report.")
                         return
 
-                    if robot.nav_retries < 2 and robot.last_cmd_payload:
+                    # Only navigation is retried (obstacles may clear); gimbal/other action failures are
+                    # deterministic (limits, no gimbal) or already timed out on the robot, so escalate at once.
+                    failed_action = (robot.last_cmd_payload or {}).get("action") or "command"
+                    retryable = failed_action in ("navigate", "dock")
+                    if retryable and robot.nav_retries < 2:
                         robot.nav_retries += 1
                         robot.is_retrying = True
                         print(f"[NAV RETRY] Scheduling retry for cmd_id {cmd_id} on '{robot_id}' (attempt {robot.nav_retries}/2) in 1.2s...")
@@ -1567,13 +1575,18 @@ class MqttFleetAdapter:
                                     print(f"[NAV RETRY] Re-dispatched cmd_id {cmd_id} to '{robot_id}'")
                         threading.Timer(1.2, retry_nav).start()
                     else:
-                        print(f"[NAV ERROR] Retries exhausted ({robot.nav_retries}/2) for cmd_id {cmd_id} on '{robot_id}'. Escalating failure to Open-RMF.")
+                        if retryable:
+                            print(f"[NAV ERROR] Retries exhausted ({robot.nav_retries}/2) for cmd_id {cmd_id} on '{robot_id}'. Escalating failure to Open-RMF.")
+                            error_msg = f"Navigation failed for cmd_id {cmd_id} after {robot.nav_retries} attempts."
+                        else:
+                            print(f"[ACTION ERROR] '{failed_action}' cmd_id {cmd_id} failed on '{robot_id}' (not retried). Escalating failure to Open-RMF.")
+                            error_msg = f"Action '{failed_action}' failed for cmd_id {cmd_id}: {payload.get('message', '')}"
                         robot.status = "failed"
                         robot.is_retrying = False
                         robot.last_cmd_payload = None
                         if not self.mock_rmf and robot.update_handle:
                             try:
-                                robot.update_handle.more().log_error(f"Navigation failed for cmd_id {cmd_id} after {robot.nav_retries} attempts.")
+                                robot.update_handle.more().log_error(error_msg)
                                 robot.update_handle.more().override_status("failed")
                                 robot.update_handle.more().replan()
                             except Exception as e:
@@ -2012,7 +2025,7 @@ class MqttFleetAdapter:
 
             if not robot.is_online or robot.is_estopped or robot.is_off_graph:
                 reason = (
-                    f"偏離路網過遠 ({robot.off_graph_distance}m > 3.0m)，無法操控"
+                    f"偏離路網過遠 ({robot.off_graph_distance}m > {OFF_GRAPH_THRESHOLD_M}m)，無法操控"
                     if robot.is_off_graph
                     else ("emergency-stopped" if robot.is_estopped else "offline")
                 )

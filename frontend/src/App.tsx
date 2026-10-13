@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { MapCanvas, EditorTool } from '@/components/MapCanvas';
 import { DispatchModal } from '@/components/DispatchModal';
+import { OFF_GRAPH_THRESHOLD_M } from '@/lib/constants';
 import { MultiStepTaskModal } from '@/components/MultiStepTaskModal';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -2160,10 +2161,10 @@ export function App() {
                                   ) : isOffGraph ? (
                                     <div className="space-y-0.5">
                                       <div className="font-semibold text-amber-300 flex items-center gap-1">
-                                        <span>⚠️ 偏離路網過遠 ({robot.off_graph_distance ? `${robot.off_graph_distance}m` : '>3.0m'})</span>
+                                        <span>⚠️ 偏離路網過遠 ({robot.off_graph_distance ? `${robot.off_graph_distance}m` : `>${OFF_GRAPH_THRESHOLD_M}m`})</span>
                                       </div>
                                       <div className="text-[10px] text-amber-300/80">
-                                        超出吸附上限 (3.0m)，無法操控接單。請手動移車或在路網編輯器中將路網連過去。
+                                        超出吸附上限 ({OFF_GRAPH_THRESHOLD_M}m)，無法操控接單。請手動移車或在路網編輯器中將路網連過去。
                                       </div>
                                     </div>
                                   ) : robot.current_task && robot.current_task !== 'nothing' && robot.status === 'moving' ? (

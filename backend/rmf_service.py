@@ -767,7 +767,7 @@ class RMFService:
         if robot_id and robot_id != "any":
             is_off, off_dist = state.is_robot_off_graph(target_fleet or "", robot_id)
             if is_off:
-                return target_fleet, f"車輛 '{robot_id}' 偏離路網過遠 ({off_dist}m > 3.0m)，無法操控接單！請手動移車或在路網編輯器中將路網連至車輛位置。"
+                return target_fleet, f"車輛 '{robot_id}' 偏離路網過遠 ({off_dist}m > {state.OFF_GRAPH_THRESHOLD_M}m)，無法操控接單！請手動移車或在路網編輯器中將路網連至車輛位置。"
         else:
             # Auto dispatch: check if all active robots are off-graph
             online_robots = [
@@ -778,7 +778,7 @@ class RMFService:
             ]
             if online_robots and all(state.is_robot_off_graph(r.get("fleet", ""), r.get("id"))[0] for r in online_robots):
                 scope_str = f"車隊 '{target_fleet}' 內" if target_fleet else "目前系統中"
-                return target_fleet, f"{scope_str}所有在線車輛皆偏離路網過遠 (> 3.0m)，無法操控接單！請先手動移車或在路網編輯器中將路網連過去。"
+                return target_fleet, f"{scope_str}所有在線車輛皆偏離路網過遠 (> {state.OFF_GRAPH_THRESHOLD_M}m)，無法操控接單！請先手動移車或在路網編輯器中將路網連過去。"
         return target_fleet, None
 
     @staticmethod

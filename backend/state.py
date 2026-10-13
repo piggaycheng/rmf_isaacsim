@@ -29,6 +29,9 @@ SLAM_PNG_FILE = os.path.join(UPLOAD_DIR, "current_slam_map.png")
 
 FLEET_ADAPTERS_FILE = os.path.join(MAPS_DIR, "fleet_adapters.json")
 
+# Mirrors OFF_GRAPH_THRESHOLD_M in mqtt_fleet_adapter.py, which decides off-graph; used in messages only.
+OFF_GRAPH_THRESHOLD_M = 5.0
+
 # ==========================================
 # Pydantic Request / Data Models
 # ==========================================
@@ -222,7 +225,7 @@ def compute_nav_graph_distance(fleet_name: str, x: float, y: float) -> Optional[
 
 
 def is_robot_off_graph(fleet_name: str, robot_id: str, x: Optional[float] = None, y: Optional[float] = None) -> Tuple[bool, float]:
-    """Determines whether a robot is excessively off-graph (> 3.0m).
+    """Determines whether a robot is excessively off-graph (> OFF_GRAPH_THRESHOLD_M, decided by the fleet adapter).
 
     Returns: (is_off_graph: bool, distance: float)
     """

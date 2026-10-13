@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { Button } from './ui/button';
 import { Waypoint, Robot } from '@/types/rmf';
+import { OFF_GRAPH_THRESHOLD_M } from '@/lib/constants';
 import { Send, Navigation, PackageCheck, Repeat, AlertTriangle, ListOrdered } from 'lucide-react';
 
 interface DispatchModalProps {
@@ -53,12 +54,12 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
     setValidationError('');
 
     if (isSelectedRobotOffGraph) {
-      setValidationError(`車輛 '${selectedRobot?.name}' 偏離路網過遠 (${selectedRobot?.off_graph_distance || '>3'}m)，無法指派任務！`);
+      setValidationError(`車輛 '${selectedRobot?.name}' 偏離路網過遠 (${selectedRobot?.off_graph_distance || `>${OFF_GRAPH_THRESHOLD_M}`}m)，無法指派任務！`);
       return;
     }
 
     if (selectedRobotId === 'any' && allRobotsOffGraph) {
-      setValidationError('目前所有車輛皆偏離路網過遠 (>3.0m)，無法派遣任務！');
+      setValidationError(`目前所有車輛皆偏離路網過遠 (>${OFF_GRAPH_THRESHOLD_M}m)，無法派遣任務！`);
       return;
     }
 
@@ -257,7 +258,7 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
           <div className="p-2.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-medium space-y-1">
             <div className="flex items-center gap-1 font-semibold">
               <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>目前車隊所有在線車輛皆偏離路網過遠 (&gt;3.0m)</span>
+              <span>目前車隊所有在線車輛皆偏離路網過遠 (&gt;{OFF_GRAPH_THRESHOLD_M}m)</span>
             </div>
             <p className="text-[11px] text-amber-300/80 leading-relaxed">
               Open-RMF 無法對偏離路網的車輛進行路徑規劃與操控接單。請手動移車至路網附近，或在路網編輯器中將路網連至車輛位置。
