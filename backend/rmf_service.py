@@ -81,8 +81,8 @@ class RMFService:
             print("[RMF Core] Starting rmf_traffic_schedule...")
             self.schedule_process = subprocess.Popen(
                 ["bash", "-c", "source /ros_entrypoint.sh && ros2 run rmf_traffic_ros2 rmf_traffic_schedule"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stdout=None,
+                stderr=None,
                 env=env,
             )
             time.sleep(1.5)
@@ -95,8 +95,8 @@ class RMFService:
             print("[RMF Core] Starting rmf_task_dispatcher...")
             self.dispatcher_process = subprocess.Popen(
                 ["bash", "-c", "source /ros_entrypoint.sh && ros2 run rmf_task_ros2 rmf_task_dispatcher"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stdout=None,
+                stderr=None,
                 env=env,
             )
             time.sleep(1.5)

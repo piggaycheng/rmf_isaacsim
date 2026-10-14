@@ -4,6 +4,18 @@
 
 ---
 
+## 車端已上線但監控畫面沒有車輛
+
+`GET /api/discovered-robots` 的 `connection_status: online` 代表 MQTT 心跳正常；
+監控畫面使用的 `GET /api/robots` 與 `/ws/fleet` 則來自 RMF 的 `/fleet_states`。
+若前者有車、後者為空，需檢查 RMF 排程器與車輛納管，而不是只重啟 Isaac Sim。
+
+排程器與任務派遣器的 stdout/stderr 繼承後端輸出，可用
+`docker compose logs --tail 100 backend` 查看。不要改成未持續讀取的
+`subprocess.PIPE`：日誌填滿 pipe 後，ROS executor 會卡在 `pipe_write`，
+造成註冊無法完成、車端仍有 MQTT 心跳但 `/fleet_states` 沒有車輛。
+修正後須重新啟動後端使核心程序使用新設定；重啟前先確認沒有執行中的任務。
+
 ## Fleet Adapter 路網診斷與 UI 警示
 
 Fleet Adapter 透過 `/rmf/fleet_adapter_state` 回報已成功註冊車隊的路網編號、
@@ -237,4 +249,3 @@ Backend 不直接與車端（MQTT）通訊；所有車端互動皆經由 Fleet A
    - 透過 `frontend/vite.config.ts` 中的 `proxy` 配置，前端送往 `/api` 與 `/ws` 的所有請求會自動無縫轉發至後端 Port `8000`，解決 CORS 跨來源問題。
 4. **一鍵啟動腳本**：
    - 專案根目錄已建立 `./start_dev.sh`，執行即可同時確保後端 Docker 運行並啟動前端熱重載環境。
-

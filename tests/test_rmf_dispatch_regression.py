@@ -45,7 +45,7 @@ def get_file_path(subpath):
 
 import mqtt_fleet_adapter as mfa
 import state
-from rmf_service import rmf_service
+from rmf_service import RMFService, rmf_service
 
 class TestRMFDispatchRegression(unittest.TestCase):
 
@@ -86,6 +86,23 @@ class TestRMFDispatchRegression(unittest.TestCase):
             adapter.mqtt_client.publish = MagicMock()
             adapter._send_register_ack = MagicMock()
             return adapter
+
+    def test_core_process_logs_inherit_backend_streams(self):
+        service = RMFService()
+        with patch("rmf_service.subprocess.run") as run, \
+                patch("rmf_service.subprocess.Popen") as popen, \
+                patch("rmf_service.time.sleep"):
+            run.return_value.returncode = 0
+            service.start_background_processes()
+
+        self.assertEqual(popen.call_count, 2)
+        for call, executable in zip(
+            popen.call_args_list, ("rmf_traffic_schedule", "rmf_task_dispatcher")
+        ):
+            self.assertIn(executable, call.args[0][2])
+            # An undrained PIPE fills up and blocks the ROS executor.
+            self.assertIsNone(call.kwargs["stdout"])
+            self.assertIsNone(call.kwargs["stderr"])
 
     # --------------------------------------------------------------------------
     # Issue 1: Heartbeat Watchdog Timeout does not prematurely mark finished
@@ -879,6 +896,5 @@ class TestRMFDispatchRegression(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 
 
