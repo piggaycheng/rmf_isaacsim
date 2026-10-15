@@ -9,6 +9,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from PIL import Image
 
+import nav_graph_builder
 import state
 from state import (
     MapSaveRequest,
@@ -61,131 +62,47 @@ async def save_map(req: MapSaveRequest):
     if duplicated:
         raise HTTPException(status_code=400, detail=f"站點名稱重複：{', '.join(duplicated)}，請改名後再儲存")
 
-    default_graphs = [{"id": 0, "name": "Graph 0 (預設車隊)", "color": "#38bdf8"}]
-    graphs_list = req.graphs if req.graphs and len(req.graphs) > 0 else default_graphs
+    levels, lifts = req.levels, req.lifts
+    if (levels is None or lifts is None) and os.path.exists(ACTIVE_MAP_FILE):
+        try:
+            with open(ACTIVE_MAP_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            levels = saved.get("levels") if levels is None else levels
+            lifts = saved.get("lifts") if lifts is None else lifts
+        except (OSError, ValueError):
+            pass
+        # A client unaware of levels (e.g. a browser tab with a stale cache) would silently drop the
+        # other floors' waypoints, so it must reload the map before saving.
+        if req.levels is None and levels and len(levels) > 1:
+            raise HTTPException(status_code=409, detail="此地圖為多樓層，請重新整理頁面載入最新路網後再儲存")
+    drawing = "current_slam_map.png" if os.path.exists(os.path.join(UPLOAD_DIR, "current_slam_map.png")) else ""
+    try:
+        built = nav_graph_builder.build(req.name, req.waypoints, req.lanes, req.graphs,
+                                        levels, lifts, drawing)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    graphs_list, graph_indices = built["graphs"], built["graph_indices"]
 
     map_data = {
         "name": req.name,
         "waypoints": req.waypoints,
         "lanes": req.lanes,
         "graphs": graphs_list,
+        "levels": built["levels"],
+        "lifts": built["lifts"],
     }
 
     # 1. Save JSON
     with open(ACTIVE_MAP_FILE, "w", encoding="utf-8") as f:
         json.dump(map_data, f, indent=2, ensure_ascii=False)
 
-    # 2. Save Open-RMF Building Map YAML (.building.yaml)
-    wp_list = req.waypoints
-    rmf_building_structure = {
-        "name": req.name,
-        "levels": {
-            "L1": {
-                "drawing": {
-                    "filename": "current_slam_map.png" if os.path.exists(os.path.join(UPLOAD_DIR, "current_slam_map.png")) else ""
-                },
-                "vertices": [
-                    [
-                        float(w.get("x", 0.0)),
-                        float(w.get("y", 0.0)),
-                        0.0,
-                        w.get("name", f"wp_{idx}"),
-                        {
-                            "is_charger": w.get("type") == "charger",
-                            "is_parking_spot": w.get("type") == "parking",
-                            "is_holding_point": w.get("type") == "parking",
-                            "is_workcell": w.get("type") == "workcell"
-                        }
-                    ]
-                    for idx, w in enumerate(wp_list)
-                ],
-                "lanes": [
-                    [
-                        next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("start_id")), 0),
-                        next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("end_id")), 0),
-                        {
-                            "is_bidirectional": bool(l.get("bidirectional", True)),
-                            "graph_idx": int(l.get("graph_idx", 0)),
-                            "speed_limit": float(l.get("speed_limit", 0.0))
-                        }
-                    ]
-                    for l in req.lanes
-                ]
-            }
-        }
-    }
+    # 2. Save Open-RMF Building Map YAML (.building.yaml), one entry per level
     with open(ACTIVE_YAML_FILE, "w", encoding="utf-8") as f:
-        yaml.dump(rmf_building_structure, f, allow_unicode=True, sort_keys=False)
+        yaml.dump(built["building"], f, allow_unicode=True, sort_keys=False)
 
     # 3. Save Open-RMF Nav Graphs for all graph indices (nav_graphs/{g_idx}.yaml)
-    graph_indices = sorted(list(
-        {int(l.get("graph_idx", 0)) for l in req.lanes} |
-        {int(g.get("id", 0)) for g in graphs_list} |
-        {0}
-    ))
-
-    nav_vertices = [
-        [
-            float(w.get("x", 0.0)),
-            float(w.get("y", 0.0)),
-            {
-                "is_charger": w.get("type") == "charger",
-                "is_parking_spot": w.get("type") == "parking",
-                "is_holding_point": w.get("type") == "parking",
-                "is_workcell": w.get("type") == "workcell",
-                "name": w.get("name", f"wp_{idx}"),
-            },
-        ]
-        for idx, w in enumerate(wp_list)
-    ]
-
-    # Ensure Open-RMF requirement: at least one vertex must have is_charger: True
-    if nav_vertices and not any(v[2].get("is_charger") for v in nav_vertices):
-        nav_vertices[0][2]["is_charger"] = True
-        nav_vertices[0][2]["is_parking_spot"] = True
-
     saved_graph_files = []
-    for g_idx in graph_indices:
-        g_lanes = []
-        g_used_vertex_indices = set()
-        for l in req.lanes:
-            if int(l.get("graph_idx", 0)) != g_idx:
-                continue
-            start_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("start_id")), 0)
-            end_idx = next((i for i, w in enumerate(wp_list) if w.get("id") == l.get("end_id")), 0)
-            g_used_vertex_indices.add(start_idx)
-            g_used_vertex_indices.add(end_idx)
-            speed_limit = float(l.get("speed_limit", 0.0))
-            is_bidi = bool(l.get("bidirectional", True))
-            p = {"speed_limit": speed_limit} if speed_limit > 0.0 else {}
-            if is_bidi:
-                g_lanes.append([start_idx, end_idx, dict(p)])
-                g_lanes.append([end_idx, start_idx, dict(p)])
-            else:
-                g_lanes.append([start_idx, end_idx, dict(p)])
-
-        # Clone vertices for this graph and ensure at least one used vertex is a charger
-        graph_vertices = [
-            [v[0], v[1], dict(v[2])]
-            for v in nav_vertices
-        ]
-        has_charger = any(graph_vertices[idx][2].get("is_charger") for idx in g_used_vertex_indices)
-        if not has_charger and g_used_vertex_indices:
-            charger_idx = min(g_used_vertex_indices)
-            graph_vertices[charger_idx][2]["is_charger"] = True
-            graph_vertices[charger_idx][2]["is_parking_spot"] = True
-
-        g_data = {
-            "building_name": req.name,
-            "levels": {
-                "L1": {
-                    "lanes": g_lanes,
-                    "vertices": graph_vertices,
-                }
-            },
-            "doors": {},
-            "lifts": {},
-        }
+    for g_idx, g_data in built["nav_graphs"].items():
         g_file = os.path.join(NAV_GRAPHS_DIR, f"{g_idx}.yaml")
         with open(g_file, "w", encoding="utf-8") as f:
             yaml.dump(g_data, f, allow_unicode=True, sort_keys=False)

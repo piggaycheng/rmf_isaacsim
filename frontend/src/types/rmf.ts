@@ -8,6 +8,30 @@ export interface Waypoint {
   type: WaypointType;
   yaw?: number; // radians
   graph_idx?: number; // default: 0
+  level?: string; // floor name (e.g. 1F, B1); coordinates are in that floor's map. Default: first level
+  lift?: string; // waypoint is inside this lift (one per lift and level)
+}
+
+/** Building floor; transform maps the Open-RMF building frame into this floor's map. */
+export interface MapLevel {
+  name: string;
+  transform?: { rotation: number; scale: number; translation: [number, number] };
+}
+
+/** Lift cabin (centre in the building frame = first level's map frame). */
+export interface MapLift {
+  name: string;
+  x: number;
+  y: number;
+  yaw?: number;
+  width?: number;
+  depth?: number;
+}
+
+export const DEFAULT_LEVEL = '1F';
+
+export function waypointLevel(wp: Waypoint, levels: MapLevel[]): string {
+  return wp.level || levels[0]?.name || DEFAULT_LEVEL;
 }
 
 export function getWaypointGraphIndices(wp: Waypoint, lanes: Lane[]): number[] {

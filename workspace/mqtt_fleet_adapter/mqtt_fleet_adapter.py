@@ -60,6 +60,41 @@ def nav_graph_fingerprint(path: str) -> Optional[str]:
 # Grace period before a dispatched command not reflected in heartbeats is considered lost.
 LOST_CMD_RESEND_S = 5.0
 
+# Level used when neither the robot nor the nav graph names one (matches the robot's default map).
+DEFAULT_LEVEL = "1F"
+
+
+def rmf_to_robot(transform: Optional[Dict[str, Any]], x: float, y: float) -> Tuple[float, float]:
+    """RMF building frame -> robot map frame (same convention as the fleet config ``transforms``)."""
+    if not transform:
+        return x, y
+    c, s = math.cos(transform.get("rotation", 0.0)), math.sin(transform.get("rotation", 0.0))
+    k = transform.get("scale", 1.0)
+    tx, ty = transform.get("translation", [0.0, 0.0])
+    return tx + k * (c * x - s * y), ty + k * (s * x + c * y)
+
+
+def robot_to_rmf(transform: Optional[Dict[str, Any]], x: float, y: float) -> Tuple[float, float]:
+    if not transform:
+        return x, y
+    c, s = math.cos(transform.get("rotation", 0.0)), math.sin(transform.get("rotation", 0.0))
+    k = transform.get("scale", 1.0)
+    dx, dy = x - transform.get("translation", [0.0, 0.0])[0], y - transform.get("translation", [0.0, 0.0])[1]
+    return (c * dx + s * dy) / k, (-s * dx + c * dy) / k
+
+
+def change_floor_payload(robot_id: str, cmd_id: int, floor_name: str, position: Any) -> Dict[str, Any]:
+    """Robot-side MQTT extension: reload the target floor map and relocalize at a planar pose (robot map frame)."""
+    return {
+        "robot_id": robot_id,
+        "cmd_id": cmd_id,
+        "action": "change_floor",
+        "floor_name": floor_name,
+        "initial_pose": {"x": float(position[0]), "y": float(position[1]), "yaw": float(position[2])},
+        "timestamp": time.time(),
+    }
+
+
 # A robot farther than this from the nav graph is off-graph (no bidding / commands). Matches RMF's
 # max merge distance below, beyond which RMF cannot snap the robot onto the graph.
 OFF_GRAPH_THRESHOLD_M = 5.0
@@ -398,10 +433,18 @@ class MqttFleetAdapter:
         proj_y = ay + t * aby
         return math.hypot(px - proj_x, py - proj_y)
 
-    def _compute_distance_to_graph(self, fleet_name: str, x: float, y: float) -> float:
+    def _compute_distance_to_graph(self, fleet_name: str, x: float, y: float, level: Optional[str] = None) -> float:
+        """Distance from a robot pose (robot map frame) to the graph; with ``level`` only that floor counts."""
         f_info = self.fleet_waypoint_info.get(fleet_name, {})
         v_coords = f_info.get("vertex_coords", [])
         segments = f_info.get("lane_segments", [])
+        levels = f_info.get("levels") or {}
+        if level is not None and levels:
+            if level not in levels:
+                return float("inf")
+            x, y = robot_to_rmf(levels[level]["transform"], x, y)
+            v_coords = levels[level]["vertex_coords"]
+            segments = levels[level]["lane_segments"]
         if not v_coords and not segments:
             coords = f_info.get("coords", {})
             v_coords = list(coords.values())
@@ -425,13 +468,21 @@ class MqttFleetAdapter:
         wp_coords: Dict[str, tuple] = {}
         all_vertex_coords: List[Tuple[float, float]] = []
         lane_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+        # level -> {transform, vertex_coords, lane_segments, waypoints}; graph coordinates are RMF frame
+        levels_info: Dict[str, Dict[str, Any]] = {}
         if os.path.exists(nav_file):
             try:
                 with open(nav_file, "r", encoding="utf-8") as yf:
                     nav_dict = yaml.safe_load(yf) or {}
-                for lvl_data in nav_dict.get("levels", {}).values():
+                for lvl_name, lvl_data in nav_dict.get("levels", {}).items():
                     raw_vertices = lvl_data.get("vertices", [])
                     v_positions = []
+                    lvl_info = levels_info[str(lvl_name)] = {
+                        "transform": lvl_data.get("transform") or {},
+                        "vertex_coords": v_positions,
+                        "lane_segments": [],
+                        "waypoints": {},
+                    }
                     for v in raw_vertices:
                         vx, vy = float(v[0]), float(v[1])
                         v_positions.append((vx, vy))
@@ -452,6 +503,7 @@ class MqttFleetAdapter:
                         if wp_name:
                             all_wps.append(wp_name)
                             wp_coords[wp_name] = (vx, vy)
+                            lvl_info["waypoints"][wp_name] = (vx, vy)
                             if is_chg:
                                 charger_wps.append(wp_name)
                             if is_park:
@@ -462,8 +514,10 @@ class MqttFleetAdapter:
                             idx1, idx2 = lane[0], lane[1]
                             if 0 <= idx1 < len(v_positions) and 0 <= idx2 < len(v_positions):
                                 lane_segments.append((v_positions[idx1], v_positions[idx2]))
+                                lvl_info["lane_segments"].append((v_positions[idx1], v_positions[idx2]))
             except Exception as e:
                 print(f"[WARN] Failed to parse nav graph {nav_file}: {e}")
+        self._last_parsed_levels = levels_info
         return all_wps, charger_wps, parking_wps, wp_coords, lane_segments, all_vertex_coords
 
     def _init_rmf(self):
@@ -531,6 +585,7 @@ class MqttFleetAdapter:
                     "coords": wp_coords,
                     "lane_segments": lane_segments,
                     "vertex_coords": vertex_coords,
+                    "levels": self._last_parsed_levels,
                     "graph_idx": g_idx,
                     "graph_sha": nav_graph_fingerprint(nav_path),
                 }
@@ -553,6 +608,13 @@ class MqttFleetAdapter:
                         base_cfg_dict["rmf_fleet"]["limits"]["angular"] = [ang_v, round(ang_v * 0.6, 2)]
                         base_cfg_dict["rmf_fleet"]["profile"]["footprint"] = radius
                         base_cfg_dict["rmf_fleet"]["profile"]["vicinity"] = round(radius + 0.3, 2)
+                        transforms = {
+                            lvl: info["transform"]
+                            for lvl, info in self.fleet_waypoint_info[f_name]["levels"].items()
+                            if info["transform"]
+                        }
+                        if transforms:
+                            base_cfg_dict["rmf_fleet"]["transforms"] = transforms
 
                         tmp_cfg_file = f"/tmp/fleet_cfg_{f_name}.yaml"
                         with open(tmp_cfg_file, "w", encoding="utf-8") as f:
@@ -589,6 +651,7 @@ class MqttFleetAdapter:
                     "coords": wp_coords,
                     "lane_segments": lane_segments,
                     "vertex_coords": vertex_coords,
+                    "levels": self._last_parsed_levels,
                     "graph_idx": 0,
                     "graph_sha": nav_graph_fingerprint(self.nav_graph_path),
                 }
@@ -1081,7 +1144,7 @@ class MqttFleetAdapter:
         x = float(loc.get("x", 0.0))
         y = float(loc.get("y", 0.0))
         yaw = float(loc.get("yaw", 0.0))
-        level_name = loc.get("level_name", "L1")
+        level_name = loc.get("level_name") or self._default_level(fleet_name)
         rejected_chargers: List[str] = []
         rejected_parkings: List[str] = []
         default_charger = self._resolve_charger_waypoint(robot_id, fleet_name, payload, rejected_chargers)
@@ -1109,7 +1172,7 @@ class MqttFleetAdapter:
             "default_charger": default_charger,
             "first_seen": now,
         })
-        dist_to_graph = self._compute_distance_to_graph(fleet_name, x, y)
+        dist_to_graph = self._compute_distance_to_graph(fleet_name, x, y, level_name)
         is_off_graph = dist_to_graph > OFF_GRAPH_THRESHOLD_M
         disc["last_seen"] = now
         disc["x"] = x
@@ -1199,6 +1262,10 @@ class MqttFleetAdapter:
                         lambda act_id, fid=fleet_name, rid=robot_id: self._on_rmf_stop(fid, rid, act_id),
                         lambda cat, desc, exec_h, fid=fleet_name, rid=robot_id: self._on_rmf_action(fid, rid, cat, desc, exec_h),
                     )
+                    # Called when lift doors open on the destination floor: switch the robot's map over MQTT.
+                    callbacks.localize = (
+                        lambda dest, execution, fid=fleet_name, rid=robot_id: self._on_rmf_localize(fid, rid, dest, execution)
+                    )
 
                     update_handle = target_handle.add_robot(
                         robot_id, initial_state, robot_config, callbacks
@@ -1212,7 +1279,14 @@ class MqttFleetAdapter:
                 # 嘗試使用該車隊路網最近站點作為初始錨點完成 Open-RMF 註冊，並立即以真實座標更新
                 if update_handle is None:
                     f_info = self.fleet_waypoint_info.get(fleet_name, {})
-                    coords_dict = f_info.get("coords", {})
+                    level_info = (f_info.get("levels") or {}).get(level_name)
+                    if level_info:
+                        coords_dict = {
+                            wp: rmf_to_robot(level_info["transform"], *xy)
+                            for wp, xy in level_info["waypoints"].items()
+                        }
+                    else:
+                        coords_dict = f_info.get("coords", {})
                     if coords_dict:
                         nearest_wp_name, (n_x, n_y) = min(
                             coords_dict.items(),
@@ -1304,7 +1378,9 @@ class MqttFleetAdapter:
         bat_val = float(payload.get("battery", 100.0))
         status_val = payload.get("status", "idle")
 
-        dist_to_graph = self._compute_distance_to_graph(fleet_name, x_val, y_val)
+        robot_entry = self.robots.get((fleet_name, robot_id))
+        hb_level = payload.get("level_name") or (robot_entry.map_name if robot_entry else self._default_level(fleet_name))
+        dist_to_graph = self._compute_distance_to_graph(fleet_name, x_val, y_val, hb_level)
         is_off_graph = dist_to_graph > OFF_GRAPH_THRESHOLD_M
 
         with self.lock:
@@ -1532,6 +1608,8 @@ class MqttFleetAdapter:
             if robot.current_execution and not robot.is_holding:
                 if cmd_id == robot.cmd_id and status in ["completed", "success"]:
                     print(f"[NAV] Verified completion of cmd_id {cmd_id} for '{robot_id}'.")
+                    if (robot.last_cmd_payload or {}).get("action") == "change_floor":
+                        self._apply_floor_change_locked(robot, robot.last_cmd_payload)
                     try:
                         robot.current_execution.finished()
                     except Exception as e:
@@ -2104,6 +2182,62 @@ class MqttFleetAdapter:
             self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "nav_started", -1, -1, f"navigate:{target_map}:{target_pos[0]:.2f},{target_pos[1]:.2f}")
             action_label = f"DOCK ({dock_name})" if dock_name else "NAVIGATE"
             print(f"[RMF -> AMR] Dispatched {action_label} (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}: target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}], map='{target_map}'")
+
+    def _default_level(self, fleet_name: str) -> str:
+        levels = (getattr(self, "fleet_waypoint_info", {}).get(fleet_name) or {}).get("levels") or {}
+        return DEFAULT_LEVEL if DEFAULT_LEVEL in levels or not levels else next(iter(levels))
+
+    def _apply_floor_change_locked(self, robot: ManagedRobot, cmd_payload: Dict[str, Any]):
+        """Report the new floor to RMF before finishing localize; otherwise RMF resumes the plan with the
+        robot still on the old map and replans it back. The next heartbeat refines the pose."""
+        pose = cmd_payload["initial_pose"]
+        robot.map_name = cmd_payload["floor_name"]
+        robot.position = np.array([pose["x"], pose["y"], pose["yaw"]], dtype=np.float64)
+        print(f"[LIFT] Robot '{robot.name}' now localized on floor '{robot.map_name}'.")
+        if not self.mock_rmf and robot.update_handle:
+            try:
+                activity_id = robot.current_execution.identifier if robot.current_execution else None
+                robot.update_handle.update(
+                    rmf_easy.RobotState(robot.map_name, robot.position, robot.battery_soc), activity_id)
+            except Exception as e:
+                print(f"[RMF WARN] Failed to report floor change for '{robot.name}': {e}")
+
+    def _on_rmf_localize(self, fleet_name: str, robot_id: str, destination: Any, execution: Any):
+        """RMF asks the robot to relocalize on a new floor (lift arrived, doors open). ``destination.position``
+        is already in the target floor's robot coordinates; the robot answers with command_result."""
+        with self.lock:
+            robot = self._get_robot(fleet_name, robot_id)
+            if not robot:
+                print(f"[RMF -> AMR WARN] Cannot localize: robot '{robot_id}' in fleet '{fleet_name}' not found.")
+                return
+            self._detach_active_task_locked(robot, "superseded by RMF localize")
+            floor = str(getattr(destination, "map", "") or "")
+            position = [float(v) for v in destination.position]
+            if not floor:
+                self._escalate_rmf_failure(robot, f"RMF localize for '{robot_id}' has no target map")
+                return
+            if not robot.is_online or robot.is_estopped:
+                self._defer_command(
+                    robot, execution, change_floor_payload(robot_id, 0, floor, position),
+                    f"Cannot change floor: robot '{robot_id}' in fleet '{fleet_name}' is "
+                    f"{'emergency-stopped' if robot.is_estopped else 'offline'}."
+                )
+                return
+            robot.is_holding = False
+            robot.cmd_id += 1
+            robot.nav_retries = 0
+            robot.current_execution = execution
+            robot.target_position = None  # never completed by heartbeat; only by command_result
+            robot.deferred_cmd_payload = None
+            cmd_payload = change_floor_payload(robot_id, robot.cmd_id, floor, position)
+            robot.last_cmd_payload = cmd_payload
+            robot.last_dispatch_time = time.time()
+            cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
+            self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+            self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "nav_started", -1, -1,
+                                      f"change_floor:{floor}:{position[0]:.2f},{position[1]:.2f}")
+            print(f"[RMF -> AMR] Dispatched CHANGE_FLOOR (cmd_id: {robot.cmd_id}) to '{robot_id}': "
+                  f"floor='{floor}', pose=[{position[0]:.2f}, {position[1]:.2f}, {position[2]:.2f}]")
 
     def _on_rmf_stop(self, fleet_name: str, robot_id: str, activity_id: Any):
         with self.lock:

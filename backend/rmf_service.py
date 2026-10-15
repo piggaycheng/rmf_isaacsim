@@ -52,6 +52,8 @@ class RMFService:
         self.schedule_process: Optional[subprocess.Popen] = None
         self.dispatcher_process: Optional[subprocess.Popen] = None
         self.adapter_process: Optional[subprocess.Popen] = None
+        self.lift_supervisor_process: Optional[subprocess.Popen] = None
+        self.mqtt_lift_adapter_process: Optional[subprocess.Popen] = None
         self.ros_node: Optional[Node] = None
         self.task_pub = None
         self.fleet_control_pub = None
@@ -64,7 +66,7 @@ class RMFService:
         self.lock = threading.Lock()
 
     def start_background_processes(self):
-        """Starts rmf_traffic_schedule, rmf_task_dispatcher and mqtt_fleet_adapter."""
+        """Starts rmf_traffic_schedule, rmf_task_dispatcher, lifts and mqtt_fleet_adapter."""
         env = os.environ.copy()
 
         # Clean up any stale or defunct background processes first
@@ -72,6 +74,8 @@ class RMFService:
             subprocess.run(["pkill", "-9", "-f", "rmf_traffic_schedule"], capture_output=True)
             subprocess.run(["pkill", "-9", "-f", "rmf_task_dispatcher"], capture_output=True)
             subprocess.run(["pkill", "-9", "-f", "mqtt_fleet_adapter.py"], capture_output=True)
+            subprocess.run(["pkill", "-9", "-f", "lift_supervisor"], capture_output=True)
+            subprocess.run(["pkill", "-9", "-f", "mqtt_lift_adapter.py"], capture_output=True)
             time.sleep(0.5)
         except Exception:
             pass
@@ -104,7 +108,29 @@ class RMFService:
         except Exception as e:
             print(f"[RMF Core ERROR] Failed to start rmf_task_dispatcher: {e}")
 
-        # 3. Start mqtt_fleet_adapter if not already running
+        # 3. Lifts: lift_supervisor relays the fleet adapter's requests to /lift_requests and
+        # mqtt_lift_adapter bridges them to MQTT lift controllers (rmf/lift/<name>/...).
+        lift_script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../workspace/mqtt_lift_adapter/mqtt_lift_adapter.py")
+        )
+        if not os.path.exists(lift_script):
+            lift_script = "/root/rmf_ws/src/custom_ws/mqtt_lift_adapter/mqtt_lift_adapter.py"
+        for label, command, log_path in (
+            ("lift_supervisor", "ros2 run rmf_fleet_adapter lift_supervisor", "/tmp/lift_supervisor.log"),
+            ("mqtt_lift_adapter", f"python3 -u {lift_script}", "/tmp/lift_adapter.log"),
+        ):
+            try:
+                print(f"[RMF Lift] Starting {label}...")
+                setattr(self, f"{label}_process", subprocess.Popen(
+                    ["bash", "-c", f"source /ros_entrypoint.sh && {command}"],
+                    stdout=open(log_path, "w"),
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                ))
+            except Exception as e:
+                print(f"[RMF Lift ERROR] Failed to start {label}: {e}")
+
+        # 4. Start mqtt_fleet_adapter if not already running
         try:
             check_fa = subprocess.run(["pgrep", "-f", "mqtt_fleet_adapter.py"], capture_output=True)
             if check_fa.returncode != 0:
@@ -1552,6 +1578,8 @@ class RMFService:
         self.running = False
         for proc, name in [
             (self.adapter_process, "mqtt_fleet_adapter"),
+            (self.mqtt_lift_adapter_process, "mqtt_lift_adapter"),
+            (self.lift_supervisor_process, "lift_supervisor"),
             (self.dispatcher_process, "rmf_task_dispatcher"),
             (self.schedule_process, "rmf_traffic_schedule"),
         ]:

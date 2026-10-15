@@ -23,6 +23,7 @@ class MockRobot:
         start_x: float = 0.7,
         start_y: float = 0.9,
         start_yaw: float = 0.0,
+        level: str = "1F",
     ):
         self.robot_id = robot_id
         self.fleet_name = fleet_name
@@ -33,6 +34,7 @@ class MockRobot:
         self.x = start_x
         self.y = start_y
         self.yaw = start_yaw
+        self.level = level
         self.battery = 98.0
         self.status = "idle" # idle, moving, charging, error
         self.current_cmd_id = None
@@ -93,7 +95,7 @@ class MockRobot:
                 "x": self.x,
                 "y": self.y,
                 "yaw": self.yaw,
-                "level_name": "L1",
+                "level_name": self.level,
                 "waypoint_name": "wp_1"
             },
             "specs": {
@@ -144,6 +146,24 @@ class MockRobot:
             self.current_cmd_id = cmd_id
             self.status = "moving"
             print(f"[AMR] 🚗 Starting movement towards: ({self.target_x:.2f}, {self.target_y:.2f})")
+
+        elif action == "change_floor":
+            # Robot-side extension: reload the floor map and relocalize (simulated as instant).
+            pose = cmd.get("initial_pose") or {}
+            floor = cmd.get("floor_name")
+            ok = bool(floor) and all(k in pose for k in ("x", "y", "yaw")) and self.status != "moving"
+            if ok:
+                self.level = floor
+                self.x, self.y, self.yaw = float(pose["x"]), float(pose["y"]), float(pose["yaw"])
+                print(f"[AMR] 🛗 Switched to floor '{floor}' at ({self.x:.2f}, {self.y:.2f}, {self.yaw:.2f})")
+            self.client.publish(self.topic_cmd_result, json.dumps({
+                "robot_id": self.robot_id,
+                "cmd_id": cmd_id,
+                "status": "completed" if ok else "failed",
+                "message": f"Floor switched to {floor}" if ok else "Invalid change_floor or robot is moving",
+                "final_location": {"x": self.x, "y": self.y, "yaw": self.yaw, "level_name": self.level},
+                "timestamp": time.time(),
+            }), qos=1)
 
         elif action == "stop":
             print(f"[AMR] 🛑 STOP command executed.")
@@ -205,6 +225,7 @@ class MockRobot:
                 "battery": round(self.battery, 1),
                 "status": self.status,
                 "current_cmd_id": self.current_cmd_id,
+                "level_name": self.level,
             }
             self.client.publish(self.topic_heartbeat, json.dumps(hb_payload), qos=0)
 
@@ -259,6 +280,8 @@ def main():
     parser.add_argument("--port", type=int, default=1883, help="MQTT Broker Port")
     parser.add_argument("--x", type=float, default=0.7, help="Initial X")
     parser.add_argument("--y", type=float, default=0.9, help="Initial Y")
+    parser.add_argument("--yaw", type=float, default=0.0, help="Initial yaw (rad)")
+    parser.add_argument("--level", default="1F", help="Initial floor / RMF level name")
     args = parser.parse_args()
 
     robot = MockRobot(
@@ -267,7 +290,9 @@ def main():
         mqtt_host=args.host,
         mqtt_port=args.port,
         start_x=args.x,
-        start_y=args.y
+        start_y=args.y,
+        start_yaw=args.yaw,
+        level=args.level,
     )
     robot.start()
 

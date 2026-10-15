@@ -63,6 +63,13 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "rmf/tinyRobot/robot/mock_amr_01/command" 
 
 ---
 
+## 🏢 多樓層 / 電梯
+
+- 路網 (`active_nav_graph.json`) 可含 `levels`（樓層名稱與 `transform`：RMF 建築座標 → 該樓層地圖座標）與 `lifts`；站點以 `level` 標記樓層，以 `lift` 標記電梯車廂點。
+- FA 依 `levels[].transform` 產生 fleet `transforms`，並在 RMF 乘電梯抵達目的樓層後，透過 MQTT `change_floor` 指令（見規格書 4.4）要求車端載入新樓層地圖並重新定位。
+- 電梯本身由 `workspace/mqtt_lift_adapter` 透過 MQTT 控制（見該目錄 README）。
+- `mock_robot.py --level 1F` 支援 `change_floor`，可搭配 `mock_lift.py` 做無模擬器的端對端測試。
+
 ## 📑 車端通訊規格書
 
 完整且詳細的 MQTT 通訊欄位規範、JSON Schema 與生命週期狀態機，請參閱：

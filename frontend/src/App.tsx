@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { MapCanvas, EditorTool } from '@/components/MapCanvas';
 import { DispatchModal } from '@/components/DispatchModal';
 import { OFF_GRAPH_THRESHOLD_M } from '@/lib/constants';
@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
@@ -187,6 +187,34 @@ export function App() {
     } catch (e) {}
     return DEFAULT_GRAPHS;
   });
+  // Floors and lifts (multi-level maps); kept from the saved map and sent back on save.
+  const [levels, setLevels] = useState<MapLevel[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('rmf_active_nav_graph') || '{}');
+      if (Array.isArray(parsed.levels)) return parsed.levels;
+    } catch (e) {}
+    return [];
+  });
+  const [lifts, setLifts] = useState<MapLift[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('rmf_active_nav_graph') || '{}');
+      if (Array.isArray(parsed.lifts)) return parsed.lifts;
+    } catch (e) {}
+    return [];
+  });
+  const [activeLevel, setActiveLevel] = useState<string>('');
+  const currentLevel = levels.some((l) => l.name === activeLevel)
+    ? activeLevel
+    : levels[0]?.name || DEFAULT_LEVEL;
+  const levelWaypoints = useMemo(
+    () => (levels.length > 1 ? waypoints.filter((w) => waypointLevel(w, levels) === currentLevel) : waypoints),
+    [waypoints, levels, currentLevel]
+  );
+  const levelLanes = useMemo(() => {
+    if (levels.length <= 1) return lanes;
+    const ids = new Set(levelWaypoints.map((w) => w.id));
+    return lanes.filter((l) => ids.has(l.start_id) && ids.has(l.end_id));
+  }, [lanes, levels, levelWaypoints]);
   const [activeGraphIdx, setActiveGraphIdx] = useState<number>(0);
   const [focusActiveGraph, setFocusActiveGraph] = useState<boolean>(true);
   const [editingGraphId, setEditingGraphId] = useState<number | null>(null);
@@ -285,10 +313,19 @@ export function App() {
       .then((data) => {
         if (data && Array.isArray(data.waypoints) && data.waypoints.length > 0) {
           const cached = localStorage.getItem('rmf_active_nav_graph');
-          if (!cached) {
+          let cacheHasLevels = false;
+          try {
+            cacheHasLevels = !!cached && Array.isArray(JSON.parse(cached).levels);
+          } catch (e) {}
+          // A cache written before multi-level support would drop other floors on auto-save,
+          // so the server map wins when it has levels and the cache does not.
+          const serverHasLevels = Array.isArray(data.levels) && data.levels.length > 0;
+          if (!cached || (serverHasLevels && !cacheHasLevels)) {
             setWaypoints(data.waypoints);
             if (Array.isArray(data.lanes)) setLanes(data.lanes);
             if (Array.isArray(data.graphs) && data.graphs.length > 0) setGraphs(data.graphs);
+            if (Array.isArray(data.levels)) setLevels(data.levels);
+            if (Array.isArray(data.lifts)) setLifts(data.lifts);
           }
         }
       })
@@ -302,6 +339,7 @@ export function App() {
       waypoints,
       lanes,
       graphs,
+      ...(levels.length > 0 ? { levels, lifts } : {}),
     };
 
     // Immediate local save
@@ -343,7 +381,7 @@ export function App() {
     }, 800);
 
     return () => clearTimeout(timer);
-  }, [waypoints, lanes, graphs]);
+  }, [waypoints, lanes, graphs, levels, lifts]);
 
   // WebSocket Connection to Backend
   useEffect(() => {
@@ -495,6 +533,7 @@ export function App() {
       y,
       type,
       graph_idx: activeGraphIdx,
+      ...(levels.length > 0 ? { level: currentLevel } : {}),
     };
     setWaypoints((prev) => [...prev, newWp]);
     setSelectedWaypointIds([id]);
@@ -957,6 +996,7 @@ export function App() {
       waypoints,
       lanes,
       graphs,
+      ...(levels.length > 0 ? { levels, lifts } : {}),
       restart_adapter: true,
     };
     try {
@@ -991,6 +1031,7 @@ export function App() {
       waypoints,
       lanes,
       graphs,
+      ...(levels.length > 0 ? { levels, lifts } : {}),
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1460,11 +1501,31 @@ export function App() {
           )}
 
           <div className="flex-1 h-full relative">
+            {levels.length > 1 && (
+              <div className="absolute top-2 left-2 z-20 flex items-center space-x-1 bg-[#0b101d]/90 border border-slate-700 rounded px-2 py-1 text-[11px] text-slate-300">
+                <span className="font-semibold mr-1">樓層</span>
+                {levels.map((l) => (
+                  <button
+                    key={l.name}
+                    className={`px-2 py-0.5 rounded ${l.name === currentLevel ? 'bg-primary text-white' : 'hover:bg-slate-700'}`}
+                    title={`顯示 ${l.name} 的站點與路線（座標為該樓層地圖座標）`}
+                    onClick={() => {
+                      setActiveLevel(l.name);
+                      setSelectedWaypointIds([]);
+                      setSelectedLaneIds([]);
+                    }}
+                  >
+                    {l.name}
+                  </button>
+                ))}
+                {lifts.length > 0 && <span className="ml-1 text-slate-500">電梯 {lifts.map((l) => l.name).join(', ')}</span>}
+              </div>
+            )}
             <MapCanvas
               mode={mode}
               tool={tool}
-              waypoints={waypoints}
-              lanes={lanes}
+              waypoints={levelWaypoints}
+              lanes={levelLanes}
               robots={robots}
               slamMap={slamMap}
               graphs={graphs}
@@ -1777,6 +1838,12 @@ export function App() {
                       {selectedWaypoint.type}
                     </Badge>
                   </div>
+                  {levels.length > 0 && (
+                    <div className="text-[11px] text-slate-400">
+                      樓層 {waypointLevel(selectedWaypoint, levels)}
+                      {selectedWaypoint.lift ? ` · 電梯 ${selectedWaypoint.lift}` : ''}
+                    </div>
+                  )}
 
                   <div>
                     <label className="text-[11px] text-slate-400 block mb-1">站點名稱</label>

@@ -193,7 +193,7 @@
 | **`current_cmd_id`** | Integer / Null | **是** | 整數編號 或 `null` | 正在執行的指令 ID（待命未接單時為 `null`，移動時為任務號） |
 
 > **選填補充欄位**（單樓層場域可完全省略）：
-> - `level_name` (String): 多樓層場域時標記所在樓層（省略時預設使用開機註冊的樓層 `"L1"`）。
+> - `level_name` (String): 多樓層場域時標記所在樓層（例：`"1F"`、`"B1"`；省略時使用路網第一個樓層，預設 `"1F"`）。多樓層車輛**必須**回報，FA 依此判斷所在樓層與路網距離。
 
 ---
 
@@ -249,6 +249,22 @@
 ```
 - 下發時機：RMF 交通管制/任務取消（`reason` 為 RMF hold），或操作員緊急停車（`reason: "Emergency stop by operator"`）。車端處理方式相同：立即中止目前導航並回報 `command_result`。
 - 緊急停車期間 Fleet Adapter 不會再下發任何指令；解除後若原任務仍有效，會以新的 `cmd_id` 重新下發被中斷的 `navigate`/`dock`/`action`。
+
+#### 4. 切換樓層地圖 (Change Floor)
+```json
+{
+  "robot_id": "tinyRobot1",
+  "cmd_id": 104,
+  "action": "change_floor",
+  "floor_name": "B1",
+  "initial_pose": {"x": 1.468, "y": -2.289, "yaw": 0.0},
+  "timestamp": 1728312020.000
+}
+```
+- 下發時機：多樓層任務中，電梯抵達目的樓層且門已開啟後（RMF `localize`），由 FA 自動下發；上位系統不需另外呼叫。
+- `initial_pose` 為**目的樓層地圖座標**（FA 已依路網 `levels[].transform` 從 RMF 建築座標轉換），即電梯車廂內的位置。
+- 車端處理：載入該樓層地圖 → 以 `initial_pose` 重新定位 → 回報 `command_result`（`status: "completed"`，`final_location.level_name` 為新樓層）。之後心跳的 `level_name` 必須改為新樓層。
+- 失敗（樓層不存在、車輛移動中等）回報 `status: "failed"`，RMF 任務會因此卡在電梯內，需人工處理。
 
 ---
 

@@ -65,6 +65,9 @@ class MapSaveRequest(BaseModel):
     waypoints: List[Dict[str, Any]]
     lanes: List[Dict[str, Any]]
     graphs: Optional[List[Dict[str, Any]]] = None
+    # Multi-floor data (see nav_graph_builder); None keeps the saved levels/lifts.
+    levels: Optional[List[Dict[str, Any]]] = None
+    lifts: Optional[List[Dict[str, Any]]] = None
     restart_adapter: Optional[bool] = False
 
 class CameraDisableRequest(BaseModel):
@@ -168,14 +171,20 @@ def _point_to_segment_distance(px: float, py: float, ax: float, ay: float, bx: f
     return math.hypot(px - proj_x, py - proj_y)
 
 
-def compute_nav_graph_distance(fleet_name: str, x: float, y: float) -> Optional[float]:
-    """Computes shortest distance from (x, y) to active navigation graph or 0.yaml."""
+def compute_nav_graph_distance(fleet_name: str, x: float, y: float, level: Optional[str] = None) -> Optional[float]:
+    """Computes shortest distance from (x, y) to active navigation graph or 0.yaml.
+
+    With level, only that floor's waypoints count; JSON waypoints are in their floor's map frame.
+    """
     import math
     if os.path.exists(ACTIVE_MAP_FILE):
         try:
             with open(ACTIVE_MAP_FILE, "r", encoding="utf-8") as mf:
                 mdata = json.load(mf)
             wps = mdata.get("waypoints", [])
+            if level:
+                first = (mdata.get("levels") or [{}])[0].get("name")
+                wps = [w for w in wps if (w.get("level") or first) in (level, None)]
             lanes = mdata.get("lanes", [])
             wp_map = {w.get("id"): (float(w.get("x", 0.0)), float(w.get("y", 0.0))) for w in wps if w.get("id")}
             min_dist = float("inf")
@@ -242,15 +251,17 @@ def is_robot_off_graph(fleet_name: str, robot_id: str, x: Optional[float] = None
     if disc and "is_off_graph" in disc:
         return bool(disc.get("is_off_graph")), float(disc.get("off_graph_distance", 0.0))
 
+    rob = current_robots.get(robot_id)
     if x is None or y is None:
-        rob = current_robots.get(robot_id)
         if rob:
             x, y = rob.get("x"), rob.get("y")
         elif disc:
             x, y = disc.get("x"), disc.get("y")
+    level = next((r.get("level_name") or r.get("map_name") for r in (rob, disc)
+                  if r and (r.get("level_name") or r.get("map_name"))), None)
 
     if x is not None and y is not None:
-        dist = compute_nav_graph_distance(fleet_name, float(x), float(y))
+        dist = compute_nav_graph_distance(fleet_name, float(x), float(y), level)
         if dist is not None:
             return dist > 5.0, round(dist, 2)
 
