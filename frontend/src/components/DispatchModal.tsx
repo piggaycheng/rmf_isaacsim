@@ -193,6 +193,8 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
             <option value="">請選擇站點...</option>
             {waypoints.map((wp) => (
               <option key={wp.id} value={wp.id}>
+                {wp.level ? `[${wp.level}] ` : ''}
+                {wp.type === 'lift' ? '🛗 ' : ''}
                 {wp.name} ({wp.type}) [{wp.x.toFixed(1)}, {wp.y.toFixed(1)}]
               </option>
             ))}
@@ -215,6 +217,8 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
                 .filter((w) => w.id !== targetWaypointId)
                 .map((wp) => (
                   <option key={wp.id} value={wp.id}>
+                    {wp.level ? `[${wp.level}] ` : ''}
+                    {wp.type === 'lift' ? '🛗 ' : ''}
                     {wp.name} ({wp.type}) [{wp.x.toFixed(1)}, {wp.y.toFixed(1)}]
                   </option>
                 ))}
@@ -247,7 +251,7 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
                 : r.status;
               return (
                 <option key={r.id} value={r.id} disabled={isEstopped || isOff}>
-                  {r.name} ({r.fleet}) - 電量 {Math.round(r.battery)}% [{statusLabel}]
+                  {r.name} ({r.fleet} · {r.level_name || '1F'}) - 電量 {Math.round(r.battery)}% [{statusLabel}]
                 </option>
               );
             })}

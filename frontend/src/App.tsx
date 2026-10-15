@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { MapCanvas, EditorTool } from '@/components/MapCanvas';
 import { DispatchModal } from '@/components/DispatchModal';
 import { OFF_GRAPH_THRESHOLD_M } from '@/lib/constants';
@@ -7,8 +7,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
+import { MapOverlayAlignModal } from '@/components/MapOverlayAlignModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
 import { PlantCameraList } from '@/components/PlantCameraList';
@@ -51,6 +52,12 @@ import {
   ListOrdered,
   Workflow,
   Clock,
+  Image as ImageIcon,
+  CheckCircle2,
+  ArrowUpDown,
+  Sliders,
+  Sparkles,
+  Crosshair,
 } from 'lucide-react';
 
 const DEFAULT_GRAPHS: NavGraph[] = [
@@ -191,9 +198,9 @@ export function App() {
   const [levels, setLevels] = useState<MapLevel[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem('rmf_active_nav_graph') || '{}');
-      if (Array.isArray(parsed.levels)) return parsed.levels;
+      if (Array.isArray(parsed.levels) && parsed.levels.length > 0) return parsed.levels;
     } catch (e) {}
-    return [];
+    return [{ name: DEFAULT_LEVEL }];
   });
   const [lifts, setLifts] = useState<MapLift[]>(() => {
     try {
@@ -202,10 +209,17 @@ export function App() {
     } catch (e) {}
     return [];
   });
-  const [activeLevel, setActiveLevel] = useState<string>('');
+  const [activeLevel, setActiveLevel] = useState<string>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('rmf_active_nav_graph') || '{}');
+      if (Array.isArray(parsed.levels) && parsed.levels.length > 0) return parsed.levels[0].name;
+    } catch (e) {}
+    return DEFAULT_LEVEL;
+  });
   const currentLevel = levels.some((l) => l.name === activeLevel)
     ? activeLevel
     : levels[0]?.name || DEFAULT_LEVEL;
+
   const levelWaypoints = useMemo(
     () => (levels.length > 1 ? waypoints.filter((w) => waypointLevel(w, levels) === currentLevel) : waypoints),
     [waypoints, levels, currentLevel]
@@ -215,6 +229,17 @@ export function App() {
     const ids = new Set(levelWaypoints.map((w) => w.id));
     return lanes.filter((l) => ids.has(l.start_id) && ids.has(l.end_id));
   }, [lanes, levels, levelWaypoints]);
+
+  const [overlayAlignModalOpen, setOverlayAlignModalOpen] = useState<boolean>(false);
+
+  const handleSaveLevelTransform = (levelName: string, transform: LevelTransform) => {
+    setLevels((prev) =>
+      prev.map((l) => (l.name === levelName ? { ...l, transform } : l))
+    );
+    setSaveToast(`樓層 [${levelName}] 座標變換參數已更新！`);
+    setTimeout(() => setSaveToast(null), 3000);
+  };
+
   const [activeGraphIdx, setActiveGraphIdx] = useState<number>(0);
   const [focusActiveGraph, setFocusActiveGraph] = useState<boolean>(true);
   const [editingGraphId, setEditingGraphId] = useState<number | null>(null);
@@ -223,6 +248,19 @@ export function App() {
   const [robots, setRobots] = useState<Robot[]>(INITIAL_ROBOTS);
   const [tasks, setTasks] = useState<Task[]>([]);
 
+  // Filter robots visible on current floor
+  const visibleRobots = useMemo(() => {
+    if (!currentLevel) return robots;
+    return robots.filter((r) => {
+      const rLevel = r.level_name || DEFAULT_LEVEL;
+      return (
+        rLevel === currentLevel ||
+        (rLevel === 'L1' && currentLevel === '1F') ||
+        (rLevel === '1F' && currentLevel === 'L1')
+      );
+    });
+  }, [robots, currentLevel]);
+
   const [selectedWaypointIds, setSelectedWaypointIds] = useState<string[]>([]);
   const [selectedLaneIds, setSelectedLaneIds] = useState<string[]>([]);
   const [dispatchModalOpen, setDispatchModalOpen] = useState<boolean>(false);
@@ -230,19 +268,47 @@ export function App() {
   const [multiStepModalOpen, setMultiStepModalOpen] = useState<boolean>(false);
   const [proceedPendingRobotId, setProceedPendingRobotId] = useState<string | null>(null);
 
-  // SLAM Map state (Lazy initialized from localStorage for 0ms restoration)
-  const [slamMap, setSlamMap] = useState<SlamMap | null>(() => {
+  // Multi-floor SLAM Map state (dictionary level_name -> SlamMap)
+  const [floorSlamMaps, setFloorSlamMaps] = useState<Record<string, SlamMap>>(() => {
     try {
-      const cached = localStorage.getItem('rmf_active_slam_map');
+      const cached = localStorage.getItem('rmf_floor_slam_maps');
       if (cached) {
         const parsed = JSON.parse(cached);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+      const legacy = localStorage.getItem('rmf_active_slam_map');
+      if (legacy) {
+        const parsed = JSON.parse(legacy);
         if (parsed && parsed.image_url) {
-          return parsed;
+          return { [parsed.level_name || DEFAULT_LEVEL]: parsed };
         }
       }
     } catch (e) {}
-    return null;
+    return {};
   });
+
+  const slamMap = useMemo(() => {
+    return floorSlamMaps[currentLevel] || null;
+  }, [floorSlamMaps, currentLevel]);
+
+  const setSlamMap = useCallback((updater: SlamMap | null | ((prev: SlamMap | null) => SlamMap | null)) => {
+    setFloorSlamMaps((prev) => {
+      const current = prev[currentLevel] || null;
+      const nextMap = typeof updater === 'function' ? updater(current) : updater;
+      const next = { ...prev };
+      if (nextMap) {
+        next[currentLevel] = nextMap;
+      } else {
+        delete next[currentLevel];
+      }
+      try {
+        localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(next));
+        if (nextMap) localStorage.setItem('rmf_active_slam_map', JSON.stringify(nextMap));
+        else localStorage.removeItem('rmf_active_slam_map');
+      } catch (e) {}
+      return next;
+    });
+  }, [currentLevel]);
   const [importModalOpen, setImportModalOpen] = useState<boolean>(false);
 
   // Backend / Simulation state
@@ -277,34 +343,33 @@ export function App() {
     } catch (e) {}
   };
 
-  // 1. Fetch initial SLAM map from backend if exists
+  // 1. Fetch initial SLAM maps from backend if exists
   useEffect(() => {
     fetch('/api/map/slam')
-      .then((res) => res.json())
+      .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data && data.image_url) {
-          setSlamMap((prev) => {
-            const merged = { ...data, opacity: prev?.opacity ?? data.opacity ?? 0.85 };
+        if (data) {
+          if (data.maps && typeof data.maps === 'object') {
+            setFloorSlamMaps(data.maps);
             try {
-              localStorage.setItem('rmf_active_slam_map', JSON.stringify(merged));
+              localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(data.maps));
             } catch (e) {}
-            return merged;
-          });
+          } else if (data.image_url) {
+            const lvl = data.level_name || currentLevel || DEFAULT_LEVEL;
+            setFloorSlamMaps((prev) => {
+              const merged = { ...data, opacity: prev[lvl]?.opacity ?? data.opacity ?? 0.85 };
+              const next = { ...prev, [lvl]: merged };
+              try {
+                localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(next));
+                localStorage.setItem('rmf_active_slam_map', JSON.stringify(merged));
+              } catch (e) {}
+              return next;
+            });
+          }
         }
       })
       .catch(() => {});
-  }, []);
-
-  // 1.1 Persist SLAM map & opacity changes to localStorage
-  useEffect(() => {
-    try {
-      if (slamMap) {
-        localStorage.setItem('rmf_active_slam_map', JSON.stringify(slamMap));
-      } else {
-        localStorage.removeItem('rmf_active_slam_map');
-      }
-    } catch (e) {}
-  }, [slamMap]);
+  }, [currentLevel]);
 
   // 2. Fetch initial Saved Navigation Graph from backend on startup
   useEffect(() => {
@@ -421,14 +486,46 @@ export function App() {
               }
             }
             if (data.type === 'slam_map') {
-              if (data.map) {
-                setSlamMap((prev) => ({
-                  ...data.map,
-                  opacity: prev?.opacity ?? data.map.opacity ?? 0.85,
-                }));
-              } else {
-                setSlamMap(null);
+              if (data.maps && typeof data.maps === 'object') {
+                setFloorSlamMaps(data.maps);
                 try {
+                  localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(data.maps));
+                } catch (e) {}
+              } else if (data.level_name) {
+                setFloorSlamMaps((prev) => {
+                  const next = { ...prev };
+                  if (data.map) {
+                    next[data.level_name] = {
+                      ...data.map,
+                      opacity: prev[data.level_name]?.opacity ?? data.map.opacity ?? 0.85,
+                    };
+                  } else {
+                    delete next[data.level_name];
+                  }
+                  try {
+                    localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(next));
+                  } catch (e) {}
+                  return next;
+                });
+              } else if (data.map) {
+                setFloorSlamMaps((prev) => {
+                  const lvl = data.map.level_name || currentLevel;
+                  const next = {
+                    ...prev,
+                    [lvl]: {
+                      ...data.map,
+                      opacity: prev[lvl]?.opacity ?? data.map.opacity ?? 0.85,
+                    },
+                  };
+                  try {
+                    localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(next));
+                  } catch (e) {}
+                  return next;
+                });
+              } else {
+                setFloorSlamMaps({});
+                try {
+                  localStorage.removeItem('rmf_floor_slam_maps');
                   localStorage.removeItem('rmf_active_slam_map');
                 } catch (e) {}
               }
@@ -521,11 +618,28 @@ export function App() {
   // Editor Actions
   const handleAddWaypoint = (x: number, y: number, type: WaypointType) => {
     const id = `wp_${Date.now()}`;
-    const prefix = `${type === 'normal' ? 'wp' : type}_`;
-    const usedNumbers = waypoints
-      .map((w) => (w.name.startsWith(prefix) ? Number(w.name.slice(prefix.length)) : NaN))
-      .filter((n) => Number.isInteger(n));
-    const name = `${prefix}${Math.max(0, ...usedNumbers) + 1}`;
+    let name: string;
+    let liftName: string | undefined;
+
+    if (type === 'lift') {
+      let liftNum = 1;
+      while (waypoints.some((w) => w.lift === `lift_${liftNum}` && waypointLevel(w, levels) === currentLevel)) {
+        liftNum++;
+      }
+      liftName = `lift_${liftNum}`;
+      name = `${liftName}_${currentLevel}`;
+      let suffix = 1;
+      while (waypoints.some((w) => w.name === name)) {
+        name = `${liftName}_${currentLevel}_${suffix++}`;
+      }
+    } else {
+      const prefix = `${type === 'normal' ? 'wp' : type}_`;
+      const usedNumbers = waypoints
+        .map((w) => (w.name.startsWith(prefix) ? Number(w.name.slice(prefix.length)) : NaN))
+        .filter((n) => Number.isInteger(n));
+      name = `${prefix}${Math.max(0, ...usedNumbers) + 1}`;
+    }
+
     const newWp: Waypoint = {
       id,
       name,
@@ -534,15 +648,33 @@ export function App() {
       type,
       graph_idx: activeGraphIdx,
       ...(levels.length > 0 ? { level: currentLevel } : {}),
+      ...(liftName ? { lift: liftName } : {}),
     };
     setWaypoints((prev) => [...prev, newWp]);
     setSelectedWaypointIds([id]);
     setSelectedLaneIds([]);
+
+    if (type === 'lift' && liftName) {
+      setLifts((prev) => {
+        if (prev.some((l) => l.name === liftName)) return prev;
+        return [...prev, { name: liftName, x, y, yaw: 0, width: 2.0, depth: 2.0 }];
+      });
+    }
   };
 
   const handleMoveWaypoint = (id: string, x: number, y: number) => {
     setWaypoints((prev) =>
-      prev.map((w) => (w.id === id ? { ...w, x, y } : w))
+      prev.map((w) => {
+        if (w.id === id) {
+          if (w.type === 'lift' && w.lift) {
+            setLifts((prevLifts) =>
+              prevLifts.map((l) => (l.name === w.lift ? { ...l, x, y } : l))
+            );
+          }
+          return { ...w, x, y };
+        }
+        return w;
+      })
     );
   };
 
@@ -579,6 +711,89 @@ export function App() {
         return wp ? isWaypointInGraph(wp, id, lanes) : false;
       })
     );
+  };
+
+  // Floor / Level Management Actions
+  const handleAddLevel = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(trimmed)) {
+      setSaveToast('樓層名稱格式錯誤，僅能使用英數字、_、-（例如 2F、B1）');
+      setTimeout(() => setSaveToast(null), 3500);
+      return;
+    }
+    if (levels.some((l) => l.name.toLowerCase() === trimmed.toLowerCase())) {
+      setSaveToast(`樓層 ${trimmed} 已存在！`);
+      setTimeout(() => setSaveToast(null), 3000);
+      return;
+    }
+    const newLvl: MapLevel = {
+      name: trimmed,
+      transform: { rotation: 0, scale: 1, translation: [0, 0] },
+    };
+    setLevels((prev) => [...prev, newLvl]);
+    setActiveLevel(trimmed);
+    setSelectedWaypointIds([]);
+    setSelectedLaneIds([]);
+    setSaveToast(`已新增樓層 [${trimmed}]，可開始繪製該樓層路網或載入專屬底圖`);
+    setTimeout(() => setSaveToast(null), 3500);
+  };
+
+  const handlePromptAddLevel = () => {
+    let suggestion = '2F';
+    const nums = levels
+      .map((l) => {
+        const m = l.name.match(/^(\d+)F$/i);
+        return m ? parseInt(m[1], 10) : 0;
+      })
+      .filter((n) => n > 0);
+    if (nums.length > 0) {
+      suggestion = `${Math.max(...nums) + 1}F`;
+    }
+    const input = window.prompt('請輸入新樓層名稱（例如 2F, 3F, B1）:', suggestion);
+    if (input) {
+      handleAddLevel(input);
+    }
+  };
+
+  const handleDeleteLevel = (name: string) => {
+    if (levels.length <= 1) {
+      setSaveToast('至少必須保留一個樓層！');
+      setTimeout(() => setSaveToast(null), 2500);
+      return;
+    }
+    const countWp = waypoints.filter((w) => waypointLevel(w, levels) === name).length;
+    const confirmMsg = countWp > 0
+      ? `確定要刪除樓層 [${name}] 嗎？該樓層的 ${countWp} 個站點與其路線也將一併移除。`
+      : `確定要刪除樓層 [${name}] 嗎？`;
+    if (!window.confirm(confirmMsg)) return;
+
+    const remaining = levels.filter((l) => l.name !== name);
+    setLevels(remaining);
+
+    // Remove waypoints and lanes associated with this level
+    const removedWpIds = new Set(waypoints.filter((w) => waypointLevel(w, levels) === name).map((w) => w.id));
+    setWaypoints((prev) => prev.filter((w) => !removedWpIds.has(w.id)));
+    setLanes((prev) => prev.filter((l) => !removedWpIds.has(l.start_id) && !removedWpIds.has(l.end_id)));
+
+    // Remove floor slam map from state and local storage
+    setFloorSlamMaps((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      try {
+        localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+    fetch(`/api/map/slam?level_name=${encodeURIComponent(name)}`, { method: 'DELETE' }).catch(() => {});
+
+    if (activeLevel === name) {
+      setActiveLevel(remaining[0]?.name || DEFAULT_LEVEL);
+    }
+    setSelectedWaypointIds([]);
+    setSelectedLaneIds([]);
+    setSaveToast(`已刪除樓層 [${name}]`);
+    setTimeout(() => setSaveToast(null), 3000);
   };
 
   // Graph Management Actions
@@ -991,12 +1206,19 @@ export function App() {
   // Save Map to Backend & LocalStorage
   const handleSaveMap = async () => {
     setIsSaving(true);
+    const finalLifts: MapLift[] = [...lifts];
+    waypoints.forEach((w) => {
+      if (w.lift && !finalLifts.some((l) => l.name === w.lift)) {
+        finalLifts.push({ name: w.lift, x: w.x, y: w.y, yaw: 0, width: 2.0, depth: 2.0 });
+      }
+    });
+
     const payload = {
       name: 'office_map',
       waypoints,
       lanes,
       graphs,
-      ...(levels.length > 0 ? { levels, lifts } : {}),
+      ...(levels.length > 0 ? { levels, lifts: finalLifts } : {}),
       restart_adapter: true,
     };
     try {
@@ -1274,6 +1496,15 @@ export function App() {
             >
               <Boxes className="w-5 h-5" />
             </button>
+            <button
+              onClick={() => setTool('lift')}
+              title="新增電梯點位 (Lift / Elevator)"
+              className={`p-2.5 rounded-lg transition-colors ${
+                tool === 'lift' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
+              }`}
+            >
+              <ArrowUpDown className="w-5 h-5" />
+            </button>
           </aside>
         )}
 
@@ -1362,6 +1593,106 @@ export function App() {
                   <Save className="w-3.5 h-3.5 mr-1" />
                   {isSaving ? '儲存中...' : '儲存路網'}
                 </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Floor / Level Management Toolbar (Edit Mode Only) */}
+          {mode === 'edit' && (
+            <div className="h-10 bg-[#090e1a] border-b border-slate-800 px-3 flex items-center justify-between z-10 flex-shrink-0 select-none">
+              <div className="flex items-center space-x-2 overflow-x-auto no-scrollbar py-1">
+                <span className="text-[11px] font-semibold text-slate-400 flex items-center mr-1 shrink-0">
+                  <Building2 className="w-3.5 h-3.5 mr-1 text-cyan-400" />
+                  樓層管理:
+                </span>
+                <div className="flex items-center space-x-1.5">
+                  {levels.map((lvl) => {
+                    const isActive = lvl.name === currentLevel;
+                    const hasMap = Boolean(floorSlamMaps[lvl.name]);
+                    const wpCount = waypoints.filter((w) => waypointLevel(w, levels) === lvl.name).length;
+                    return (
+                      <div
+                        key={lvl.name}
+                        className={`flex items-center rounded-lg border text-xs transition-all ${
+                          isActive
+                            ? 'bg-primary/20 border-primary text-white font-semibold shadow-sm'
+                            : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                        }`}
+                      >
+                        <button
+                          onClick={() => {
+                            setActiveLevel(lvl.name);
+                            setSelectedWaypointIds([]);
+                            setSelectedLaneIds([]);
+                          }}
+                          className="flex items-center space-x-1.5 px-2.5 py-1"
+                          title={`切換編輯樓層：${lvl.name}（${wpCount} 站點，${hasMap ? '已載入底圖' : '尚未載入底圖'}）`}
+                        >
+                          <span>{lvl.name}</span>
+                          {hasMap ? (
+                            <span title="此樓層已有雷達底圖">
+                              <ImageIcon className="w-3 h-3 text-cyan-400" />
+                            </span>
+                          ) : (
+                            <span className="w-1.5 h-1.5 rounded-full bg-slate-600" title="尚未載入底圖" />
+                          )}
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            ({wpCount}點)
+                          </span>
+                        </button>
+                        {levels.length > 1 && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteLevel(lvl.name);
+                            }}
+                            className="pr-1.5 pl-0.5 text-slate-500 hover:text-rose-400 transition-colors"
+                            title={`刪除 ${lvl.name} 樓層`}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <button
+                    onClick={handlePromptAddLevel}
+                    className="flex items-center space-x-1 px-2.5 py-1 rounded-lg border border-dashed border-slate-700 text-xs text-slate-400 hover:text-cyan-300 hover:border-cyan-500 transition-all shrink-0"
+                    title="新增樓層 (例如 2F, 3F, B1)"
+                  >
+                    <Plus className="w-3 h-3" />
+                    <span>新增樓層</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2 shrink-0 text-xs">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setOverlayAlignModalOpen(true)}
+                  className="h-6 text-[11px] px-2 text-cyan-300 border-cyan-800/60 bg-cyan-950/40 hover:bg-cyan-900/60"
+                  title="開啟雙樓層 PGM 疊圖旋轉平移對齊工具 (讓電梯井與柱位特徵重合)"
+                >
+                  <Layers className="w-3 h-3 mr-1" />
+                  雙圖疊圖校準
+                </Button>
+                {floorSlamMaps[currentLevel] ? (
+                  <span className="text-emerald-400 text-[11px] flex items-center bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded">
+                    <CheckCircle2 className="w-3 h-3 mr-1" />
+                    {currentLevel} 底圖已載入
+                  </span>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setImportModalOpen(true)}
+                    className="h-6 text-[11px] px-2 text-cyan-400 border-cyan-800/60 bg-cyan-950/40 hover:bg-cyan-900/60"
+                  >
+                    <FileUp className="w-3 h-3 mr-1" />
+                    載入 {currentLevel} 底圖
+                  </Button>
+                )}
               </div>
             </div>
           )}
@@ -1501,24 +1832,11 @@ export function App() {
           )}
 
           <div className="flex-1 h-full relative">
-            {levels.length > 1 && (
-              <div className="absolute top-2 left-2 z-20 flex items-center space-x-1 bg-[#0b101d]/90 border border-slate-700 rounded px-2 py-1 text-[11px] text-slate-300">
-                <span className="font-semibold mr-1">樓層</span>
-                {levels.map((l) => (
-                  <button
-                    key={l.name}
-                    className={`px-2 py-0.5 rounded ${l.name === currentLevel ? 'bg-primary text-white' : 'hover:bg-slate-700'}`}
-                    title={`顯示 ${l.name} 的站點與路線（座標為該樓層地圖座標）`}
-                    onClick={() => {
-                      setActiveLevel(l.name);
-                      setSelectedWaypointIds([]);
-                      setSelectedLaneIds([]);
-                    }}
-                  >
-                    {l.name}
-                  </button>
-                ))}
-                {lifts.length > 0 && <span className="ml-1 text-slate-500">電梯 {lifts.map((l) => l.name).join(', ')}</span>}
+            {mode === 'edit' && lifts.length > 0 && (
+              <div className="absolute top-2 left-2 z-20 flex items-center space-x-1.5 bg-[#0b101d]/90 border border-indigo-900/60 rounded-md px-2.5 py-1 text-[11px] text-indigo-300 shadow-md">
+                <ArrowUpDown className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="font-semibold text-slate-300">電梯:</span>
+                <span className="font-mono text-indigo-200">{lifts.map((l) => l.name).join(', ')}</span>
               </div>
             )}
             <MapCanvas
@@ -1526,13 +1844,15 @@ export function App() {
               tool={tool}
               waypoints={levelWaypoints}
               lanes={levelLanes}
-              robots={robots}
+              robots={visibleRobots}
               slamMap={slamMap}
               graphs={graphs}
               activeGraphIdx={activeGraphIdx}
               focusActiveGraph={focusActiveGraph}
               selectedWaypointIds={selectedWaypointIds}
               selectedLaneIds={selectedLaneIds}
+              lifts={lifts}
+              levelTransform={levels.find((l) => l.name === currentLevel)?.transform}
               onSelectWaypoint={handleSelectWaypoint}
               onSelectMultiple={handleSelectMultiple}
               onAddWaypoint={handleAddWaypoint}
@@ -1545,26 +1865,71 @@ export function App() {
             />
           </div>
 
-          {/* Monitor Mode: Floating Quick Dispatch */}
+          {/* Monitor Mode: Floating Floor Switcher & Quick Dispatch Toolbar */}
           {mode === 'monitor' && (
-            <div className="absolute top-4 left-4 flex items-center gap-3 pointer-events-auto z-20">
-              {/* Quick Dispatch Card */}
-              <div className="bg-slate-900/90 backdrop-blur border border-slate-800 p-2.5 px-3 rounded-xl shadow-xl flex items-center space-x-3">
-                <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary">
-                  <Play className="w-4 h-4 fill-primary" />
+            <div className="absolute top-4 left-4 flex flex-wrap items-center gap-2.5 pointer-events-auto z-20">
+              {/* Floor Switcher Tabs */}
+              <div className="bg-[#0b101d]/90 backdrop-blur border border-slate-800 p-1 px-2 rounded-xl shadow-xl flex items-center space-x-1.5">
+                <div className="flex items-center space-x-1 text-slate-300 px-1.5 py-0.5 text-xs font-semibold">
+                  <Building2 className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>樓層</span>
                 </div>
-                <div>
+                <div className="h-4 w-px bg-slate-800 mx-0.5" />
+                {levels.map((l) => {
+                  const isActive = l.name === currentLevel;
+                  const robotsOnFloor = robots.filter(
+                    (r) => (r.level_name || DEFAULT_LEVEL) === l.name || (l.name === '1F' && r.level_name === 'L1')
+                  ).length;
+                  const hasFloorMap = Boolean(floorSlamMaps[l.name]);
+                  return (
+                    <button
+                      key={l.name}
+                      onClick={() => {
+                        setActiveLevel(l.name);
+                        setSelectedWaypointIds([]);
+                        setSelectedLaneIds([]);
+                      }}
+                      className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-medium transition-all ${
+                        isActive
+                          ? 'bg-primary text-white shadow'
+                          : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/80'
+                      }`}
+                      title={`切換至 ${l.name} 樓層即時畫面（${robotsOnFloor} 台車輛在線，${hasFloorMap ? '已載入雷達底圖' : '無底圖'}）`}
+                    >
+                      <span>{l.name}</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                          isActive
+                            ? 'bg-white/20 text-white font-bold'
+                            : robotsOnFloor > 0
+                            ? 'bg-cyan-950 text-cyan-300 border border-cyan-800/60 font-semibold'
+                            : 'bg-slate-800 text-slate-500'
+                        }`}
+                      >
+                        {robotsOnFloor}台
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Quick Dispatch Card */}
+              <div className="bg-slate-900/90 backdrop-blur border border-slate-800 p-1.5 px-3 rounded-xl shadow-xl flex items-center space-x-2.5">
+                <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-primary shrink-0">
+                  <Play className="w-3.5 h-3.5 fill-primary" />
+                </div>
+                <div className="hidden sm:block">
                   <p className="text-xs font-semibold text-slate-200">地圖互動派單</p>
-                  <p className="text-[11px] text-slate-400">點擊地圖上的任意站點即可快速派遣任務</p>
                 </div>
                 <Button
                   size="sm"
+                  className="h-7 text-xs"
                   onClick={() => {
-                    setDispatchPresetWp(waypoints[0] || null);
+                    setDispatchPresetWp(levelWaypoints[0] || waypoints[0] || null);
                     setDispatchModalOpen(true);
                   }}
                 >
-                  <Send className="w-3.5 h-3.5 mr-1" />
+                  <Send className="w-3 h-3 mr-1" />
                   立即派單
                 </Button>
               </div>
@@ -1610,24 +1975,31 @@ export function App() {
                 </div>
               </div>
 
-              {/* SLAM Map Info Card (if loaded) */}
-              {slamMap && (
+              {/* SLAM Map Info Card for current floor */}
+              {slamMap ? (
                 <div className="bg-slate-900/80 border border-cyan-800/40 p-3 rounded-xl space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-cyan-400 flex items-center">
                       <MapIcon className="w-3.5 h-3.5 mr-1" />
-                      SLAM 雷達底圖
+                      SLAM 底圖 ({currentLevel})
                     </span>
                     <button
                       onClick={() => {
-                        setSlamMap(null);
-                        try {
-                          localStorage.removeItem('rmf_active_slam_map');
-                        } catch (e) {}
-                        fetch('/api/map/slam', { method: 'DELETE' }).catch(() => {});
+                        setFloorSlamMaps((prev) => {
+                          const next = { ...prev };
+                          delete next[currentLevel];
+                          try {
+                            localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(next));
+                            localStorage.removeItem('rmf_active_slam_map');
+                          } catch (e) {}
+                          return next;
+                        });
+                        fetch(`/api/map/slam?level_name=${encodeURIComponent(currentLevel)}`, { method: 'DELETE' }).catch(() => {});
+                        setSaveToast(`已卸載樓層 [${currentLevel}] 的底圖`);
+                        setTimeout(() => setSaveToast(null), 3000);
                       }}
                       className="text-slate-400 hover:text-rose-400 p-0.5 rounded transition-colors"
-                      title="卸載底圖"
+                      title="卸載此樓層底圖"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -1655,6 +2027,22 @@ export function App() {
                       className="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer"
                     />
                   </div>
+                </div>
+              ) : (
+                <div className="bg-slate-900/40 border border-dashed border-slate-800 p-3 rounded-xl flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-medium text-slate-300">樓層 [{currentLevel}] 尚未載入底圖</p>
+                    <p className="text-[10px] text-slate-500">可上傳該樓層專屬雷達底圖</p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setImportModalOpen(true)}
+                    className="h-7 text-xs text-cyan-400 border-cyan-800/60 bg-cyan-950/40 hover:bg-cyan-900/60 shrink-0"
+                  >
+                    <FileUp className="w-3 h-3 mr-1" />
+                    載入底圖
+                  </Button>
                 </div>
               )}
 
@@ -1893,8 +2281,34 @@ export function App() {
                       onChange={(e) => {
                         const newType = e.target.value as WaypointType;
                         setWaypoints((prev) =>
-                          prev.map((w) => (w.id === selectedWaypoint.id ? { ...w, type: newType } : w))
+                          prev.map((w) => {
+                            if (w.id === selectedWaypoint.id) {
+                              const updated: Waypoint = { ...w, type: newType };
+                              if (newType === 'lift' && !updated.lift) {
+                                updated.lift = 'lift_1';
+                              }
+                              return updated;
+                            }
+                            return w;
+                          })
                         );
+                        if (newType === 'lift') {
+                          setLifts((prev) => {
+                            const lName = selectedWaypoint.lift || 'lift_1';
+                            if (prev.some((l) => l.name === lName)) return prev;
+                            return [
+                              ...prev,
+                              {
+                                name: lName,
+                                x: selectedWaypoint.x,
+                                y: selectedWaypoint.y,
+                                yaw: 0,
+                                width: 2.0,
+                                depth: 2.0,
+                              },
+                            ];
+                          });
+                        }
                       }}
                       className="w-full bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200"
                     >
@@ -1902,8 +2316,249 @@ export function App() {
                       <option value="charger">⚡ 充電樁 (Charger)</option>
                       <option value="parking">🅿️ 停車等候點 (Parking)</option>
                       <option value="workcell">📦 物料取放站 (Workcell)</option>
+                      <option value="lift">🛗 電梯點位 (Lift)</option>
                     </select>
                   </div>
+
+                  {/* Lift Dedicated Inspector Section */}
+                  {selectedWaypoint.type === 'lift' && (
+                    <div className="p-2.5 rounded-lg border border-indigo-800/60 bg-indigo-950/30 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-indigo-300 flex items-center">
+                          <ArrowUpDown className="w-3.5 h-3.5 mr-1 text-indigo-400" />
+                          電梯設定 (Elevator)
+                        </span>
+                        <span className="text-[10px] text-indigo-400 font-mono">Open-RMF Lift</span>
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] text-slate-400 block mb-1">所屬電梯代號 (Lift Name)</label>
+                        <Input
+                          value={selectedWaypoint.lift || 'lift_1'}
+                          onChange={(e) => {
+                            const newLiftName = e.target.value.trim();
+                            setWaypoints((prev) =>
+                              prev.map((w) =>
+                                w.id === selectedWaypoint.id ? { ...w, lift: newLiftName } : w
+                              )
+                            );
+                            if (newLiftName) {
+                              setLifts((prev) => {
+                                if (prev.some((l) => l.name === newLiftName)) return prev;
+                                return [
+                                  ...prev,
+                                  {
+                                    name: newLiftName,
+                                    x: selectedWaypoint.x,
+                                    y: selectedWaypoint.y,
+                                    yaw: 0,
+                                    width: 2.0,
+                                    depth: 2.0,
+                                  },
+                                ];
+                              });
+                            }
+                          }}
+                          placeholder="例如：lift_1"
+                          className="h-7 text-xs bg-slate-950 border-slate-800"
+                        />
+                        {(() => {
+                          const currentWpLevel = waypointLevel(selectedWaypoint, levels);
+                          const liftName = selectedWaypoint.lift || 'lift_1';
+                          const conflictWp = waypoints.find(
+                            (w) =>
+                              w.id !== selectedWaypoint.id &&
+                              w.lift === liftName &&
+                              waypointLevel(w, levels) === currentWpLevel
+                          );
+                          if (conflictWp) {
+                            return (
+                              <p className="text-[10px] text-rose-400 mt-1.5 leading-tight flex items-start">
+                                <AlertTriangle className="w-3.5 h-3.5 mr-1 shrink-0 text-rose-400 mt-0.5" />
+                                <span>
+                                  樓層 [{currentWpLevel}] 已有站點 <code>{conflictWp.name}</code> 使用此電梯。每座電梯在同一樓層只能有 1 個站點。
+                                </span>
+                              </p>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </div>
+
+                      {/* Building Actual Physical Coordinates (Building Frame) */}
+                      {(() => {
+                        const currentWpLevel = waypointLevel(selectedWaypoint, levels);
+                        const currentLvlObj = levels.find((l) => l.name === currentWpLevel);
+                        const bldgCoord = toBuildingCoords(currentLvlObj?.transform, selectedWaypoint.x, selectedWaypoint.y);
+
+                        return (
+                          <div className="p-2.5 rounded bg-slate-900/90 border border-slate-800 space-y-2">
+                            <div className="flex items-center justify-between text-[11px]">
+                              <span className="font-semibold text-cyan-300 flex items-center">
+                                <Building2 className="w-3.5 h-3.5 mr-1 text-cyan-400" />
+                                建築實際物理座標 (Building Frame)
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">Open-RMF 基準</span>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div>
+                                <label className="text-[10px] text-slate-400 block mb-0.5">實際 X (m)</label>
+                                <Input
+                                  type="number"
+                                  step="0.05"
+                                  value={parseFloat(bldgCoord.x.toFixed(3))}
+                                  onChange={(e) => {
+                                    const newActualX = parseFloat(e.target.value) || 0;
+                                    const newCanvas = toRobotCoords(currentLvlObj?.transform, newActualX, bldgCoord.y);
+                                    handleMoveWaypoint(
+                                      selectedWaypoint.id,
+                                      parseFloat(newCanvas.x.toFixed(2)),
+                                      parseFloat(newCanvas.y.toFixed(2))
+                                    );
+                                  }}
+                                  className="h-7 text-xs bg-slate-950 border-slate-800 font-mono text-cyan-300"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-slate-400 block mb-0.5">實際 Y (m)</label>
+                                <Input
+                                  type="number"
+                                  step="0.05"
+                                  value={parseFloat(bldgCoord.y.toFixed(3))}
+                                  onChange={(e) => {
+                                    const newActualY = parseFloat(e.target.value) || 0;
+                                    const newCanvas = toRobotCoords(currentLvlObj?.transform, bldgCoord.x, newActualY);
+                                    handleMoveWaypoint(
+                                      selectedWaypoint.id,
+                                      parseFloat(newCanvas.x.toFixed(2)),
+                                      parseFloat(newCanvas.y.toFixed(2))
+                                    );
+                                  }}
+                                  className="h-7 text-xs bg-slate-950 border-slate-800 font-mono text-cyan-300"
+                                />
+                              </div>
+                            </div>
+                            <p className="text-[10px] text-slate-500 leading-tight">
+                              💡 修改實際座標會經由 [{currentWpLevel}] Transform 換算並更新當前 Canvas 座標 ({selectedWaypoint.x.toFixed(2)}, {selectedWaypoint.y.toFixed(2)})。
+                            </p>
+
+                            {/* Multi-floor elevator station alignment */}
+                            {levels.length > 1 && (
+                              <div className="pt-2 border-t border-slate-800/80">
+                                <div className="flex items-center justify-between mb-1.5">
+                                  <label className="text-[10px] text-slate-400 font-medium">
+                                    跨樓層電梯對齊 (Vertical Alignment)
+                                  </label>
+                                  <button
+                                    type="button"
+                                    onClick={() => setOverlayAlignModalOpen(true)}
+                                    className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center"
+                                    title="開啟雙樓層 PGM 疊圖旋轉平移對齊工具"
+                                  >
+                                    <Layers className="w-2.5 h-2.5 mr-0.5" />
+                                    雙圖疊圖校準
+                                  </button>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  {levels.map((lvl) => {
+                                    const liftName = selectedWaypoint.lift || 'lift_1';
+                                    const stationOnFloor = waypoints.find(
+                                      (w) => w.lift === liftName && waypointLevel(w, levels) === lvl.name
+                                    );
+                                    const isCurrentFloor = lvl.name === currentWpLevel;
+                                    const targetCanvas = toRobotCoords(lvl.transform, bldgCoord.x, bldgCoord.y);
+
+                                    return (
+                                      <div
+                                        key={lvl.name}
+                                        className="p-1.5 rounded bg-slate-950/80 border border-slate-800 text-[11px]"
+                                      >
+                                        <div className="flex items-center justify-between">
+                                          <span className="font-mono text-slate-300">
+                                            {lvl.name}
+                                            {isCurrentFloor && <span className="text-[10px] text-slate-500 ml-1">(當前)</span>}
+                                          </span>
+
+                                          {stationOnFloor ? (
+                                            (() => {
+                                              const stBldg = toBuildingCoords(lvl.transform, stationOnFloor.x, stationOnFloor.y);
+                                              const offset = Math.hypot(stBldg.x - bldgCoord.x, stBldg.y - bldgCoord.y);
+                                              const isAligned = offset <= 0.05;
+
+                                              return isAligned ? (
+                                                <span className="text-[10px] text-emerald-400 flex items-center">
+                                                  <CheckCircle2 className="w-3 h-3 mr-1" />
+                                                  已對齊 ({stationOnFloor.name})
+                                                </span>
+                                              ) : (
+                                                <div className="flex items-center space-x-1">
+                                                  <span className="text-[10px] text-amber-400" title={`實際座標偏差: ${offset.toFixed(2)}m`}>
+                                                    偏差 {offset.toFixed(2)}m
+                                                  </span>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                      handleMoveWaypoint(
+                                                        stationOnFloor.id,
+                                                        parseFloat(targetCanvas.x.toFixed(2)),
+                                                        parseFloat(targetCanvas.y.toFixed(2))
+                                                      );
+                                                      setSaveToast(`已校正 [${lvl.name}] 電梯站點座標至實際座標換算位置 (${targetCanvas.x.toFixed(2)}, ${targetCanvas.y.toFixed(2)})`);
+                                                      setTimeout(() => setSaveToast(null), 3000);
+                                                    }}
+                                                    className="text-[9px] bg-amber-950 text-amber-300 border border-amber-800/60 px-1 py-0.2 rounded hover:bg-amber-900"
+                                                    title="以實際座標重新校正此站點在 Canvas 上的位置"
+                                                  >
+                                                    校正
+                                                  </button>
+                                                </div>
+                                              );
+                                            })()
+                                          ) : (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                const targetName = `${liftName}_${lvl.name}`;
+                                                const newWp: Waypoint = {
+                                                  id: `wp_${Date.now()}`,
+                                                  name: targetName,
+                                                  x: parseFloat(targetCanvas.x.toFixed(2)),
+                                                  y: parseFloat(targetCanvas.y.toFixed(2)),
+                                                  type: 'lift',
+                                                  level: lvl.name,
+                                                  lift: liftName,
+                                                  graph_idx: selectedWaypoint.graph_idx ?? 0,
+                                                };
+                                                setWaypoints((prev) => [...prev, newWp]);
+                                                setSaveToast(`已由實際座標換算在 ${lvl.name} 建立電梯點 [${targetName}] (Canvas: ${targetCanvas.x.toFixed(2)}, ${targetCanvas.y.toFixed(2)})`);
+                                                setTimeout(() => setSaveToast(null), 3500);
+                                              }}
+                                              className="text-[10px] text-indigo-400 hover:text-indigo-300 bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-800 px-1.5 py-0.5 rounded transition-all"
+                                              title={`從實際座標 (${bldgCoord.x.toFixed(2)}, ${bldgCoord.y.toFixed(2)}) 經 ${lvl.name} 變換換算至 Canvas 座標 (${targetCanvas.x.toFixed(2)}, ${targetCanvas.y.toFixed(2)})`}
+                                            >
+                                              + 換算建立站點
+                                            </button>
+                                          )}
+                                        </div>
+
+                                        {/* Coordinate Breakdown */}
+                                        <div className="text-[10px] text-slate-500 font-mono mt-0.5 flex justify-between">
+                                          <span>Canvas: ({stationOnFloor ? `${stationOnFloor.x.toFixed(2)}, ${stationOnFloor.y.toFixed(2)}` : `${targetCanvas.x.toFixed(2)}, ${targetCanvas.y.toFixed(2)}`})</span>
+                                          <span>實際: ({bldgCoord.x.toFixed(2)}, ${bldgCoord.y.toFixed(2)})</span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
 
                   <div>
                     <label className="text-[11px] text-slate-400 block mb-1">所屬路網 (Nav Graph)</label>
@@ -2165,11 +2820,25 @@ export function App() {
                             >
                               <CardContent className="p-3 space-y-2">
                                 <div className="flex items-center justify-between">
-                                  <span className="font-semibold text-xs text-slate-200 flex items-center space-x-1.5">
+                                  <span className="font-semibold text-xs text-slate-200 flex items-center space-x-1.5 min-w-0 mr-2">
                                     {isEstopped && <OctagonAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
                                     {!isEstopped && isOffGraph && <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
                                     {!isEstopped && !isOffGraph && isWaiting && <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0 animate-pulse" />}
                                     <span className="truncate">{robot.name}</span>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setActiveLevel(robot.level_name || DEFAULT_LEVEL);
+                                      }}
+                                      title={`點擊切換地圖至該車輛所在樓層 (${robot.level_name || DEFAULT_LEVEL})`}
+                                      className={`text-[9px] px-1.5 py-0.2 rounded font-mono transition-colors shrink-0 ${
+                                        (robot.level_name || DEFAULT_LEVEL) === currentLevel
+                                          ? 'bg-cyan-950/80 text-cyan-300 border border-cyan-800/80 font-bold'
+                                          : 'bg-slate-800 text-slate-400 border border-slate-700 hover:text-cyan-300 hover:border-cyan-700'
+                                      }`}
+                                    >
+                                      {robot.level_name || DEFAULT_LEVEL}
+                                    </button>
                                   </span>
                                   <Badge
                                     variant={
@@ -2523,9 +3192,37 @@ export function App() {
       <ImportMapModal
         open={importModalOpen}
         onOpenChange={setImportModalOpen}
-        onMapLoaded={(newMap) => {
-          setSlamMap(newMap);
+        currentLevel={currentLevel}
+        levels={levels}
+        onMapLoaded={(newMap, targetLevel) => {
+          const floor = targetLevel || currentLevel;
+          setFloorSlamMaps((prev) => {
+            const next = { ...prev, [floor]: newMap };
+            try {
+              localStorage.setItem('rmf_floor_slam_maps', JSON.stringify(next));
+              if (floor === currentLevel) {
+                localStorage.setItem('rmf_active_slam_map', JSON.stringify(newMap));
+              }
+            } catch (e) {}
+            return next;
+          });
+          setSaveToast(`已成功載入樓層 [${floor}] 的 SLAM 底圖`);
+          setTimeout(() => setSaveToast(null), 3000);
         }}
+      />
+
+
+
+      {/* Visual Multi-Floor Map Overlay Aligner Modal */}
+      <MapOverlayAlignModal
+        open={overlayAlignModalOpen}
+        onOpenChange={setOverlayAlignModalOpen}
+        levels={levels}
+        currentLevelName={currentLevel}
+        floorSlamMaps={floorSlamMaps}
+        waypoints={waypoints}
+        lifts={lifts}
+        onSaveLevelTransform={handleSaveLevelTransform}
       />
 
       {/* Isaac Sim WebRTC Digital Twin Modal */}

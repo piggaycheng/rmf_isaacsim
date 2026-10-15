@@ -564,6 +564,23 @@ class RMFService:
             else:
                 current_task = r.task_id or ("正在導航" if mode_str == "moving" else "已暫停" if mode_str == "paused" else "在線待命中")
 
+            r_level = getattr(r.location, "level_name", None) or prev_robot.get("level_name")
+            if not r_level:
+                disc = state.discovered_robots.get(f"{fleet_name}_{r_id}")
+                if disc:
+                    r_level = (disc.get("initial_location") or {}).get("level_name") or disc.get("level_name")
+            if not r_level:
+                r_level = "1F"
+
+            robot_path = []
+            if hasattr(r, "path") and r.path:
+                for pt in r.path:
+                    robot_path.append({
+                        "x": round(float(pt.x), 3),
+                        "y": round(float(pt.y), 3),
+                        "level_name": getattr(pt, "level_name", r_level),
+                    })
+
             state.current_robots[r_id] = {
                 "id": r_id,
                 "name": r_id,
@@ -571,6 +588,7 @@ class RMFService:
                 "x": round(float(r.location.x), 3),
                 "y": round(float(r.location.y), 3),
                 "yaw": round(float(r.location.yaw), 3),
+                "level_name": r_level,
                 "battery": round(float(r.battery_percent), 1),
                 "status": mode_str,
                 "current_task": current_task,
@@ -579,6 +597,7 @@ class RMFService:
                 "online": not is_offline,
                 "is_off_graph": is_off_graph,
                 "off_graph_distance": off_dist,
+                "path": robot_path,
             }
 
             if is_offline:

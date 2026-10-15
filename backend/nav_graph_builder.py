@@ -120,6 +120,7 @@ def _waypoint_options(waypoint: Dict[str, Any], name: str) -> Dict[str, Any]:
         "is_parking_spot": kind == "parking",
         "is_holding_point": kind == "parking",
         "is_workcell": kind == "workcell",
+        "is_lift_cabin": kind in ("lift", "elevator"),
         "name": name,
     }
 
@@ -128,7 +129,8 @@ def build(name: str, waypoints: List[Dict[str, Any]], lanes: List[Dict[str, Any]
           graphs: Optional[List[Dict[str, Any]]] = None,
           levels: Optional[List[Dict[str, Any]]] = None,
           lifts: Optional[List[Dict[str, Any]]] = None,
-          drawing: str = "") -> Dict[str, Any]:
+          drawing: str = "",
+          drawings: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Validate the editor map and return {levels, lifts, graphs, building, nav_graphs}.
 
     nav_graphs maps graph index -> nav graph dict. Raises ValueError with a user message.
@@ -153,10 +155,26 @@ def build(name: str, waypoints: List[Dict[str, Any]], lanes: List[Dict[str, Any]
                            _number(waypoint.get("y", 0.0), f"站點 {wp_name} y"))
         options = _waypoint_options(waypoint, wp_name)
         lift_name = waypoint.get("lift")
+        if waypoint.get("type") in ("lift", "elevator") and not lift_name:
+            lift_name = "lift_1"
+            waypoint["lift"] = lift_name
+
         if lift_name:
             lift = lift_by_name.get(lift_name)
             if lift is None:
-                raise ValueError(f"站點 {wp_name} 的電梯 {lift_name} 未定義")
+                if not lifts:
+                    lift = {
+                        "name": lift_name,
+                        "x": x,
+                        "y": y,
+                        "yaw": 0.0,
+                        "width": 2.0,
+                        "depth": 2.0,
+                    }
+                    lifts.append(lift)
+                    lift_by_name[lift_name] = lift
+                else:
+                    raise ValueError(f"站點 {wp_name} 的電梯 {lift_name} 未定義")
             if (lift_name, level) in lift_slots:
                 raise ValueError(f"電梯 {lift_name} 在 {level} 只能有一個電梯內站點")
             lift_slots.add((lift_name, level))
@@ -223,11 +241,18 @@ def build(name: str, waypoints: List[Dict[str, Any]], lanes: List[Dict[str, Any]
             "lifts": lifts_yaml,
         }
 
+    drawings = drawings or {}
     building = {
         "name": name,
         "levels": {
             level["name"]: {
-                "drawing": {"filename": drawing if index == 0 else ""},
+                "drawing": {
+                    "filename": (
+                        drawings.get(level["name"])
+                        or level.get("drawing")
+                        or (drawing if index == 0 else "")
+                    )
+                },
                 "transform": level["transform"],
                 "vertices": [
                     [v[0], v[1], 0.0, v[2]["name"],

@@ -504,6 +504,8 @@ export const MultiStepTaskModal: React.FC<MultiStepTaskModalProps> = ({
                         <option value="">請選擇目標站點...</option>
                         {waypoints.map((wp) => (
                           <option key={wp.id} value={wp.name}>
+                            {wp.level ? `[${wp.level}] ` : ''}
+                            {wp.type === 'lift' ? '🛗 ' : ''}
                             {wp.name} ({wp.type}) [{wp.x.toFixed(1)}, {wp.y.toFixed(1)}]
                           </option>
                         ))}

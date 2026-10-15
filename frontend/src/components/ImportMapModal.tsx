@@ -1,21 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { SlamMap } from '@/types/rmf';
-import { FileUp, Image as ImageIcon, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
+import { SlamMap, MapLevel } from '@/types/rmf';
+import { FileUp, Image as ImageIcon, FileText, CheckCircle2, AlertCircle, Layers } from 'lucide-react';
 
 interface ImportMapModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onMapLoaded: (slamMap: SlamMap) => void;
+  onMapLoaded: (slamMap: SlamMap, targetLevel?: string) => void;
+  currentLevel?: string;
+  levels?: MapLevel[];
 }
 
 export const ImportMapModal: React.FC<ImportMapModalProps> = ({
   open,
   onOpenChange,
   onMapLoaded,
+  currentLevel = '1F',
+  levels = [],
 }) => {
+  const [selectedLevel, setSelectedLevel] = useState<string>(currentLevel);
   const [pgmFile, setPgmFile] = useState<File | null>(null);
   const [yamlFile, setYamlFile] = useState<File | null>(null);
   const [resolution, setResolution] = useState<number>(0.05);
@@ -23,6 +28,12 @@ export const ImportMapModal: React.FC<ImportMapModalProps> = ({
   const [originY, setOriginY] = useState<number>(-10.0);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setSelectedLevel(currentLevel || (levels[0]?.name ?? '1F'));
+    }
+  }, [open, currentLevel, levels]);
 
   // When YAML file is selected, parse resolution & origin client-side for immediate feedback
   const handleYamlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -61,21 +72,23 @@ export const ImportMapModal: React.FC<ImportMapModalProps> = ({
     setIsUploading(true);
     setErrorMsg(null);
 
+    const targetFloor = selectedLevel.trim() || '1F';
     const formData = new FormData();
     formData.append('pgm_file', pgmFile);
+    formData.append('level_name', targetFloor);
     if (yamlFile) {
       formData.append('yaml_file', yamlFile);
     }
 
     try {
-      const response = await fetch('/api/map/upload-slam', {
+      const response = await fetch(`/api/map/upload-slam?level_name=${encodeURIComponent(targetFloor)}`, {
         method: 'POST',
         body: formData,
       });
 
       const res = await response.json();
       if (res.status === 'success' && res.map) {
-        onMapLoaded(res.map);
+        onMapLoaded(res.map, targetFloor);
         onOpenChange(false);
       } else {
         setErrorMsg(res.message || '地圖轉換失敗，請確認檔案格式是否正確。');
@@ -119,9 +132,10 @@ export const ImportMapModal: React.FC<ImportMapModalProps> = ({
     ctx.fillRect(60, 200, 30, 30);
 
     const demoDataUrl = canvas.toDataURL('image/png');
+    const targetFloor = selectedLevel.trim() || '1F';
 
     const demoSlamMap: SlamMap = {
-      name: 'demo_warehouse_slam.pgm',
+      name: `demo_warehouse_${targetFloor}.pgm`,
       image_url: demoDataUrl,
       resolution: 0.05,
       origin: [0.0, -2.0, 0.0],
@@ -130,9 +144,10 @@ export const ImportMapModal: React.FC<ImportMapModalProps> = ({
       real_width_m: 400 * 0.05, // 20.0 meters
       real_height_m: 300 * 0.05, // 15.0 meters
       opacity: 0.85,
+      level_name: targetFloor,
     };
 
-    onMapLoaded(demoSlamMap);
+    onMapLoaded(demoSlamMap, targetFloor);
     onOpenChange(false);
   };
 
@@ -155,6 +170,46 @@ export const ImportMapModal: React.FC<ImportMapModalProps> = ({
             <span>{errorMsg}</span>
           </div>
         )}
+
+        {/* 0. Target Level Picker */}
+        <div className="bg-slate-900/80 border border-slate-700/80 p-3 rounded-lg flex items-center justify-between">
+          <div className="flex items-center space-x-2.5">
+            <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center text-primary">
+              <Layers className="w-4 h-4" />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-200 block">
+                目標載入樓層 (Target Floor)
+              </label>
+              <p className="text-[11px] text-slate-400">
+                此雷達底圖將綁定並顯示於該樓層
+              </p>
+            </div>
+          </div>
+          <div>
+            {levels && levels.length > 0 ? (
+              <select
+                value={selectedLevel}
+                onChange={(e) => setSelectedLevel(e.target.value)}
+                className="bg-slate-950 border border-slate-700 rounded-md px-3 py-1.5 text-xs text-cyan-400 font-semibold focus:outline-none focus:border-primary"
+              >
+                {levels.map((lvl) => (
+                  <option key={lvl.name} value={lvl.name}>
+                    {lvl.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Input
+                type="text"
+                value={selectedLevel}
+                onChange={(e) => setSelectedLevel(e.target.value)}
+                className="h-8 w-24 text-xs bg-slate-950 border-slate-700 font-semibold text-cyan-400"
+                placeholder="1F"
+              />
+            )}
+          </div>
+        </div>
 
         {/* 1. PGM File Picker */}
         <div>

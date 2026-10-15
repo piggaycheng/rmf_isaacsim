@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Waypoint, Lane, Robot, WaypointType, SlamMap, NavGraph, getWaypointGraphIndices, isWaypointInGraph } from '@/types/rmf';
+import { Waypoint, Lane, Robot, WaypointType, SlamMap, NavGraph, getWaypointGraphIndices, isWaypointInGraph, MapLift, LevelTransform, toRobotCoords } from '@/types/rmf';
 
-export type EditorTool = 'select' | 'waypoint' | 'lane' | 'charger' | 'parking' | 'workcell';
+export type EditorTool = 'select' | 'waypoint' | 'lane' | 'charger' | 'parking' | 'workcell' | 'lift';
 
 interface MapCanvasProps {
   mode: 'edit' | 'monitor';
@@ -15,6 +15,8 @@ interface MapCanvasProps {
   focusActiveGraph?: boolean;
   selectedWaypointIds: string[];
   selectedLaneIds: string[];
+  lifts?: MapLift[];
+  levelTransform?: LevelTransform;
   onSelectWaypoint: (id: string | null) => void;
   onSelectMultiple: (wpIds: string[], laneIds: string[]) => void;
   onAddWaypoint: (x: number, y: number, type: WaypointType) => void;
@@ -65,6 +67,13 @@ const PLACEMENT_TOOL_CONFIG: Record<
     bg: 'bg-emerald-500/20',
     dotColor: '#10b981',
   },
+  lift: {
+    label: '電梯站點 (Lift)',
+    color: 'text-indigo-400',
+    border: 'border-indigo-400',
+    bg: 'bg-indigo-500/20',
+    dotColor: '#818cf8',
+  },
 };
 
 export const MapCanvas: React.FC<MapCanvasProps> = ({
@@ -79,6 +88,8 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
   focusActiveGraph = true,
   selectedWaypointIds,
   selectedLaneIds,
+  lifts = [],
+  levelTransform,
   onSelectWaypoint,
   onSelectMultiple,
   onAddWaypoint,
@@ -394,6 +405,9 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
       } else if (wp.type === 'workcell') {
         badge = 'W';
         accentBorderColor = '#34d399';
+      } else if (wp.type === 'lift') {
+        badge = 'L';
+        accentBorderColor = '#818cf8';
       }
 
       ctx.fillStyle = graphColor;
@@ -651,7 +665,7 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         return;
       }
 
-      if (['waypoint', 'charger', 'parking', 'workcell'].includes(tool)) {
+      if (['waypoint', 'charger', 'parking', 'workcell', 'lift'].includes(tool)) {
         const worldCoords = screenToWorld(clientX, clientY);
         const wpType = tool === 'waypoint' ? 'normal' : (tool as WaypointType);
         onAddWaypoint(parseFloat(worldCoords.x.toFixed(2)), parseFloat(worldCoords.y.toFixed(2)), wpType);

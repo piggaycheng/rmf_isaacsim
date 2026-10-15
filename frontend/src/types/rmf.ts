@@ -1,4 +1,4 @@
-export type WaypointType = 'normal' | 'charger' | 'parking' | 'workcell';
+export type WaypointType = 'normal' | 'charger' | 'parking' | 'workcell' | 'lift';
 
 export interface Waypoint {
   id: string;
@@ -12,10 +12,66 @@ export interface Waypoint {
   lift?: string; // waypoint is inside this lift (one per lift and level)
 }
 
+export interface LevelTransform {
+  rotation: number; // in radians
+  scale: number;
+  translation: [number, number]; // [tx, ty] in meters
+}
+
 /** Building floor; transform maps the Open-RMF building frame into this floor's map. */
 export interface MapLevel {
   name: string;
-  transform?: { rotation: number; scale: number; translation: [number, number] };
+  transform?: LevelTransform;
+  elevation?: number;
+  drawing?: string;
+}
+
+export function normalizeTransform(raw?: Partial<LevelTransform>): LevelTransform {
+  return {
+    rotation: typeof raw?.rotation === 'number' && !isNaN(raw.rotation) ? raw.rotation : 0,
+    scale: typeof raw?.scale === 'number' && raw.scale > 0 ? raw.scale : 1.0,
+    translation: Array.isArray(raw?.translation) && raw.translation.length === 2
+      ? [Number(raw.translation[0]) || 0, Number(raw.translation[1]) || 0]
+      : [0, 0],
+  };
+}
+
+/**
+ * Floor Map / Canvas Coordinate -> Actual Building Frame Coordinate (實際座標)
+ * Inverse of: robot = T + R(rot) * scale * building
+ */
+export function toBuildingCoords(
+  transform: LevelTransform | undefined,
+  x: number,
+  y: number
+): { x: number; y: number } {
+  const t = normalizeTransform(transform);
+  const c = Math.cos(t.rotation);
+  const s = Math.sin(t.rotation);
+  const dx = x - t.translation[0];
+  const dy = y - t.translation[1];
+  return {
+    x: (c * dx + s * dy) / t.scale,
+    y: (-s * dx + c * dy) / t.scale,
+  };
+}
+
+/**
+ * Actual Building Frame Coordinate (實際座標) -> Floor Map / Canvas Coordinate
+ * Formula: robot = T + R(rot) * scale * building
+ */
+export function toRobotCoords(
+  transform: LevelTransform | undefined,
+  bldgX: number,
+  bldgY: number
+): { x: number; y: number } {
+  const t = normalizeTransform(transform);
+  const c = Math.cos(t.rotation);
+  const s = Math.sin(t.rotation);
+  return {
+    x: t.translation[0] + t.scale * (c * bldgX - s * bldgY),
+    y: t.translation[1] + t.scale * (s * bldgX + c * bldgY),
+  };
 }
 
 /** Lift cabin (centre in the building frame = first level's map frame). */
@@ -95,7 +151,8 @@ export interface Robot {
   online?: boolean;
   is_off_graph?: boolean;
   off_graph_distance?: number;
-  path?: { x: number; y: number }[];
+  path?: { x: number; y: number; level_name?: string }[];
+  level_name?: string;
 }
 
 export type FleetAdapterType = 'easy_full_control' | 'read_and_request';
@@ -260,6 +317,7 @@ export interface SlamMap {
   real_width_m: number; // in meters
   real_height_m: number; // in meters
   opacity?: number; // 0.0 - 1.0
+  level_name?: string;
 }
 
 export interface PlantSite {

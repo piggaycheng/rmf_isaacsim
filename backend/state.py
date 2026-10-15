@@ -450,7 +450,68 @@ def load_initial_slam_map() -> Dict[str, Any]:
             print(f"Notice: Failed to recover SLAM map from PNG: {e}")
     return {}
 
+def load_all_slam_maps() -> Dict[str, Dict[str, Any]]:
+    maps: Dict[str, Dict[str, Any]] = {}
+    initial = load_initial_slam_map()
+    if initial and isinstance(initial, dict) and initial.get("image_url"):
+        maps["1F"] = dict(initial)
+        maps["1F"]["level_name"] = "1F"
+
+    if os.path.exists(UPLOAD_DIR):
+        for fname in os.listdir(UPLOAD_DIR):
+            if fname.startswith("slam_map_metadata_") and fname.endswith(".json"):
+                lvl_name = fname[len("slam_map_metadata_"):-len(".json")]
+                meta_path = os.path.join(UPLOAD_DIR, fname)
+                png_path = os.path.join(UPLOAD_DIR, f"slam_map_{lvl_name}.png")
+                if os.path.exists(png_path):
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as f:
+                            mdata = json.load(f)
+                            if isinstance(mdata, dict):
+                                mdata["level_name"] = lvl_name
+                                maps[lvl_name] = mdata
+                    except Exception as e:
+                        print(f"Notice: Failed to load {fname}: {e}")
+
+        for fname in os.listdir(UPLOAD_DIR):
+            if fname.startswith("slam_map_") and fname.endswith(".png") and not fname.startswith("slam_map_metadata"):
+                lvl_name = fname[len("slam_map_"):-len(".png")]
+                if lvl_name and lvl_name not in maps and lvl_name != "metadata":
+                    png_path = os.path.join(UPLOAD_DIR, fname)
+                    yaml_path = os.path.join(UPLOAD_DIR, f"slam_map_{lvl_name}.yaml")
+                    try:
+                        img = Image.open(png_path)
+                        w, h = img.size
+                        res = 0.05
+                        orig = [-10.0, -10.0, 0.0]
+                        if os.path.exists(yaml_path):
+                            try:
+                                with open(yaml_path, "r", encoding="utf-8") as yf:
+                                    yd = yaml.safe_load(yf)
+                                    if isinstance(yd, dict):
+                                        res = float(yd.get("resolution", 0.05))
+                                        orig = list(yd.get("origin", [-10.0, -10.0, 0.0]))
+                            except Exception:
+                                pass
+                        recovered = {
+                            "name": fname,
+                            "image_url": f"/api/map/image/{lvl_name}",
+                            "resolution": res,
+                            "origin": orig,
+                            "width": w,
+                            "height": h,
+                            "real_width_m": w * res,
+                            "real_height_m": h * res,
+                            "opacity": 0.85,
+                            "level_name": lvl_name,
+                        }
+                        maps[lvl_name] = recovered
+                    except Exception:
+                        pass
+    return maps
+
 current_slam_map: Dict[str, Any] = load_initial_slam_map()
+slam_maps: Dict[str, Dict[str, Any]] = load_all_slam_maps()
 
 # ==========================================
 # Helpers for Fleet Adapters

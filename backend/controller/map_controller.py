@@ -75,10 +75,21 @@ async def save_map(req: MapSaveRequest):
         # other floors' waypoints, so it must reload the map before saving.
         if req.levels is None and levels and len(levels) > 1:
             raise HTTPException(status_code=409, detail="此地圖為多樓層，請重新整理頁面載入最新路網後再儲存")
+    drawings = {}
+    for lvl in levels or []:
+        lname = lvl.get("name") if isinstance(lvl, dict) else str(lvl)
+        if not lname:
+            continue
+        level_png = f"slam_map_{lname}.png"
+        if os.path.exists(os.path.join(UPLOAD_DIR, level_png)):
+            drawings[lname] = level_png
+        elif os.path.exists(os.path.join(UPLOAD_DIR, "current_slam_map.png")) and (lname in ("1F", "L1") or len(levels or []) == 1):
+            drawings[lname] = "current_slam_map.png"
+
     drawing = "current_slam_map.png" if os.path.exists(os.path.join(UPLOAD_DIR, "current_slam_map.png")) else ""
     try:
         built = nav_graph_builder.build(req.name, req.waypoints, req.lanes, req.graphs,
-                                        levels, lifts, drawing)
+                                        levels, lifts, drawing, drawings=drawings)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     graphs_list, graph_indices = built["graphs"], built["graph_indices"]
@@ -166,9 +177,15 @@ def download_nav_graph(graph_idx: int):
 @router.post("/api/map/upload-slam")
 async def upload_slam_map(
     pgm_file: UploadFile = File(...),
-    yaml_file: Optional[UploadFile] = File(None)
+    yaml_file: Optional[UploadFile] = File(None),
+    level_name: Optional[str] = None,
+    level: Optional[str] = None,
 ):
     try:
+        import re
+        target_level = level_name or level or "1F"
+        target_level = re.sub(r'[^A-Za-z0-9_-]', '_', target_level).strip() or "1F"
+
         resolution = 0.05
         origin = [-10.0, -10.0, 0.0]
         yaml_bytes = None
@@ -183,15 +200,20 @@ async def upload_slam_map(
         image = Image.open(io.BytesIO(pgm_bytes))
         width, height = image.size
 
-        image.save(SLAM_PNG_FILE, "PNG")
+        # Save level-specific files
+        level_png = os.path.join(UPLOAD_DIR, f"slam_map_{target_level}.png")
+        level_yaml = os.path.join(UPLOAD_DIR, f"slam_map_{target_level}.yaml")
+        level_meta = os.path.join(UPLOAD_DIR, f"slam_map_metadata_{target_level}.json")
+
+        image.save(level_png, "PNG")
 
         if yaml_bytes:
-            with open(SLAM_YAML_FILE, "wb") as yf:
+            with open(level_yaml, "wb") as yf:
                 yf.write(yaml_bytes)
 
-        state.current_slam_map = {
-            "name": pgm_file.filename or "slam_map",
-            "image_url": "/api/map/image",
+        map_data = {
+            "name": pgm_file.filename or f"slam_map_{target_level}",
+            "image_url": f"/api/map/image/{target_level}",
             "resolution": resolution,
             "origin": origin,
             "width": width,
@@ -199,43 +221,115 @@ async def upload_slam_map(
             "real_width_m": width * resolution,
             "real_height_m": height * resolution,
             "opacity": 0.85,
+            "level_name": target_level,
         }
 
-        with open(SLAM_METADATA_FILE, "w", encoding="utf-8") as mf:
-            json.dump(state.current_slam_map, mf, indent=2, ensure_ascii=False)
+        with open(level_meta, "w", encoding="utf-8") as mf:
+            json.dump(map_data, mf, indent=2, ensure_ascii=False)
+
+        # For primary/legacy floor ("1F" or "L1"), also write current_slam_map.*
+        if target_level in ("1F", "L1"):
+            image.save(SLAM_PNG_FILE, "PNG")
+            if yaml_bytes:
+                with open(SLAM_YAML_FILE, "wb") as yf:
+                    yf.write(yaml_bytes)
+            with open(SLAM_METADATA_FILE, "w", encoding="utf-8") as mf:
+                json.dump(map_data, mf, indent=2, ensure_ascii=False)
+            state.current_slam_map = dict(map_data)
+
+        if not hasattr(state, "slam_maps"):
+            state.slam_maps = {}
+        state.slam_maps[target_level] = map_data
 
         await broadcast({
             "type": "slam_map",
-            "map": state.current_slam_map,
+            "level_name": target_level,
+            "map": map_data,
+            "maps": state.slam_maps,
         })
 
-        return {"status": "success", "map": state.current_slam_map}
+        return {"status": "success", "map": map_data, "level_name": target_level, "maps": state.slam_maps}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @router.delete("/api/map/slam")
-async def delete_slam_map():
-    state.current_slam_map = {}
-    for path in [SLAM_METADATA_FILE, SLAM_YAML_FILE, SLAM_PNG_FILE]:
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-    await broadcast({
-        "type": "slam_map",
-        "map": None,
-    })
-    return {"status": "success", "message": "SLAM 地圖已完全清除"}
+async def delete_slam_map(level_name: Optional[str] = None, level: Optional[str] = None):
+    req_level = level_name or level
+    if req_level:
+        if hasattr(state, "slam_maps"):
+            state.slam_maps.pop(req_level, None)
+        level_png = os.path.join(UPLOAD_DIR, f"slam_map_{req_level}.png")
+        level_yaml = os.path.join(UPLOAD_DIR, f"slam_map_{req_level}.yaml")
+        level_meta = os.path.join(UPLOAD_DIR, f"slam_map_metadata_{req_level}.json")
+        for path in [level_meta, level_yaml, level_png]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+        if req_level in ("1F", "L1"):
+            state.current_slam_map = {}
+            for path in [SLAM_METADATA_FILE, SLAM_YAML_FILE, SLAM_PNG_FILE]:
+                if os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+        await broadcast({
+            "type": "slam_map",
+            "level_name": req_level,
+            "map": None,
+            "maps": getattr(state, "slam_maps", {}),
+        })
+        return {"status": "success", "message": f"樓層 {req_level} SLAM 地圖已清除"}
+    else:
+        state.current_slam_map = {}
+        if hasattr(state, "slam_maps"):
+            state.slam_maps.clear()
+        if os.path.exists(UPLOAD_DIR):
+            for fname in os.listdir(UPLOAD_DIR):
+                if fname.startswith("slam_map_") or fname.startswith("current_slam_map"):
+                    try:
+                        os.remove(os.path.join(UPLOAD_DIR, fname))
+                    except Exception:
+                        pass
+        await broadcast({
+            "type": "slam_map",
+            "map": None,
+            "maps": {},
+        })
+        return {"status": "success", "message": "所有 SLAM 地圖已完全清除"}
 
 @router.get("/api/map/slam")
-def get_slam_map():
+def get_slam_map(level_name: Optional[str] = None, level: Optional[str] = None):
+    req_level = level_name or level
+    if not hasattr(state, "slam_maps") or not state.slam_maps:
+        state.slam_maps = state.load_all_slam_maps()
     if not state.current_slam_map or not state.current_slam_map.get("image_url"):
         state.current_slam_map = load_initial_slam_map()
-    return state.current_slam_map
+    if req_level:
+        return state.slam_maps.get(req_level, {})
+    return {
+        **state.current_slam_map,
+        "maps": state.slam_maps,
+    }
 
 @router.api_route("/api/map/image", methods=["GET", "HEAD"])
-def get_map_image():
+def get_map_image(level_name: Optional[str] = None, level: Optional[str] = None):
+    req_level = level_name or level
+    if req_level:
+        level_png = os.path.join(UPLOAD_DIR, f"slam_map_{req_level}.png")
+        if os.path.exists(level_png):
+            return FileResponse(level_png, media_type="image/png")
     if os.path.exists(SLAM_PNG_FILE):
         return FileResponse(SLAM_PNG_FILE, media_type="image/png")
     return {"error": "No map image available"}
+
+@router.api_route("/api/map/image/{level_name}", methods=["GET", "HEAD"])
+def get_map_image_for_level(level_name: str):
+    level_png = os.path.join(UPLOAD_DIR, f"slam_map_{level_name}.png")
+    if os.path.exists(level_png):
+        return FileResponse(level_png, media_type="image/png")
+    if os.path.exists(SLAM_PNG_FILE):
+        return FileResponse(SLAM_PNG_FILE, media_type="image/png")
+    return {"error": f"No map image available for level {level_name}"}
