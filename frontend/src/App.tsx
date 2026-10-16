@@ -64,26 +64,6 @@ const DEFAULT_GRAPHS: NavGraph[] = [
   { id: 0, name: 'Graph 0 (預設車隊)', color: '#38bdf8' },
 ];
 
-// Initial Demo Map Data (Office like)
-const INITIAL_WAYPOINTS: Waypoint[] = [
-  { id: 'wp_1', name: 'pantry', x: 2.0, y: 5.0, type: 'workcell' },
-  { id: 'wp_2', name: 'lounge', x: 8.0, y: 5.0, type: 'normal' },
-  { id: 'wp_3', name: 'junction_1', x: 5.0, y: 5.0, type: 'normal' },
-  { id: 'wp_4', name: 'junction_2', x: 5.0, y: 1.0, type: 'normal' },
-  { id: 'wp_5', name: 'coe', x: 10.0, y: 1.0, type: 'normal' },
-  { id: 'wp_6', name: 'charger_1', x: 2.0, y: 1.0, type: 'charger' },
-  { id: 'wp_7', name: 'parking_1', x: 8.0, y: -2.0, type: 'parking' },
-];
-
-const INITIAL_LANES: Lane[] = [
-  { id: 'lane_1', start_id: 'wp_1', end_id: 'wp_3', bidirectional: true },
-  { id: 'lane_2', start_id: 'wp_3', end_id: 'wp_2', bidirectional: true },
-  { id: 'lane_3', start_id: 'wp_3', end_id: 'wp_4', bidirectional: true },
-  { id: 'lane_4', start_id: 'wp_4', end_id: 'wp_6', bidirectional: true },
-  { id: 'lane_5', start_id: 'wp_4', end_id: 'wp_5', bidirectional: true },
-  { id: 'lane_6', start_id: 'wp_5', end_id: 'wp_7', bidirectional: true },
-];
-
 const INITIAL_ROBOTS: Robot[] = [];
 
 export type AppMode = 'world' | 'monitor' | 'edit' | 'adapters';
@@ -155,17 +135,24 @@ export function App() {
   };
 
   // 2. Navigation Graph state (Lazy initialized from localStorage for 0ms restoration)
+  const isLegacySampleGraph = (wps: Waypoint[]) =>
+    wps.length === 7 &&
+    wps[0]?.id === 'wp_1' &&
+    wps[0]?.name === 'pantry' &&
+    wps[1]?.id === 'wp_2' &&
+    wps[1]?.name === 'lounge';
+
   const [waypoints, setWaypoints] = useState<Waypoint[]>(() => {
     try {
       const cached = localStorage.getItem('rmf_active_nav_graph');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (parsed.waypoints && Array.isArray(parsed.waypoints) && parsed.waypoints.length > 0) {
+        if (Array.isArray(parsed.waypoints) && !isLegacySampleGraph(parsed.waypoints)) {
           return parsed.waypoints;
         }
       }
     } catch (e) {}
-    return INITIAL_WAYPOINTS;
+    return [];
   });
 
   const [lanes, setLanes] = useState<Lane[]>(() => {
@@ -173,12 +160,15 @@ export function App() {
       const cached = localStorage.getItem('rmf_active_nav_graph');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (parsed.lanes && Array.isArray(parsed.lanes)) {
+        if (
+          Array.isArray(parsed.lanes) &&
+          !(Array.isArray(parsed.waypoints) && isLegacySampleGraph(parsed.waypoints))
+        ) {
           return parsed.lanes;
         }
       }
     } catch (e) {}
-    return INITIAL_LANES;
+    return [];
   });
 
   // Navigation Graphs state
@@ -373,11 +363,11 @@ export function App() {
 
   // 2. Fetch initial Saved Navigation Graph from backend on startup
   useEffect(() => {
+    const cached = localStorage.getItem('rmf_active_nav_graph');
     fetch('/api/map')
       .then((res) => res.json())
       .then((data) => {
-        if (data && Array.isArray(data.waypoints) && data.waypoints.length > 0) {
-          const cached = localStorage.getItem('rmf_active_nav_graph');
+        if (data && Array.isArray(data.waypoints)) {
           let cacheHasLevels = false;
           try {
             cacheHasLevels = !!cached && Array.isArray(JSON.parse(cached).levels);
@@ -399,6 +389,12 @@ export function App() {
 
   // 3. Auto-Save Effect: Automatically syncs to localStorage (0ms) and backend (debounced 800ms) on any change
   useEffect(() => {
+    // Skip localStorage overwrite & network POST on initial component load
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+
     const payload = {
       name: 'office_map',
       waypoints,
@@ -411,12 +407,6 @@ export function App() {
     try {
       localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
     } catch (e) {}
-
-    // Skip network POST on initial component load
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
 
     // Debounced server auto-save
     const timer = setTimeout(async () => {
@@ -1534,21 +1524,6 @@ export function App() {
                 >
                   <FileUp className="w-3.5 h-3.5 mr-1 text-primary" />
                   {slamMap ? '已載入 SLAM 地圖' : '載入 SLAM 地圖'}
-                </Button>
-
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setWaypoints(INITIAL_WAYPOINTS);
-                    setLanes(INITIAL_LANES);
-                    setRobots(INITIAL_ROBOTS);
-                  }}
-                  className="text-xs h-7 px-2.5 flex-shrink-0"
-                  title="重設為範例路網"
-                >
-                  <RotateCcw className="w-3.5 h-3.5 mr-1" />
-                  範例路網
                 </Button>
 
                 <Button
