@@ -17,7 +17,6 @@ import {
   RotateCw,
   RotateCcw,
   Move,
-  Sparkles,
   Sliders,
   Check,
   Eye,
@@ -209,45 +208,6 @@ export const MapOverlayAlignModal: React.FC<MapOverlayAlignModalProps> = ({
       while (next < -180) next += 360;
       return next;
     });
-  };
-
-  // Auto-snap elevators: aligns elevator waypoints between base and target floor
-  const handleSnapElevators = () => {
-    const baseLifts = waypoints.filter(
-      (w) => (w.level || levels[0]?.name) === baseLevelName && (w.type === 'lift' || w.lift)
-    );
-    const targetLifts = waypoints.filter(
-      (w) => (w.level || levels[0]?.name) === targetLevelName && (w.type === 'lift' || w.lift)
-    );
-
-    if (baseLifts.length === 0 || targetLifts.length === 0) {
-      alert(`請確保在 [${baseLevelName}] 與 [${targetLevelName}] 均有建立電梯站點，即可一鍵對齊。`);
-      return;
-    }
-
-    // Try matching by lift name, or pick first
-    let bWp = baseLifts[0];
-    let tWp = targetLifts[0];
-    for (const b of baseLifts) {
-      const match = targetLifts.find((t) => t.lift && t.lift === b.lift);
-      if (match) {
-        bWp = b;
-        tWp = match;
-        break;
-      }
-    }
-
-    // Formula: robot = T + R(rot) * scale * building
-    // => T_x = robot_x - scale * (c * bldgX - s * bldgY)
-    // => T_y = robot_y - scale * (s * bldgX + c * bldgY)
-    const c = Math.cos(rotRad);
-    const s = Math.sin(rotRad);
-    const sc = scaleTrans > 0 ? scaleTrans : 1.0;
-    const newTx = tWp.x - sc * (c * bWp.x - s * bWp.y);
-    const newTy = tWp.y - sc * (s * bWp.x + c * bWp.y);
-
-    setTx(parseFloat(newTx.toFixed(4)));
-    setTy(parseFloat(newTy.toFixed(4)));
   };
 
   // Save changes
@@ -472,10 +432,23 @@ export const MapOverlayAlignModal: React.FC<MapOverlayAlignModalProps> = ({
   }, [open]);
 
   // Mouse / Wheel Event Handlers
-  const handleWheel = (e: React.WheelEvent) => {
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    if (!canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
     const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
-    setZoom((prev) => Math.min(150, Math.max(5, prev * zoomFactor)));
+    const newZoom = Math.min(150, Math.max(5, zoom * zoomFactor));
+    if (newZoom === zoom) return;
+
+    const scaleRatio = newZoom / zoom;
+    setPan((prevPan) => ({
+      x: mouseX - (mouseX - prevPan.x) * scaleRatio,
+      y: mouseY - (mouseY - prevPan.y) * scaleRatio,
+    }));
+    setZoom(newZoom);
   };
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -483,6 +456,18 @@ export const MapOverlayAlignModal: React.FC<MapOverlayAlignModalProps> = ({
     const rect = canvasRef.current.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
+
+    // Middle mouse button (button === 1): always pan viewport
+    if (e.button === 1) {
+      e.preventDefault();
+      isDraggingRef.current = true;
+      lastMousePosRef.current = { x: mouseX, y: mouseY };
+      dragModeRef.current = 'pan_viewport';
+      return;
+    }
+
+    // Only allow left mouse button (button === 0) for target map manipulation or fallback pan
+    if (e.button !== 0) return;
 
     isDraggingRef.current = true;
     lastMousePosRef.current = { x: mouseX, y: mouseY };
@@ -739,38 +724,15 @@ export const MapOverlayAlignModal: React.FC<MapOverlayAlignModalProps> = ({
 
             {/* Instruction tooltip (Bottom-Right) */}
             <div className="absolute bottom-3 right-3 bg-slate-950/80 backdrop-blur-md border border-slate-800 px-3 py-1.5 rounded-lg text-[11px] text-slate-400 pointer-events-none shadow-lg">
-              💡 <span className="text-cyan-300">拖曳青框</span> 平移 |{' '}
+              💡 <span className="text-cyan-300">左鍵拖曳青框</span> 平移 |{' '}
               <span className="text-cyan-300">頂端圓點</span> 旋轉 |{' '}
-              <span className="text-slate-300">背景拖曳</span> 移動視野 |{' '}
+              <span className="text-slate-300">中鍵/背景拖曳</span> 移動視野 |{' '}
               <span className="text-slate-300">滾輪</span> 縮放
             </div>
           </div>
 
           {/* Right: Precision Adjustment Control Panel */}
           <div className="w-84 w-[340px] border-l border-slate-800 bg-[#0d1322] flex flex-col p-4 space-y-4 overflow-y-auto shrink-0">
-            {/* Quick Elevator Snap Tool */}
-            <div className="p-3 rounded-lg bg-indigo-950/40 border border-indigo-800/60 space-y-2">
-              <div className="flex items-center justify-between text-indigo-300">
-                <span className="font-semibold text-xs flex items-center">
-                  <Sparkles className="w-3.5 h-3.5 mr-1 text-indigo-400" />
-                  特徵一鍵重合
-                </span>
-                <span className="text-[10px] text-indigo-400/80">電梯點基準</span>
-              </div>
-              <p className="text-[11px] text-slate-400 leading-tight">
-                以兩樓層標記的電梯點作為物理重疊錨點，自動計算平移量 $(T_x, T_y)$。
-              </p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleSnapElevators}
-                className="w-full h-7 text-xs bg-indigo-900/40 hover:bg-indigo-900/70 border-indigo-700 text-indigo-200"
-              >
-                <Sparkles className="w-3 h-3 mr-1 text-indigo-400" />
-                一鍵電梯位置對齊
-              </Button>
-            </div>
-
             {/* Step Controls: Tx */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
