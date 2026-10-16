@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform, isPreciseArrival } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { MapOverlayAlignModal } from '@/components/MapOverlayAlignModal';
 import { WorldMap } from '@/components/WorldMap';
@@ -238,18 +238,35 @@ export function App() {
   const [robots, setRobots] = useState<Robot[]>(INITIAL_ROBOTS);
   const [tasks, setTasks] = useState<Task[]>([]);
 
-  // Filter robots visible on current floor
+  // Filter robots visible on current floor. RMF reports poses in the building frame while the
+  // canvas draws each floor in its own map frame, so project them through the level transform.
   const visibleRobots = useMemo(() => {
     if (!currentLevel) return robots;
-    return robots.filter((r) => {
-      const rLevel = r.level_name || DEFAULT_LEVEL;
-      return (
-        rLevel === currentLevel ||
-        (rLevel === 'L1' && currentLevel === '1F') ||
-        (rLevel === '1F' && currentLevel === 'L1')
-      );
-    });
-  }, [robots, currentLevel]);
+    const transformOf = (name?: string) => levels.find((l) => l.name === name)?.transform;
+    const levelTransform = transformOf(currentLevel);
+    const rotation = normalizeTransform(levelTransform).rotation;
+    return robots
+      .filter((r) => {
+        const rLevel = r.level_name || DEFAULT_LEVEL;
+        return (
+          rLevel === currentLevel ||
+          (rLevel === 'L1' && currentLevel === '1F') ||
+          (rLevel === '1F' && currentLevel === 'L1')
+        );
+      })
+      .map((r) => {
+        const pos = toRobotCoords(levelTransform, r.x, r.y);
+        return {
+          ...r,
+          x: pos.x,
+          y: pos.y,
+          yaw: r.yaw + rotation,
+          path: r.path
+            ?.filter((pt) => !pt.level_name || pt.level_name === r.level_name || pt.level_name === currentLevel)
+            .map((pt) => ({ ...pt, ...toRobotCoords(transformOf(pt.level_name) ?? levelTransform, pt.x, pt.y) })),
+        };
+      });
+  }, [robots, currentLevel, levels]);
 
   const [selectedWaypointIds, setSelectedWaypointIds] = useState<string[]>([]);
   const [selectedLaneIds, setSelectedLaneIds] = useState<string[]>([]);
@@ -2347,6 +2364,30 @@ export function App() {
                       <option value="lift">🛗 電梯點位 (Lift)</option>
                     </select>
                   </div>
+
+                  <label
+                    className="flex items-start gap-2 text-[11px] text-slate-300"
+                    title="勾選後須等車端導航回報完成才算到點；未勾選的一般點位在距離 0.25 m、角度 0.2 rad 內即完成，車子直接往下一點"
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={isPreciseArrival(selectedWaypoint)}
+                      disabled={['lift', 'charger', 'workcell'].includes(selectedWaypoint.type)}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setWaypoints((prev) =>
+                          prev.map((w) => (w.id === selectedWaypoint.id ? { ...w, precise_arrival: checked } : w))
+                        );
+                      }}
+                    />
+                    <span>
+                      精準到點（等車端導航回報完成）
+                      <span className="block text-[10px] text-slate-500">
+                        電梯、充電樁、取放站固定開啟；一般點位在 0.25 m / 0.2 rad 內即完成
+                      </span>
+                    </span>
+                  </label>
 
                   {/* Lift Dedicated Inspector Section */}
                   {selectedWaypoint.type === 'lift' && (

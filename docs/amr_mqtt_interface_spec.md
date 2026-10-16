@@ -195,6 +195,14 @@
 > **選填補充欄位**（單樓層場域可完全省略）：
 > - `level_name` (String): 多樓層場域時標記所在樓層（例：`"1F"`、`"B1"`；省略時使用路網第一個樓層，預設 `"1F"`）。多樓層車輛**必須**回報，FA 依此判斷所在樓層與路網距離。
 
+心跳只對**一般點位**的 `navigate` 判定到點：心跳的 `current_cmd_id` 與樓層相符（未帶 `current_cmd_id` 時不檢查），
+且與目標距離 < 0.25 m、朝向差 < 0.2 rad 時，FA 直接通知 RMF 完成，不要求車端停車；車端仍保有原 Nav2 目標，
+由 RMF 的下一個 `navigate` 取代，之後該 `cmd_id` 的 `command_result` 會被忽略。
+**精準點位**一律等待車端對應的 `command_result`，心跳不判定完成：
+- 電梯車廂點位（之後接 `prepare_floor_change`，避免未到點就關閉定位）。
+- `dock` 指令、多步任務 (`task`) 與其他動作。
+- 路網頂點 `precise_arrival: true`（編輯器勾選「精準到點」；充電樁、物料取放站固定開啟）。
+
 ---
 
 ### 4.4 RMF 下發指令 (`command`)
@@ -250,21 +258,23 @@
 - 下發時機：RMF 交通管制/任務取消（`reason` 為 RMF hold），或操作員緊急停車（`reason: "Emergency stop by operator"`）。車端處理方式相同：立即中止目前導航並回報 `command_result`。
 - 緊急停車期間 Fleet Adapter 不會再下發任何指令；解除後若原任務仍有效，會以新的 `cmd_id` 重新下發被中斷的 `navigate`/`dock`/`action`。
 
-#### 4. 電梯內暫停導航 (Suspend Navigation)
+#### 4. 電梯內準備切換樓層／暫停導航 (Prepare Floor Change)
 ```json
 {
   "robot_id": "tinyRobot1",
   "cmd_id": 104,
-  "action": "suspend_navigation",
+  "action": "prepare_floor_change",
   "lift_name": "lift_1",
   "floor_name": "1F",
   "pose": {"x": -16.214, "y": -4.395, "yaw": 0.0},
   "timestamp": 1728312018.000
 }
 ```
-- 下發時機：多樓層任務中，車輛完成進入電梯車廂點位的 `navigate` 後，由 FA **在通知 RMF 關門前**自動下發。
-- 車端處理：暫停／凍結導航與定位更新（避免電梯升降過程造成 IMU 或里程計漂移）→ 回報 `command_result`（`status: "completed"`）。
-- 安全互鎖：FA 必須收到此 `command_result (completed)` 後，才會通知 Open-RMF 完成進電梯動作並觸發電梯關門與升降；同時在 `suspend_navigation` 完成至 `change_floor` 完成期間，FA 會鎖定該車於電梯車廂座標，忽略心跳座標漂移。
+- 下發時機：多樓層任務中，車輛完成進入電梯車廂點位的 `navigate` 並回報 `command_result (completed)` 後，由 FA **在通知 RMF 關門前**自動下發。
+- 車端必要欄位只有 `robot_id`、`cmd_id`、`action`；`lift_name`、`floor_name`、`pose` 為 FA 的來源樓層／車廂資訊，不要求車端依此換圖。此指令不重設 LIO／IMU／Local EKF。
+- 車端回報的 `final_location`（凍結定位當下的實際位姿）會被 FA 記錄為進梯位姿，供第 5 項 `change_floor` 的 `initial_pose` 使用；建議車端回報此欄位，未回報時 FA 改用進梯 `navigate` 結果的位姿。
+- 車端處理：暫停／凍結導航與定位更新（如 hold `cmd_vel_safety`、`global_pose_adapter`、`global_tf_gate`、`global_localization` 與 pause Nav2 lifecycle，避免電梯升降過程造成 IMU 或里程計漂移）→ 回報 `command_result`（`status: "completed"`）。
+- 安全互鎖：FA 必須收到此 `command_result (completed)` 後，才會通知 Open-RMF 完成進電梯動作並觸發電梯關門與升降；同時在 `prepare_floor_change` 完成至 `change_floor` 完成期間，FA 會鎖定該車於電梯車廂座標，忽略心跳座標漂移。
 
 #### 5. 切換樓層地圖並恢復導航 (Change Floor)
 ```json
@@ -273,12 +283,14 @@
   "cmd_id": 105,
   "action": "change_floor",
   "floor_name": "B1",
-  "initial_pose": {"x": 1.468, "y": -2.289, "yaw": 0.0},
+  "initial_pose": {"x": 1.468, "y": -2.289, "yaw": 2.150},
   "timestamp": 1728312020.000
 }
 ```
 - 下發時機：多樓層任務中，電梯抵達目的樓層且門已開啟後（RMF `localize`），由 FA 自動下發；上位系統不需另外呼叫。
-- `initial_pose` 為**目的樓層地圖座標**（FA 已依路網 `levels[].transform` 從 RMF 建築座標轉換），即電梯車廂內的位置。
+- `initial_pose` 為**目的樓層地圖座標**：FA 取 `prepare_floor_change` 完成時記錄的進梯位姿，先以出發樓層 `levels[].transform` 轉回 RMF 建築座標，再以目的樓層 transform 轉換（yaw 加上兩層 rotation 差），保留車輛在車廂內的實際位置與朝向。
+  - 換算位置距 RMF 車廂點超過 1.5 m 時，視為 transform 或記錄異常，改用 RMF 車廂點位置、保留換算後的 yaw。
+  - 沒有記錄進梯位姿時，使用 RMF 換算的車廂點位姿。
 - 車端處理：載入該樓層地圖 → 以 `initial_pose` 重新定位並重新啟用導航 → 導航 Ready 後回報 `command_result`（`status: "completed"`，`final_location.level_name` 為新樓層）。之後心跳的 `level_name` 必須改為新樓層，接著 RMF 才會下發走出電梯的下一個點位。
 - 失敗（樓層不存在、車輛移動中等）回報 `status: "failed"`，RMF 任務會因此卡在電梯內，需人工處理。
 
@@ -289,6 +301,7 @@
 - **方向**：車載端 $\rightarrow$ Fleet Adapter
 - **QoS**：`1`
 - **說明**：車端接收到 `command` 並完成該階段動作（或發生被障礙物阻擋等錯誤）時發送。
+- 必須包含對應的 `cmd_id` 與明確的 `status`；省略 `status` 不視為成功，過期指令的結果不會完成目前階段。
 
 ```json
 {

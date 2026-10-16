@@ -81,6 +81,18 @@ class BuildTest(unittest.TestCase):
         self.assertTrue(g1["levels"]["B1"]["vertices"][0][2]["is_charger"])
         self.assertEqual(list(built["building"]["levels"]), ["1F", "B1"])
         self.assertEqual(built["building"]["levels"]["B1"]["transform"]["translation"], [10.0, 0.0])
+        # Lift cabins and chargers are precise.
+        self.assertEqual([v[2]["precise_arrival"] for v in f1], [True, True])
+        self.assertEqual([v[2]["precise_arrival"] for v in b1], [True, False])
+
+    def test_precise_arrival_flag(self):
+        waypoints = [wp("a", 0, 0), wp("b", 1, 0), wp("c", 2, 0, kind="workcell")]
+        waypoints[1]["precise_arrival"] = True
+        built = builder.build("office", waypoints, [lane("a", "b"), lane("b", "c")])
+        vertices = built["nav_graphs"][0]["levels"]["1F"]["vertices"]
+        # "a" is promoted to the graph's charger but stays an ordinary (non-precise) waypoint.
+        self.assertTrue(vertices[0][2]["is_charger"])
+        self.assertEqual([v[2]["precise_arrival"] for v in vertices], [False, True, True])
 
     def test_rejections(self):
         cases = {

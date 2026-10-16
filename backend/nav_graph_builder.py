@@ -121,6 +121,10 @@ def _waypoint_options(waypoint: Dict[str, Any], name: str) -> Dict[str, Any]:
         "is_holding_point": kind == "parking",
         "is_workcell": kind == "workcell",
         "is_lift_cabin": kind in ("lift", "elevator"),
+        # The fleet adapter waits for the robot's own arrival result here instead of finishing on
+        # heartbeat proximity; lift cabins, chargers and workcells always need it.
+        "precise_arrival": bool(waypoint.get("precise_arrival"))
+        or kind in ("charger", "workcell", "lift", "elevator"),
         "name": name,
     }
 
@@ -185,6 +189,7 @@ def build(name: str, waypoints: List[Dict[str, Any]], lanes: List[Dict[str, Any]
                     f"{LIFT_SNAP_TOLERANCE_M} m），請檢查站點位置或樓層 transform")
             x, y = lift["x"], lift["y"]
             options["lift"] = lift_name
+            options["precise_arrival"] = True
         if waypoint.get("id") is not None:
             slots[waypoint.get("id")] = (level, len(vertices[level]))
         vertices[level].append([x, y, options])

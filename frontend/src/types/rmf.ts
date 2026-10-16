@@ -10,6 +10,13 @@ export interface Waypoint {
   graph_idx?: number; // default: 0
   level?: string; // floor name (e.g. 1F, B1); coordinates are in that floor's map. Default: first level
   lift?: string; // waypoint is inside this lift (one per lift and level)
+  // Fleet adapter waits for the robot's own arrival result instead of finishing within 0.25 m / 0.2 rad
+  // (always on for lift, charger and workcell waypoints).
+  precise_arrival?: boolean;
+}
+
+export function isPreciseArrival(wp: Pick<Waypoint, 'type' | 'precise_arrival'>): boolean {
+  return !!wp.precise_arrival || wp.type === 'lift' || wp.type === 'charger' || wp.type === 'workcell';
 }
 
 export interface LevelTransform {

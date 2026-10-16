@@ -149,7 +149,7 @@ class MockRobot:
             self.status = "moving"
             print(f"[AMR] 🚗 Starting movement towards: ({self.target_x:.2f}, {self.target_y:.2f})")
 
-        elif action == "suspend_navigation":
+        elif action in ("prepare_floor_change", "suspend_navigation"):
             lift_name = cmd.get("lift_name", "lift")
             pose = cmd.get("pose") or {}
             ok = self.status != "moving"
@@ -157,12 +157,12 @@ class MockRobot:
                 self.nav_suspended = True
                 if all(k in pose for k in ("x", "y", "yaw")):
                     self.x, self.y, self.yaw = float(pose["x"]), float(pose["y"]), float(pose["yaw"])
-                print(f"[AMR] 🛗🔒 Suspended navigation inside lift '{lift_name}' on floor '{self.level}'")
+                print(f"[AMR] 🛗🔒 Prepared floor change (suspended navigation) inside lift '{lift_name}' on floor '{self.level}'")
             self.client.publish(self.topic_cmd_result, json.dumps({
                 "robot_id": self.robot_id,
                 "cmd_id": cmd_id,
                 "status": "completed" if ok else "failed",
-                "message": f"Navigation suspended in {lift_name}" if ok else "Cannot suspend navigation while moving",
+                "message": f"Prepared floor change in {lift_name}" if ok else "Cannot prepare floor change while moving",
                 "final_location": {"x": self.x, "y": self.y, "yaw": self.yaw, "level_name": self.level},
                 "timestamp": time.time(),
             }), qos=1)

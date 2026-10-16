@@ -66,9 +66,11 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "rmf/tinyRobot/robot/mock_amr_01/command" 
 ## 🏢 多樓層 / 電梯
 
 - 路網 (`active_nav_graph.json`) 可含 `levels`（樓層名稱與 `transform`：RMF 建築座標 → 該樓層地圖座標）與 `lifts`；站點以 `level` 標記樓層，以 `lift` 標記電梯車廂點。
-- FA 依 `levels[].transform` 產生 fleet `transforms`，並在 RMF 乘電梯抵達目的樓層後，透過 MQTT `change_floor` 指令（見規格書 4.4）要求車端載入新樓層地圖並重新定位。
+- FA 依 `levels[].transform` 產生 fleet `transforms`。進入車廂的 `navigate` 必須收到車端對應的 `command_result (completed)`，才發送 `prepare_floor_change`；準備完成回報後才通知 RMF 完成進梯，允許電梯關門與升降。
+- 抵達目的樓層開門後，RMF `localize` 觸發 MQTT `change_floor`（見規格書 4.4）；`initial_pose` 為 `prepare_floor_change` 結果 `final_location` 記錄的進梯位姿，經兩層 `levels[].transform` 換算到目的樓層（含 yaw），等待車端換圖與定位完成，再繼續目標樓層的導航。心跳座標不作為電梯點位的到點判定。
+- 一般點位的 `navigate` 在心跳距目標 < 0.25 m、朝向差 < 0.2 rad 時即完成，讓車子不必在每個中途點停下對準朝向；電梯車廂、`dock`、充電樁、物料取放站及路網 `precise_arrival: true` 的精準點位則必須等車端 `command_result`。
 - 電梯本身由 `workspace/mqtt_lift_adapter` 透過 MQTT 控制（見該目錄 README）。
-- `mock_robot.py --level 1F` 支援 `change_floor`，可搭配 `mock_lift.py` 做無模擬器的端對端測試。
+- `mock_robot.py --level 1F` 支援 `prepare_floor_change`／`change_floor`，可搭配 `mock_lift.py` 做無模擬器的端對端測試。
 
 ## 📑 車端通訊規格書
 

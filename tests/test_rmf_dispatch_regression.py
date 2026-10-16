@@ -156,7 +156,7 @@ class TestRMFDispatchRegression(unittest.TestCase):
         adapter.mqtt_client.publish.assert_not_called()
 
     # --------------------------------------------------------------------------
-    # Issue 3: In-Place Navigation Strict Completion Checks
+    # Issue 3: Even In-Place Navigation Requires a Robot Result
     # --------------------------------------------------------------------------
     def test_issue3_inplace_navigation_strict_conditions(self):
         adapter = self._create_mock_adapter(["fleet1"])
@@ -165,6 +165,7 @@ class TestRMFDispatchRegression(unittest.TestCase):
             "initial_location": {"x": 2.0, "y": 3.0, "yaw": 0.0, "level_name": "L1"}
         })
         robot = adapter.robots[("fleet1", "carter1")]
+        robot.is_off_graph = False
 
         # Case A: Robot is moving -> must NOT complete in place
         robot.status = "moving"
@@ -173,6 +174,8 @@ class TestRMFDispatchRegression(unittest.TestCase):
         dest_same.map = "L1"
         dest_same.dock = None
         dest_same.speed_limit = None
+        dest_same.inside_lift = None
+        dest_same.name = ""
         adapter._on_rmf_navigate("fleet1", "carter1", dest_same, MagicMock())
         # Command published down because robot was moving
         adapter.mqtt_client.publish.assert_called()
@@ -189,8 +192,23 @@ class TestRMFDispatchRegression(unittest.TestCase):
         adapter.mqtt_client.publish.assert_called()
         self.assertEqual(adapter.mqtt_client.publish.call_args[0][1].count('"action": "dock"'), 1)
 
+        # Case C: Idle at the exact target still dispatches navigation, with no finish timer.
+        adapter.mqtt_client.publish.reset_mock()
+        dest_same.position = [2.0, 3.0, 0.0]
+        execution = MagicMock()
+        with patch.object(mfa.threading, "Timer") as timer:
+            adapter._on_rmf_navigate("fleet1", "carter1", dest_same, execution)
+        timer.assert_not_called()
+        adapter.mqtt_client.publish.assert_called_once()
+        self.assertEqual(
+            json.loads(adapter.mqtt_client.publish.call_args[0][1])["action"], "navigate")
+        execution.finished.assert_not_called()
+        adapter._handle_command_result(
+            "carter1", "fleet1", {"cmd_id": robot.cmd_id, "status": "completed"})
+        execution.finished.assert_called_once()
+
     # --------------------------------------------------------------------------
-    # Issue 4: Heartbeat Completion Guards & Command ID Correlation
+    # Issue 4: Heartbeat Never Completes a Precise Navigation (Explicit command_result Required)
     # --------------------------------------------------------------------------
     def test_issue4_heartbeat_completion_guards(self):
         adapter = self._create_mock_adapter(["fleet1"])
@@ -222,14 +240,97 @@ class TestRMFDispatchRegression(unittest.TestCase):
         })
         mock_exec.finished.assert_not_called()
 
-        # 3. Idle, matching cmd_id 42, at target -> completes!
+        # 3. Idle, matching cmd_id 42, at target -> heartbeat STILL must NOT finish (only command_result completes navigation)
         adapter._handle_heartbeat("carter1", "fleet1", {
             "robot_id": "carter1",
             "x": 5.02, "y": 4.98, "yaw": 0.05,
             "status": "idle",
             "current_cmd_id": 42
         })
+        mock_exec.finished.assert_not_called()
+
+        # 4. Explicit command_result completes the execution
+        adapter._handle_command_result("carter1", "fleet1", {
+            "robot_id": "carter1",
+            "cmd_id": 42,
+            "status": "completed",
+        })
         mock_exec.finished.assert_called_once()
+
+    # --------------------------------------------------------------------------
+    # Issue 4b: Ordinary waypoints finish on heartbeat proximity; precise ones wait for command_result
+    # --------------------------------------------------------------------------
+    def _navigate_to(self, adapter, name, position, dock=None):
+        dest = MagicMock()
+        dest.position = position
+        dest.map = "L1"
+        dest.dock = dock
+        dest.speed_limit = None
+        dest.inside_lift = None
+        dest.name = name
+        execution = MagicMock()
+        adapter._on_rmf_navigate("fleet1", "carter1", dest, execution)
+        return execution
+
+    def _heartbeat(self, adapter, robot, x, y, yaw, status="moving"):
+        adapter._handle_heartbeat("carter1", "fleet1", {
+            "robot_id": "carter1", "x": x, "y": y, "yaw": yaw, "level_name": "L1",
+            "status": status, "current_cmd_id": robot.cmd_id,
+        })
+
+    def _arrival_adapter(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter._handle_register("carter1", "fleet1", {
+            "robot_id": "carter1",
+            "initial_location": {"x": 0.0, "y": 0.0, "yaw": 0.0, "level_name": "L1"}
+        })
+        adapter.fleet_waypoint_info["fleet1"] = {"levels": {"L1": {
+            "transform": {}, "waypoints": {}, "lift_waypoints": {},
+            "precise_waypoints": {"station"}, "vertex_coords": [], "lane_segments": [],
+        }}}
+        adapter._compute_distance_to_graph = MagicMock(return_value=0.0)
+        robot = adapter.robots[("fleet1", "carter1")]
+        robot.is_off_graph = False
+        return adapter, robot
+
+    def test_issue4b_ordinary_waypoint_completes_on_heartbeat(self):
+        adapter, robot = self._arrival_adapter()
+        execution = self._navigate_to(adapter, "wp_mid", [5.0, 0.0, 1.0])
+        self.assertFalse(robot.precise_arrival)
+
+        self._heartbeat(adapter, robot, 4.6, 0.0, 1.0)   # too far
+        self._heartbeat(adapter, robot, 4.9, 0.0, 0.5)   # heading off by 0.5 rad
+        execution.finished.assert_not_called()
+
+        # Within 0.25 m / 0.2 rad: finishes even while the robot is still moving.
+        self._heartbeat(adapter, robot, 4.85, 0.05, 0.85)
+        execution.finished.assert_called_once()
+        self.assertIsNone(robot.current_execution)
+
+        # The robot's late result for the same goal is ignored.
+        adapter._handle_command_result("carter1", "fleet1", {"cmd_id": robot.cmd_id, "status": "completed"})
+        execution.finished.assert_called_once()
+
+    def test_issue4b_stale_cmd_id_does_not_complete(self):
+        adapter, robot = self._arrival_adapter()
+        execution = self._navigate_to(adapter, "wp_mid", [5.0, 0.0, 0.0])
+        adapter._handle_heartbeat("carter1", "fleet1", {
+            "robot_id": "carter1", "x": 5.0, "y": 0.0, "yaw": 0.0, "level_name": "L1",
+            "status": "idle", "current_cmd_id": robot.cmd_id - 1,
+        })
+        execution.finished.assert_not_called()
+
+    def test_issue4b_precise_waypoints_need_command_result(self):
+        adapter, robot = self._arrival_adapter()
+        for name, dock in (("station", None), ("wp_mid", "dock_1")):
+            with self.subTest(name=name, dock=dock):
+                execution = self._navigate_to(adapter, name, [5.0, 0.0, 0.0], dock)
+                self.assertTrue(robot.precise_arrival)
+                self._heartbeat(adapter, robot, 5.0, 0.0, 0.0, status="idle")
+                execution.finished.assert_not_called()
+                adapter._handle_command_result(
+                    "carter1", "fleet1", {"cmd_id": robot.cmd_id, "status": "completed"})
+                execution.finished.assert_called_once()
 
     # --------------------------------------------------------------------------
     # Issue 5: Activity Identifier Check on STOP & State Clearing
@@ -896,5 +997,3 @@ class TestRMFDispatchRegression(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
