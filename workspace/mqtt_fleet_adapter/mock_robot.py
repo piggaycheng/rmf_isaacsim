@@ -46,6 +46,7 @@ class MockRobot:
         self.target_y = None
         self.target_yaw = None
         self.target_speed = 1.0
+        self.nav_suspended = False
 
         # Topic paths
         self.base_topic = f"rmf/{self.fleet_name}/robot/{self.robot_id}"
@@ -139,6 +140,7 @@ class MockRobot:
 
         if action in ["navigate", "dock"]:
             target = cmd.get("target", {})
+            self.nav_suspended = False
             self.target_x = float(target.get("x", self.x))
             self.target_y = float(target.get("y", self.y))
             self.target_yaw = float(target.get("yaw", self.yaw))
@@ -147,15 +149,34 @@ class MockRobot:
             self.status = "moving"
             print(f"[AMR] 🚗 Starting movement towards: ({self.target_x:.2f}, {self.target_y:.2f})")
 
+        elif action == "suspend_navigation":
+            lift_name = cmd.get("lift_name", "lift")
+            pose = cmd.get("pose") or {}
+            ok = self.status != "moving"
+            if ok:
+                self.nav_suspended = True
+                if all(k in pose for k in ("x", "y", "yaw")):
+                    self.x, self.y, self.yaw = float(pose["x"]), float(pose["y"]), float(pose["yaw"])
+                print(f"[AMR] 🛗🔒 Suspended navigation inside lift '{lift_name}' on floor '{self.level}'")
+            self.client.publish(self.topic_cmd_result, json.dumps({
+                "robot_id": self.robot_id,
+                "cmd_id": cmd_id,
+                "status": "completed" if ok else "failed",
+                "message": f"Navigation suspended in {lift_name}" if ok else "Cannot suspend navigation while moving",
+                "final_location": {"x": self.x, "y": self.y, "yaw": self.yaw, "level_name": self.level},
+                "timestamp": time.time(),
+            }), qos=1)
+
         elif action == "change_floor":
-            # Robot-side extension: reload the floor map and relocalize (simulated as instant).
+            # Robot-side extension: reload the floor map, relocalize, and re-enable navigation (simulated as instant).
             pose = cmd.get("initial_pose") or {}
             floor = cmd.get("floor_name")
             ok = bool(floor) and all(k in pose for k in ("x", "y", "yaw")) and self.status != "moving"
             if ok:
                 self.level = floor
                 self.x, self.y, self.yaw = float(pose["x"]), float(pose["y"]), float(pose["yaw"])
-                print(f"[AMR] 🛗 Switched to floor '{floor}' at ({self.x:.2f}, {self.y:.2f}, {self.yaw:.2f})")
+                self.nav_suspended = False
+                print(f"[AMR] 🛗🔓 Switched to floor '{floor}' at ({self.x:.2f}, {self.y:.2f}, {self.yaw:.2f}) and resumed navigation")
             self.client.publish(self.topic_cmd_result, json.dumps({
                 "robot_id": self.robot_id,
                 "cmd_id": cmd_id,

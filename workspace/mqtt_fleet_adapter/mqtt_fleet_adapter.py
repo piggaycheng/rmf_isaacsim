@@ -83,6 +83,21 @@ def robot_to_rmf(transform: Optional[Dict[str, Any]], x: float, y: float) -> Tup
     return (c * dx + s * dy) / k, (-s * dx + c * dy) / k
 
 
+def suspend_navigation_payload(
+    robot_id: str, cmd_id: int, lift_name: str, floor_name: str, position: Any
+) -> Dict[str, Any]:
+    """Robot-side MQTT extension: suspend navigation/localization inside a lift cabin before the lift moves."""
+    return {
+        "robot_id": robot_id,
+        "cmd_id": cmd_id,
+        "action": "suspend_navigation",
+        "lift_name": lift_name,
+        "floor_name": floor_name,
+        "pose": {"x": float(position[0]), "y": float(position[1]), "yaw": float(position[2])},
+        "timestamp": time.time(),
+    }
+
+
 def change_floor_payload(robot_id: str, cmd_id: int, floor_name: str, position: Any) -> Dict[str, Any]:
     """Robot-side MQTT extension: reload the target floor map and relocalize at a planar pose (robot map frame)."""
     return {
@@ -141,6 +156,10 @@ class ManagedRobot:
         # RMF command received while offline; held (not sent) until the robot is back online.
         self.deferred_cmd_payload: Optional[Dict[str, Any]] = None
         self.last_dispatch_time: float = 0.0
+        # Lift state: when navigating into a lift cabin, pending_suspend_lift holds the lift name so FA
+        # dispatches suspend_navigation before finishing the RMF boarding execution.
+        self.pending_suspend_lift: Optional[str] = None
+        self.nav_suspended: bool = False
         # Multi-Step Task Tracking (per multi_step_task.md specification)
         self.active_task: Optional[Dict[str, Any]] = None
         # cmd_id -> backend task info, kept until the robot reports a terminal state so that a
@@ -482,6 +501,8 @@ class MqttFleetAdapter:
                         "vertex_coords": v_positions,
                         "lane_segments": [],
                         "waypoints": {},
+                        "lift_waypoints": {},
+                        "lift_cabins": [],
                     }
                     for v in raw_vertices:
                         vx, vy = float(v[0]), float(v[1])
@@ -490,20 +511,28 @@ class MqttFleetAdapter:
                         wp_name = None
                         is_chg = False
                         is_park = False
+                        meta = {}
                         if len(v) >= 3 and isinstance(v[2], dict):
-                            wp_name = v[2].get("name")
-                            is_chg = v[2].get("is_charger", False)
-                            is_park = v[2].get("is_parking_spot", False)
+                            meta = v[2]
+                            wp_name = meta.get("name")
+                            is_chg = meta.get("is_charger", False)
+                            is_park = meta.get("is_parking_spot", False)
                         elif len(v) >= 4 and isinstance(v[3], str):
                             wp_name = v[3]
                             meta = v[4] if len(v) >= 5 and isinstance(v[4], dict) else {}
                             is_chg = meta.get("is_charger", False)
                             is_park = meta.get("is_parking_spot", False)
 
+                        lift_name = meta.get("lift") or ("lift_1" if meta.get("is_lift_cabin") else None)
+                        if lift_name:
+                            lvl_info["lift_cabins"].append((str(lift_name), vx, vy))
+
                         if wp_name:
                             all_wps.append(wp_name)
                             wp_coords[wp_name] = (vx, vy)
                             lvl_info["waypoints"][wp_name] = (vx, vy)
+                            if lift_name:
+                                lvl_info["lift_waypoints"][wp_name] = str(lift_name)
                             if is_chg:
                                 charger_wps.append(wp_name)
                             if is_park:
@@ -1379,9 +1408,17 @@ class MqttFleetAdapter:
         status_val = payload.get("status", "idle")
 
         robot_entry = self.robots.get((fleet_name, robot_id))
-        hb_level = payload.get("level_name") or (robot_entry.map_name if robot_entry else self._default_level(fleet_name))
-        dist_to_graph = self._compute_distance_to_graph(fleet_name, x_val, y_val, hb_level)
-        is_off_graph = dist_to_graph > OFF_GRAPH_THRESHOLD_M
+        if robot_entry and getattr(robot_entry, "nav_suspended", False):
+            x_val = float(robot_entry.position[0])
+            y_val = float(robot_entry.position[1])
+            yaw_val = float(robot_entry.position[2])
+            hb_level = robot_entry.map_name
+            dist_to_graph = 0.0
+            is_off_graph = False
+        else:
+            hb_level = payload.get("level_name") or (robot_entry.map_name if robot_entry else self._default_level(fleet_name))
+            dist_to_graph = self._compute_distance_to_graph(fleet_name, x_val, y_val, hb_level)
+            is_off_graph = dist_to_graph > OFF_GRAPH_THRESHOLD_M
 
         with self.lock:
             if robot_key in self.discovered_robots:
@@ -1423,12 +1460,18 @@ class MqttFleetAdapter:
                 self._send_register_ack(robot_id, success=False, msg="Robot not registered in RMF, please register", status="require_register", fleet_name=fleet_name)
                 return
 
-            # Update telemetry
-            x = float(payload.get("x", robot.position[0]))
-            y = float(payload.get("y", robot.position[1]))
-            yaw = float(payload.get("yaw", robot.position[2]))
+            # Update telemetry (preserve frozen pose/map while navigation is suspended inside a lift)
+            if getattr(robot, "nav_suspended", False):
+                x = float(robot.position[0])
+                y = float(robot.position[1])
+                yaw = float(robot.position[2])
+                level_name = robot.map_name
+            else:
+                x = float(payload.get("x", robot.position[0]))
+                y = float(payload.get("y", robot.position[1]))
+                yaw = float(payload.get("yaw", robot.position[2]))
+                level_name = payload.get("level_name", robot.map_name)
             battery = float(payload.get("battery", robot.battery_soc * 100.0))
-            level_name = payload.get("level_name", robot.map_name)
             status = payload.get("status", "idle")
 
             was_offline = not robot.is_online
@@ -1450,8 +1493,8 @@ class MqttFleetAdapter:
             reported_cmd_id = payload.get("current_cmd_id")
             self._resend_if_lost(robot, reported_cmd_id)
             if robot.current_execution and robot.target_position is not None and not robot.is_holding:
-                # 1. Heartbeat must NEVER complete docking, actions, or multi-step tasks (these require explicit command_result/task_state)
-                is_docking_or_action = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") in ["dock", "action", "task", "gimbal_move", "gimbal_rotate"]) or (robot.active_task is not None)
+                # 1. Heartbeat must NEVER complete docking, actions, lift steps, or multi-step tasks (these require explicit command_result/task_state)
+                is_docking_or_action = bool(robot.last_cmd_payload and robot.last_cmd_payload.get("action") in ["dock", "action", "task", "gimbal_move", "gimbal_rotate", "suspend_navigation", "change_floor"]) or (robot.active_task is not None)
 
                 # 2. Check floor / level matches target
                 target_level = robot.last_cmd_payload.get("target", {}).get("level_name") if robot.last_cmd_payload else robot.map_name
@@ -1485,15 +1528,21 @@ class MqttFleetAdapter:
                     and dist < 0.25
                     and yaw_matches
                 ):
-                    print(f"[NAV] Robot '{robot_id}' completed cmd_id {robot.cmd_id} via heartbeat (dist: {dist:.3f}m, yaw_diff: {yaw_diff:.3f}rad, status: {status}). Finishing execution.")
-                    try:
-                        robot.current_execution.finished()
-                    except Exception as e:
-                        print(f"[NAV NOTICE] Execution finish exception: {e}")
-                    robot.current_execution = None
-                    robot.target_position = None
-                    robot.last_cmd_payload = None
-                    robot.nav_retries = 0
+                    if robot.pending_suspend_lift:
+                        print(f"[NAV] Robot '{robot_id}' reached lift '{robot.pending_suspend_lift}' via heartbeat. Dispatching SUSPEND_NAVIGATION before finishing boarding.")
+                        self._dispatch_suspend_navigation_locked(
+                            robot, robot.pending_suspend_lift, robot.current_execution, pose=robot.target_position
+                        )
+                    else:
+                        print(f"[NAV] Robot '{robot_id}' completed cmd_id {robot.cmd_id} via heartbeat (dist: {dist:.3f}m, yaw_diff: {yaw_diff:.3f}rad, status: {status}). Finishing execution.")
+                        try:
+                            robot.current_execution.finished()
+                        except Exception as e:
+                            print(f"[NAV NOTICE] Execution finish exception: {e}")
+                        robot.current_execution = None
+                        robot.target_position = None
+                        robot.last_cmd_payload = None
+                        robot.nav_retries = 0
 
             # Forward state update to Open-RMF core
             if not self.mock_rmf and robot.update_handle:
@@ -1503,6 +1552,7 @@ class MqttFleetAdapter:
                         robot.current_execution = None
                         robot.target_position = None
                         robot.deferred_cmd_payload = None
+                        robot.pending_suspend_lift = None
 
                     rmf_state = rmf_easy.RobotState(robot.map_name, robot.position, robot.battery_soc)
                     activity_id = (
@@ -1530,6 +1580,8 @@ class MqttFleetAdapter:
             if robot:
                 robot.is_online = False
                 robot.status = "offline"
+                robot.pending_suspend_lift = None
+                robot.nav_suspended = False
                 if robot.current_execution and robot.deferred_cmd_payload is None:
                     print(f"[DEREGISTER] Robot '{robot_id}' deregistered during active execution (cmd_id: {robot.cmd_id}). Aborting execution and requesting RMF replan.")
                     if robot.update_handle:
@@ -1608,7 +1660,32 @@ class MqttFleetAdapter:
             if robot.current_execution and not robot.is_holding:
                 if cmd_id == robot.cmd_id and status in ["completed", "success"]:
                     print(f"[NAV] Verified completion of cmd_id {cmd_id} for '{robot_id}'.")
-                    if (robot.last_cmd_payload or {}).get("action") == "change_floor":
+                    action = (robot.last_cmd_payload or {}).get("action")
+                    if action in ("navigate", "dock") and robot.pending_suspend_lift:
+                        loc = payload.get("final_location")
+                        if isinstance(loc, dict) and "x" in loc and "y" in loc:
+                            robot.position = np.array(
+                                [float(loc["x"]), float(loc["y"]), float(loc.get("yaw", robot.position[2]))],
+                                dtype=np.float64,
+                            )
+                        elif robot.target_position is not None:
+                            robot.position = np.array(robot.target_position, dtype=np.float64)
+                        self._dispatch_suspend_navigation_locked(
+                            robot, robot.pending_suspend_lift, robot.current_execution, pose=robot.position
+                        )
+                        return
+                    if action == "suspend_navigation":
+                        pose = (robot.last_cmd_payload or {}).get("pose") or {}
+                        if all(k in pose for k in ("x", "y", "yaw")):
+                            robot.position = np.array(
+                                [float(pose["x"]), float(pose["y"]), float(pose["yaw"])], dtype=np.float64
+                            )
+                        robot.nav_suspended = True
+                        robot.pending_suspend_lift = None
+                        print(f"[LIFT] Robot '{robot.name}' suspended navigation inside lift '{(robot.last_cmd_payload or {}).get('lift_name')}' on floor '{robot.map_name}'.")
+                    elif action == "change_floor":
+                        robot.nav_suspended = False
+                        robot.pending_suspend_lift = None
                         self._apply_floor_change_locked(robot, robot.last_cmd_payload)
                     try:
                         robot.current_execution.finished()
@@ -1625,6 +1702,7 @@ class MqttFleetAdapter:
                     robot.current_execution = None
                     robot.target_position = None
                     robot.last_cmd_payload = None
+                    robot.pending_suspend_lift = None
                     robot.nav_retries = 0
                     robot.is_retrying = False
                 elif cmd_id == robot.cmd_id and status in ["failed", "aborted"]:
@@ -2085,6 +2163,73 @@ class MqttFleetAdapter:
             "timestamp": time.time(),
         }
 
+    def _resolve_destination_lift(
+        self, fleet_name: str, destination: Any, target_map: str, target_pos: Any
+    ) -> Optional[str]:
+        """Return the lift name if ``destination`` is a lift cabin waypoint, otherwise None."""
+        inside = getattr(destination, "inside_lift", None)
+        if isinstance(inside, str) and inside:
+            return inside
+        if inside is not None and getattr(inside, "name", None):
+            return str(inside.name)
+
+        f_info = (getattr(self, "fleet_waypoint_info", None) or {}).get(fleet_name) or {}
+        lvl_info = (f_info.get("levels") or {}).get(target_map) or {}
+        wp_name = str(getattr(destination, "name", "") or "")
+        lift_wps = lvl_info.get("lift_waypoints") or {}
+        if wp_name and wp_name in lift_wps:
+            return lift_wps[wp_name]
+
+        transform = lvl_info.get("transform")
+        for lift_name, vx, vy in lvl_info.get("lift_cabins") or []:
+            rx, ry = rmf_to_robot(transform, vx, vy)
+            if math.hypot(float(target_pos[0]) - rx, float(target_pos[1]) - ry) < 0.25:
+                return str(lift_name)
+        return None
+
+    def _dispatch_suspend_navigation_locked(
+        self, robot: ManagedRobot, lift_name: str, execution: Any, pose: Any = None
+    ):
+        """Step 2 of multi-floor travel: after reaching the lift cabin, instruct the robot via MQTT to
+        suspend navigation/localization before completing the RMF boarding execution (so the lift only
+        closes doors and moves after the robot confirms command_result)."""
+        cabin_pose = pose if pose is not None else robot.position
+        robot.pending_suspend_lift = None
+        if not robot.is_online or robot.is_estopped:
+            self._defer_command(
+                robot,
+                execution,
+                suspend_navigation_payload(robot.name, 0, lift_name, robot.map_name, cabin_pose),
+                f"Cannot suspend navigation in lift '{lift_name}': robot '{robot.name}' in fleet '{robot.fleet_name}' is "
+                f"{'emergency-stopped' if robot.is_estopped else 'offline'}.",
+            )
+            return
+        robot.is_holding = False
+        robot.cmd_id += 1
+        robot.nav_retries = 0
+        robot.is_retrying = False
+        robot.current_execution = execution
+        robot.target_position = None  # never completed by heartbeat; only by command_result
+        robot.deferred_cmd_payload = None
+        cmd_payload = suspend_navigation_payload(robot.name, robot.cmd_id, lift_name, robot.map_name, cabin_pose)
+        robot.last_cmd_payload = cmd_payload
+        robot.last_dispatch_time = time.time()
+        cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
+        self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+        self._publish_task_status(
+            robot.fleet_name,
+            robot.name,
+            robot.cmd_id,
+            "nav_started",
+            -1,
+            -1,
+            f"suspend_navigation:{lift_name}:{robot.map_name}",
+        )
+        print(
+            f"[RMF -> AMR] Dispatched SUSPEND_NAVIGATION (cmd_id: {robot.cmd_id}) to '{robot.name}' "
+            f"for lift '{lift_name}' on floor '{robot.map_name}'"
+        )
+
     def _on_rmf_navigate(self, fleet_name: str, robot_id: str, destination: Any, execution: Any):
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
@@ -2104,8 +2249,13 @@ class MqttFleetAdapter:
             same_map = (target_map == robot.map_name)
             dock_name = getattr(destination, "dock", None)
             speed_limit = getattr(destination, "speed_limit", None)
+            lift_name = self._resolve_destination_lift(fleet_name, destination, target_map, target_pos)
+            if not lift_name:
+                robot.pending_suspend_lift = None
+                robot.nav_suspended = False
 
             if not robot.is_online or robot.is_estopped or robot.is_off_graph:
+                robot.pending_suspend_lift = lift_name
                 reason = (
                     f"偏離路網過遠 ({robot.off_graph_distance}m > {OFF_GRAPH_THRESHOLD_M}m)，無法操控"
                     if robot.is_off_graph
@@ -2142,6 +2292,14 @@ class MqttFleetAdapter:
             )
 
             if can_finish_in_place:
+                if lift_name and not robot.nav_suspended:
+                    print(
+                        f"[RMF -> AMR] Robot '{robot_id}' already at lift '{lift_name}' cabin on '{target_map}'. "
+                        f"Dispatching SUSPEND_NAVIGATION before finishing boarding."
+                    )
+                    self._dispatch_suspend_navigation_locked(robot, lift_name, execution, pose=target_pos)
+                    return
+
                 print(f"[RMF -> AMR] Robot '{robot_id}' already at destination [{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_yaw:.2f}] (dist: {dist:.3f}m, yaw_diff: {yaw_diff:.3f}rad, map: '{target_map}', status: '{robot.status}'). Fulfilling in-place execution.")
                 robot.cmd_id += 1
                 self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "nav_completed", -1, -1, f"navigate:{target_map}:{target_pos[0]:.2f},{target_pos[1]:.2f}")
@@ -2151,6 +2309,7 @@ class MqttFleetAdapter:
                 robot.target_position = target_pos
                 robot.is_holding = False
                 robot.deferred_cmd_payload = None
+                robot.pending_suspend_lift = None
 
                 def finish_in_place():
                     with self.lock:
@@ -2172,6 +2331,7 @@ class MqttFleetAdapter:
             robot.current_execution = execution
             robot.target_position = target_pos
             robot.deferred_cmd_payload = None
+            robot.pending_suspend_lift = lift_name
 
             cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
             cmd_payload = self._navigate_payload(robot_id, robot.cmd_id, target_pos, target_map, dock_name, speed_limit)
@@ -2216,6 +2376,7 @@ class MqttFleetAdapter:
             if not floor:
                 self._escalate_rmf_failure(robot, f"RMF localize for '{robot_id}' has no target map")
                 return
+            robot.pending_suspend_lift = None
             if not robot.is_online or robot.is_estopped:
                 self._defer_command(
                     robot, execution, change_floor_payload(robot_id, 0, floor, position),
@@ -2261,6 +2422,7 @@ class MqttFleetAdapter:
             was_deferred = robot.deferred_cmd_payload is not None
             robot.is_holding = False
             robot.deferred_cmd_payload = None
+            robot.pending_suspend_lift = None
             # The RMF activity being stopped owns the active task (if any); its final state still reaches the backend via task_refs.
             self._detach_active_task_locked(robot, "stopped by RMF")
             robot.current_execution = None
