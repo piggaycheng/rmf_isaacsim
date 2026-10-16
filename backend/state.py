@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import math
 from typing import List, Dict, Any, Optional, Tuple
 from fastapi import WebSocket
 from pydantic import BaseModel
@@ -105,7 +106,6 @@ DISCOVERY_OFFLINE_S = 15.0
 
 # Discovered Robots (Synced from Fleet Adapter)
 discovered_robots: Dict[str, Dict[str, Any]] = {}
-_applied_specs: Dict[str, Dict[str, Any]] = {}
 
 active_connections: List[WebSocket] = []
 last_ros2_time: float = 0.0
@@ -331,34 +331,53 @@ def adapter_diagnostics(adapter: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def sync_robot_specs_to_adapters(discovered: Dict[str, Dict[str, Any]]) -> None:
-    """Persist robot-reported footprint/velocity limits into fleet_adapters.json (read by the FA on start)."""
-    changed_specs = {}
-    for key, disc in discovered.items():
-        specs = disc.get("specs") if isinstance(disc, dict) else None
-        if specs and _applied_specs.get(key) != specs:
-            changed_specs[key] = (disc.get("fleet_name"), specs)
-    if not changed_specs:
-        return
-
+    """Persist conservative limits from adopted robots, never unrelated discovery cache entries."""
     adapters = load_fleet_adapters_data()
-    updated = False
-    for key, (fleet_name, specs) in changed_specs.items():
-        mapping = {
-            "robot_radius": specs.get("footprint_radius"),
-            "linear_velocity": specs.get("max_linear_velocity"),
-            "angular_velocity": specs.get("max_angular_velocity"),
+    changed_fleets = []
+    for adapter in adapters:
+        fleet_name = adapter.get("fleet_name")
+        names = {
+            r.get("name") if isinstance(r, dict) else r
+            for r in adapter.get("robots", [])
         }
-        for a in adapters:
-            if a.get("fleet_name") != fleet_name:
+        robots = [
+            r for r in discovered.values()
+            if isinstance(r, dict) and r.get("fleet_name") == fleet_name
+            and r.get("robot_id") in names
+        ]
+        changed = False
+        for field, spec_key in (
+            ("robot_radius", "footprint_radius"),
+            ("linear_velocity", "max_linear_velocity"),
+            ("angular_velocity", "max_angular_velocity"),
+        ):
+            values = []
+            for robot in robots:
+                raw = (robot.get("specs") or {}).get(spec_key)
+                if raw is None:
+                    continue
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    print(f"[Discovery WARN] Invalid {spec_key} for {fleet_name}/{robot.get('robot_id')}: {raw!r}")
+                    continue
+                if not math.isfinite(value) or value <= 0:
+                    print(f"[Discovery WARN] Invalid {spec_key} for {fleet_name}/{robot.get('robot_id')}: {raw!r}")
+                    continue
+                values.append(value)
+            if not values:
                 continue
-            for field, value in mapping.items():
-                if value and a.get(field) != float(value):
-                    a[field] = float(value)
-                    updated = True
-        _applied_specs[key] = specs
-    if updated:
+            value = max(values) if field == "robot_radius" else min(values)
+            if field != "robot_radius" and adapter.get(field):
+                value = min(float(adapter[field]), value)
+            if adapter.get(field) != value:
+                adapter[field] = value
+                changed = True
+        if changed:
+            changed_fleets.append(fleet_name)
+    if changed_fleets:
         save_fleet_adapters_data(adapters)
-        print(f"[Discovery] Updated fleet_adapters.json with robot-reported specs: {list(changed_specs)}")
+        print(f"[Discovery] Updated fleet_adapters.json with adopted robot specs: {changed_fleets}")
 
 async def broadcast(message: dict):
     for connection in list(active_connections):

@@ -110,6 +110,81 @@ class TestAdapterDiagnostics(BackendFixture):
         self.assertEqual(self.diag()["status"], "unknown")
 
 
+class TestRobotSpecsSync(BackendFixture):
+    def setUp(self):
+        super().setUp()
+        self.adapter = {
+            "id": "a1", "fleet_name": "fleet1",
+            "linear_velocity": 1.2, "angular_velocity": 1.0, "robot_radius": 0.35,
+            "robots": [{"name": "carter1"}],
+        }
+        self.carter = {
+            "fleet_name": "fleet1", "robot_id": "carter1", "status": "offline",
+            "specs": {"max_linear_velocity": 0.75, "max_angular_velocity": 0.5,
+                      "footprint_radius": 0.65},
+        }
+        state.save_fleet_adapters_data([self.adapter])
+
+    def test_unadopted_cached_test_robot_cannot_overwrite_fleet_limits(self):
+        test_robot = {
+            "fleet_name": "fleet1", "robot_id": "e2e_bot",
+            "specs": {"max_linear_velocity": 1.2, "max_angular_velocity": 1.0,
+                      "footprint_radius": 0.35},
+        }
+        for records in ([self.carter, test_robot], [test_robot, self.carter]):
+            with self.subTest(order=[r["robot_id"] for r in records]):
+                state.save_fleet_adapters_data([self.adapter])
+                state.sync_robot_specs_to_adapters({r["robot_id"]: r for r in records})
+                saved = state.load_fleet_adapters_data()[0]
+                self.assertEqual((saved["linear_velocity"], saved["angular_velocity"]), (0.75, 0.5))
+                self.assertEqual(saved["robot_radius"], 0.65)
+
+    def test_multiple_adopted_robots_use_slowest_speed_and_largest_radius(self):
+        self.adapter["robots"].append({"name": "carter2"})
+        state.save_fleet_adapters_data([self.adapter])
+        other = {
+            "fleet_name": "fleet1", "robot_id": "carter2",
+            "specs": {"max_linear_velocity": 0.6, "max_angular_velocity": 0.8,
+                      "footprint_radius": 0.8},
+        }
+        state.sync_robot_specs_to_adapters({"carter1": self.carter, "carter2": other})
+        saved = state.load_fleet_adapters_data()[0]
+        self.assertEqual((saved["linear_velocity"], saved["angular_velocity"]), (0.6, 0.5))
+        self.assertEqual(saved["robot_radius"], 0.8)
+
+    def test_adoption_changes_apply_even_when_reported_specs_are_unchanged(self):
+        state.save_fleet_adapters_data([dict(self.adapter, robots=[])])
+        state.sync_robot_specs_to_adapters({"carter1": self.carter})
+        self.assertEqual(state.load_fleet_adapters_data()[0]["linear_velocity"], 1.2)
+        state.save_fleet_adapters_data([self.adapter])
+        state.sync_robot_specs_to_adapters({"carter1": self.carter})
+        self.assertEqual(state.load_fleet_adapters_data()[0]["linear_velocity"], 0.75)
+        with patch.object(state, "save_fleet_adapters_data") as save:
+            state.sync_robot_specs_to_adapters({"carter1": self.carter})
+        save.assert_not_called()
+
+    def test_other_fleets_and_missing_specs_do_not_change_limits(self):
+        other = dict(self.carter, fleet_name="fleet2")
+        state.sync_robot_specs_to_adapters({"other": other, "carter": dict(self.carter, specs={})})
+        self.assertEqual(state.load_fleet_adapters_data()[0], self.adapter)
+
+    def test_lower_configured_speeds_are_preserved(self):
+        self.adapter.update(linear_velocity=0.4, angular_velocity=0.3)
+        state.save_fleet_adapters_data([self.adapter])
+        state.sync_robot_specs_to_adapters({"carter": self.carter})
+        saved = state.load_fleet_adapters_data()[0]
+        self.assertEqual((saved["linear_velocity"], saved["angular_velocity"]), (0.4, 0.3))
+
+    def test_invalid_reported_limits_are_logged_without_persisting(self):
+        for raw in (0, -1, float("nan"), float("inf"), "invalid"):
+            with self.subTest(raw=raw):
+                robot = dict(self.carter, specs={"max_linear_velocity": raw})
+                with patch("builtins.print") as log, patch.object(state, "save_fleet_adapters_data") as save:
+                    state.sync_robot_specs_to_adapters({"carter": robot})
+                log.assert_called_once()
+                save.assert_not_called()
+
+
 class TestDispatchPrecheck(BackendFixture):
     def test_rejects_place_missing_from_loaded_graph(self):
         self.report_loaded()

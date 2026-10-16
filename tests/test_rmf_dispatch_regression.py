@@ -104,6 +104,67 @@ class TestRMFDispatchRegression(unittest.TestCase):
             self.assertIsNone(call.kwargs["stdout"])
             self.assertIsNone(call.kwargs["stderr"])
 
+    def test_fleet_planning_velocity_capped_to_registered_robot_specs(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter.discovered_robots = {
+            "fleet1_carter1": {
+                "fleet_name": "fleet1", "robot_id": "carter1", "status": "offline",
+                "specs": {"max_linear_velocity": 0.75, "max_angular_velocity": 0.5},
+            }
+        }
+        config = {"fleet_name": "fleet1", "robots": [{"name": "carter1"}]}
+        self.assertEqual(adapter._fleet_velocity_limits(config, 1.2, 1.0), (0.75, 0.5))
+        self.assertEqual(adapter._fleet_velocity_limits(config, 0.4, 0.3), (0.4, 0.3))
+
+    def test_fleet_planning_velocity_uses_slowest_adopted_robot_only(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter.discovered_robots = {
+            "fleet1_carter1": {
+                "fleet_name": "fleet1", "robot_id": "carter1",
+                "specs": {"max_linear_velocity": 0.75, "max_angular_velocity": 0.5},
+            },
+            "fleet1_carter2": {
+                "fleet_name": "fleet1", "robot_id": "carter2",
+                "specs": {"max_linear_velocity": 0.6, "max_angular_velocity": 0.8},
+            },
+            "fleet1_unadopted": {
+                "fleet_name": "fleet1", "robot_id": "unadopted",
+                "specs": {"max_linear_velocity": 0.1, "max_angular_velocity": 0.1},
+            },
+            "fleet2_other": {
+                "fleet_name": "fleet2", "robot_id": "carter1",
+                "specs": {"max_linear_velocity": 0.1, "max_angular_velocity": 0.1},
+            },
+        }
+        config = {"fleet_name": "fleet1", "robots": [{"name": "carter1"}, {"name": "carter2"}]}
+        self.assertEqual(adapter._fleet_velocity_limits(config, 1.2, 1.0), (0.6, 0.5))
+
+    def test_fleet_planning_velocity_without_reported_specs_preserves_config(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        adapter.discovered_robots = {
+            "fleet1_carter1": {"fleet_name": "fleet1", "robot_id": "carter1", "specs": {}}
+        }
+        self.assertEqual(
+            adapter._fleet_velocity_limits({"fleet_name": "fleet1"}, 1.2, 1.0), (1.2, 1.0)
+        )
+        adapter.discovered_robots["fleet1_carter1"]["specs"]["max_linear_velocity"] = 0.75
+        self.assertEqual(
+            adapter._fleet_velocity_limits({"fleet_name": "fleet1"}, 1.2, 1.0), (0.75, 1.0)
+        )
+
+    def test_invalid_reported_velocity_does_not_silently_enter_planner(self):
+        adapter = self._create_mock_adapter(["fleet1"])
+        for value in (0, -0.5, float("nan"), float("inf"), None, "invalid"):
+            with self.subTest(value=value):
+                adapter.discovered_robots = {
+                    "fleet1_carter1": {
+                        "fleet_name": "fleet1", "robot_id": "carter1",
+                        "specs": {"max_linear_velocity": value},
+                    }
+                }
+                with self.assertRaises((ValueError, TypeError)):
+                    adapter._fleet_velocity_limits({"fleet_name": "fleet1"}, 1.2, 1.0)
+
     # --------------------------------------------------------------------------
     # Issue 1: Heartbeat Watchdog Timeout does not prematurely mark finished
     # --------------------------------------------------------------------------

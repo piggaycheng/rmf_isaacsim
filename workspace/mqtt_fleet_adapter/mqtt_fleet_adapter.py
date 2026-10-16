@@ -377,6 +377,34 @@ class MqttFleetAdapter:
         target_fleet = fleet_name or self.fleet_name
         return self.robots.get((target_fleet, robot_id))
 
+    def _fleet_velocity_limits(
+        self, fleet_config: Dict[str, Any], linear: float, angular: float
+    ) -> Tuple[float, float]:
+        fleet_name = fleet_config.get("fleet_name") or self.fleet_name
+        robot_names = {r["name"] for r in fleet_config.get("robots", [])}
+        limits = [linear, angular]
+        for robot in self.discovered_robots.values():
+            if robot.get("fleet_name") != fleet_name:
+                continue
+            if robot_names and robot.get("robot_id") not in robot_names:
+                continue
+            specs = robot.get("specs", {})
+            for index, key in enumerate(("max_linear_velocity", "max_angular_velocity")):
+                if key not in specs:
+                    continue
+                value = float(specs[key])
+                if not math.isfinite(value) or value <= 0:
+                    raise ValueError(
+                        f"Invalid {key} for {fleet_name}/{robot.get('robot_id')}: {specs[key]!r}"
+                    )
+                limits[index] = min(limits[index], value)
+        if tuple(limits) != (linear, angular):
+            print(
+                f"[RMF WARN] Fleet [{fleet_name}] planning velocity capped to robot-reported limits: "
+                f"linear {linear} -> {limits[0]} m/s, angular {angular} -> {limits[1]} rad/s"
+            )
+        return limits[0], limits[1]
+
     def _sync_rmf_availability(self, robot: ManagedRobot):
         """Single source of truth for RMF status/commission: offline > e-stop > paused > available."""
         if not robot.update_handle:
@@ -668,6 +696,7 @@ class MqttFleetAdapter:
                         radius = float(item.get("robot_radius") or base_cfg_dict.get("rmf_fleet", {}).get("profile", {}).get("footprint", 0.35))
                         lin_v = float(item.get("linear_velocity") or base_cfg_dict.get("rmf_fleet", {}).get("limits", {}).get("linear", [1.2, 0.6])[0])
                         ang_v = float(item.get("angular_velocity") or base_cfg_dict.get("rmf_fleet", {}).get("limits", {}).get("angular", [1.0, 0.5])[0])
+                        lin_v, ang_v = self._fleet_velocity_limits(item, lin_v, ang_v)
 
                         base_cfg_dict["rmf_fleet"]["name"] = f_name
                         base_cfg_dict["rmf_fleet"]["limits"]["linear"] = [lin_v, round(lin_v * 0.6, 2)]
