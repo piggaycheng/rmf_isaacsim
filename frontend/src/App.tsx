@@ -305,6 +305,7 @@ export function App() {
   const [isMockSimulation, setIsMockSimulation] = useState<boolean>(true);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isApplyingMap, setIsApplyingMap] = useState<boolean>(false);
   // Fleets whose running Fleet Adapter has not loaded the latest saved nav graph
   const [staleAdapterFleets, setStaleAdapterFleets] = useState<string[]>([]);
   const [saveToast, setSaveToast] = useState<string | null>(null);
@@ -422,7 +423,7 @@ export function App() {
           setStaleAdapterFleets(stale);
           setSaveToast(
             stale.length > 0
-              ? '已自動存檔（尚未套用至 Fleet Adapter，按「儲存路網」套用）'
+              ? '已自動存檔（尚未套用至 Fleet Adapter，按「套用至車隊」套用）'
               : '已自動存檔'
           );
         } else {
@@ -1193,9 +1194,52 @@ export function App() {
     return () => clearInterval(timer);
   }, [isConnected]);
 
-  // Save Map to Backend & LocalStorage
+  // Save Map to Backend & LocalStorage (Pure save without restarting Fleet Adapters)
   const handleSaveMap = async () => {
     setIsSaving(true);
+    const finalLifts: MapLift[] = [...lifts];
+    waypoints.forEach((w) => {
+      if (w.lift && !finalLifts.some((l) => l.name === w.lift)) {
+        finalLifts.push({ name: w.lift, x: w.x, y: w.y, yaw: 0, width: 2.0, depth: 2.0 });
+      }
+    });
+
+    const payload = {
+      name: 'office_map',
+      waypoints,
+      lanes,
+      graphs,
+      ...(levels.length > 0 ? { levels, lifts: finalLifts } : {}),
+      restart_adapter: false,
+    };
+    try {
+      // 1. Immediately cache in localStorage
+      localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
+
+      // 2. Persist to Backend server disk (JSON + Open-RMF standard building.yaml)
+      const res = await fetch('/api/map', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setStaleAdapterFleets(data.adapter_restart_required || []);
+        setSaveToast(data.message || '路網已儲存');
+      } else {
+        setSaveToast(`儲存失敗：${data.detail || res.status}`);
+      }
+    } catch (e) {
+      setSaveToast('已儲存至瀏覽器快取 (伺服器離線)');
+    } finally {
+      setIsSaving(false);
+      setTimeout(() => setSaveToast(null), 3000);
+    }
+  };
+
+  // Apply Map to Fleet Adapters (Save & Reload all Fleet Adapters)
+  const handleApplyMapToFleets = async () => {
+    setIsApplyingMap(true);
     const finalLifts: MapLift[] = [...lifts];
     waypoints.forEach((w) => {
       if (w.lift && !finalLifts.some((l) => l.name === w.lift)) {
@@ -1212,10 +1256,8 @@ export function App() {
       restart_adapter: true,
     };
     try {
-      // 1. Immediately cache in localStorage
       localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
 
-      // 2. Persist to Backend server disk (JSON + Open-RMF standard building.yaml)
       const res = await fetch('/api/map', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1224,14 +1266,14 @@ export function App() {
       const data = await res.json();
       if (res.ok) {
         setStaleAdapterFleets(data.adapter_restart_required || []);
-        setSaveToast(data.message || '路網已儲存，請查看車隊管理頁確認 Adapter 狀態');
+        setSaveToast(data.message || '已套用路網至各車隊');
       } else {
-        setSaveToast(`儲存失敗：${data.detail || res.status}`);
+        setSaveToast(`套用失敗：${data.detail || res.status}`);
       }
     } catch (e) {
-      setSaveToast('已儲存至瀏覽器快取 (伺服器離線)');
+      setSaveToast('套用失敗 (伺服器離線)');
     } finally {
-      setIsSaving(false);
+      setIsApplyingMap(false);
       setTimeout(() => setSaveToast(null), 3000);
     }
   };
@@ -1551,7 +1593,7 @@ export function App() {
                 {staleAdapterFleets.length > 0 && (
                   <span
                     className="flex items-center text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/40 rounded px-2 h-7 flex-shrink-0"
-                    title={`Fleet Adapter 仍使用舊路網，派到新站點的任務會失敗。按「儲存路網」會儲存並重新載入 Adapter。`}
+                    title={`Fleet Adapter 仍使用舊路網，派到新站點的任務會失敗。按「套用至車隊」將最新路網套用至各車隊 Adapter。`}
                   >
                     <AlertTriangle className="w-3.5 h-3.5 mr-1" />
                     {staleAdapterFleets.join(', ')} 尚未套用新路網
@@ -1562,11 +1604,22 @@ export function App() {
                   size="sm"
                   className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50 text-xs h-7 px-2.5 flex-shrink-0"
                   onClick={handleSaveMap}
-                  disabled={isSaving}
-                  title="儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)"
+                  disabled={isSaving || isApplyingMap}
+                  title="單純儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)，不重新載入車隊 Adapter"
                 >
                   <Save className="w-3.5 h-3.5 mr-1" />
                   {isSaving ? '儲存中...' : '儲存路網'}
+                </Button>
+
+                <Button
+                  size="sm"
+                  className="bg-cyan-600 hover:bg-cyan-500 text-white font-medium shadow-sm shadow-cyan-950/50 text-xs h-7 px-2.5 flex-shrink-0"
+                  onClick={handleApplyMapToFleets}
+                  disabled={isApplyingMap || isSaving}
+                  title="將當前路網套用至各車隊並重新載入 Fleet Adapter"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 mr-1 ${isApplyingMap ? 'animate-spin' : ''}`} />
+                  {isApplyingMap ? '套用中...' : '套用至車隊'}
                 </Button>
               </div>
             </div>

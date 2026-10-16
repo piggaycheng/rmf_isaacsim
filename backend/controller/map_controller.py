@@ -134,14 +134,18 @@ async def save_map(req: MapSaveRequest):
         "map": map_data
     })
 
-    message = f"路網已成功儲存 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)"
+    if getattr(req, "restart_adapter", False):
+        message = f"已將最新路網套用至各車隊 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)"
+    else:
+        message = f"路網已成功儲存 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)"
+
     stale_fleets = [
         a.get("fleet_name", "")
         for a in state.load_fleet_adapters_data()
         if state.adapter_diagnostics(a).get("status") == "stale"
     ]
     if stale_fleets:
-        message += f"；車隊 {', '.join(stale_fleets)} 的 Fleet Adapter 仍使用舊路網，請至車隊管理頁重新載入 Adapter"
+        message += f"；車隊 {', '.join(stale_fleets)} 尚未套用新路網，請按「套用至車隊」使其生效"
     if restart_error:
         message += f"；{restart_error}"
 
