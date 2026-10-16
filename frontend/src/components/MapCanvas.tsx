@@ -172,6 +172,12 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
   // Lane creation state
   const [laneStartId, setLaneStartId] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (tool !== 'lane') {
+      setLaneStartId(null);
+    }
+  }, [tool]);
+
   // Dragging waypoint
   const [draggingWaypointId, setDraggingWaypointId] = useState<string | null>(null);
 
@@ -301,7 +307,7 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
 
       const s1 = worldToScreen(p1.x, p1.y);
       const s2 = worldToScreen(p2.x, p2.y);
-      const isSelected = selectedLaneIds.includes(lane.id);
+      const isSelected = (mode === 'monitor' || tool === 'select') && selectedLaneIds.includes(lane.id);
       const laneGraphIdx = lane.graph_idx ?? 0;
       const isDimmed = mode === 'edit' && focusActiveGraph && laneGraphIdx !== activeGraphIdx;
 
@@ -361,8 +367,8 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
     // 3. Draw Waypoints
     waypoints.forEach((wp) => {
       const pos = worldToScreen(wp.x, wp.y);
-      const isSelected = selectedWaypointIds.includes(wp.id);
-      const isConnecting = wp.id === laneStartId;
+      const isSelected = (mode === 'monitor' || tool === 'select') && selectedWaypointIds.includes(wp.id);
+      const isConnecting = tool === 'lane' && wp.id === laneStartId;
 
       // Determine graph membership & color matching the lane's graph palette
       const wpGraphIndices = getWaypointGraphIndices(wp, lanes);
@@ -602,6 +608,7 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
     graphs,
     activeGraphIdx,
     focusActiveGraph,
+    tool,
   ]);
 
   // Mouse Handlers

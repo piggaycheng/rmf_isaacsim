@@ -270,6 +270,16 @@ export function App() {
 
   const [selectedWaypointIds, setSelectedWaypointIds] = useState<string[]>([]);
   const [selectedLaneIds, setSelectedLaneIds] = useState<string[]>([]);
+
+  // Switch editor tool & clear selection when moving away from select tool
+  const handleSelectTool = (nextTool: EditorTool) => {
+    setTool(nextTool);
+    if (nextTool !== 'select') {
+      setSelectedWaypointIds([]);
+      setSelectedLaneIds([]);
+    }
+  };
+
   const [dispatchModalOpen, setDispatchModalOpen] = useState<boolean>(false);
   const [dispatchPresetWp, setDispatchPresetWp] = useState<Waypoint | null>(null);
   const [multiStepModalOpen, setMultiStepModalOpen] = useState<boolean>(false);
@@ -335,6 +345,8 @@ export function App() {
   // Update mode and persist to localStorage
   const handleSetMode = (newMode: AppMode) => {
     setMode(newMode);
+    setSelectedWaypointIds([]);
+    setSelectedLaneIds([]);
     try {
       localStorage.setItem('rmf_active_mode', newMode);
     } catch (e) {}
@@ -659,7 +671,7 @@ export function App() {
       ...(liftName ? { lift: liftName } : {}),
     };
     setWaypoints((prev) => [...prev, newWp]);
-    setSelectedWaypointIds([id]);
+    setSelectedWaypointIds([]);
     setSelectedLaneIds([]);
 
     if (type === 'lift' && liftName) {
@@ -702,6 +714,8 @@ export function App() {
       graph_idx: activeGraphIdx,
     };
     setLanes((prev) => [...prev, newLane]);
+    setSelectedWaypointIds([]);
+    setSelectedLaneIds([]);
   };
 
   // Select active graph tab & purge any selected lanes/waypoints not in active graph (Option A)
@@ -1491,7 +1505,7 @@ export function App() {
         {mode === 'edit' && (
           <aside className="w-14 border-r border-slate-800 bg-[#0d1322] flex flex-col items-center py-3 space-y-2 z-10 select-none">
             <button
-              onClick={() => setTool('select')}
+              onClick={() => handleSelectTool('select')}
               title="選取工具（單選點位、拖曳移動、空白處拖曳矩形框選）"
               className={`p-2.5 rounded-lg transition-colors ${
                 tool === 'select' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:bg-slate-800'
@@ -1500,7 +1514,7 @@ export function App() {
               <MousePointer className="w-5 h-5" />
             </button>
             <button
-              onClick={() => setTool('waypoint')}
+              onClick={() => handleSelectTool('waypoint')}
               title="新增一般導航點 (Waypoint)"
               className={`p-2.5 rounded-lg transition-colors ${
                 tool === 'waypoint' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:bg-slate-800'
@@ -1509,7 +1523,7 @@ export function App() {
               <MapPin className="w-5 h-5" />
             </button>
             <button
-              onClick={() => setTool('lane')}
+              onClick={() => handleSelectTool('lane')}
               title="連接兩點建立路徑 (Lane)"
               className={`p-2.5 rounded-lg transition-colors ${
                 tool === 'lane' ? 'bg-primary text-white shadow' : 'text-slate-400 hover:bg-slate-800'
@@ -1519,7 +1533,7 @@ export function App() {
             </button>
             <div className="w-8 h-px bg-slate-800 my-1" />
             <button
-              onClick={() => setTool('charger')}
+              onClick={() => handleSelectTool('charger')}
               title="新增充電樁點位 (Charger)"
               className={`p-2.5 rounded-lg transition-colors ${
                 tool === 'charger' ? 'bg-amber-500 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
@@ -1528,7 +1542,7 @@ export function App() {
               <BatteryCharging className="w-5 h-5" />
             </button>
             <button
-              onClick={() => setTool('parking')}
+              onClick={() => handleSelectTool('parking')}
               title="新增停車/等候點 (Parking)"
               className={`p-2.5 rounded-lg transition-colors ${
                 tool === 'parking' ? 'bg-purple-500 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
@@ -1537,7 +1551,7 @@ export function App() {
               <SquareParking className="w-5 h-5" />
             </button>
             <button
-              onClick={() => setTool('workcell')}
+              onClick={() => handleSelectTool('workcell')}
               title="新增工作/取放料點 (Workcell)"
               className={`p-2.5 rounded-lg transition-colors ${
                 tool === 'workcell' ? 'bg-emerald-500 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
@@ -1546,7 +1560,7 @@ export function App() {
               <Boxes className="w-5 h-5" />
             </button>
             <button
-              onClick={() => setTool('lift')}
+              onClick={() => handleSelectTool('lift')}
               title="新增電梯點位 (Lift / Elevator)"
               className={`p-2.5 rounded-lg transition-colors ${
                 tool === 'lift' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:bg-slate-800'
