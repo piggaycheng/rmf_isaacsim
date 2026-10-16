@@ -197,7 +197,7 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
         fetchAdapters();
         fetchDiscovered();
       } else {
-        showToast(data.message || '納管操作失敗');
+        showToast(data.detail || data.message || '納管操作失敗');
       }
     } catch (e) {
       console.error(e);
@@ -221,7 +221,7 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
         fetchAdapters();
         fetchDiscovered();
       } else {
-        showToast(data.message || '批次納管失敗');
+        showToast(data.detail || data.message || '批次納管失敗');
       }
     } catch (e) {
       console.error(e);
@@ -422,23 +422,18 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(adapterToSave),
       });
-      if (res.ok) {
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
         showToast(`Fleet Adapter '${adapterToSave.name}' 已成功儲存！`);
         fetchAdapters();
+      } else {
+        showToast(data.detail || data.message || '儲存失敗');
+        return;
       }
     } catch (e) {
       console.error(e);
-      // Local fallback
-      setAdapters((prev) => {
-        const idx = prev.findIndex((a) => a.id === adapterToSave.id);
-        if (idx >= 0) {
-          const next = [...prev];
-          next[idx] = adapterToSave;
-          return next;
-        }
-        return [...prev, adapterToSave];
-      });
-      showToast(`Fleet Adapter '${adapterToSave.name}' 已儲存 (本地)`);
+      showToast('無法連線至後端，Adapter 設定未確認儲存');
+      return;
     }
 
     setCreateEditModalOpen(false);
@@ -451,13 +446,16 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
     }
     try {
       const res = await fetch(`/api/fleet-adapters/${id}`, { method: 'DELETE' });
-      if (res.ok) {
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
         showToast(`已成功移除 Adapter '${name}'`);
         fetchAdapters();
+      } else {
+        showToast(data.detail || data.message || '刪除失敗');
       }
     } catch (e) {
-      setAdapters((prev) => prev.filter((a) => a.id !== id));
-      showToast(`已移除 Adapter '${name}'`);
+      console.error(e);
+      showToast('無法連線至後端，Adapter 未確認刪除');
     }
   };
 
@@ -481,7 +479,7 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
         });
         await fetchAdapters();
       } else {
-        showToast(`切換失敗: ${data.message || res.status}`);
+        showToast(`切換失敗: ${data.detail || data.message || res.status}`);
       }
     } catch (e) {
       showToast(`車隊切換路網失敗`);

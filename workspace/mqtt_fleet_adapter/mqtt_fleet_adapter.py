@@ -164,6 +164,7 @@ class ManagedRobot:
         self.charger_waypoint = charger_waypoint
         self.status = "idle"
         self.last_heartbeat = time.time()
+        self.heartbeat_received = False
         self.is_online = True
         self.is_off_graph = False
         self.off_graph_distance = 0.0
@@ -1064,6 +1065,20 @@ class MqttFleetAdapter:
                 "paused_fleets": sorted(self.paused_fleets),
                 "estopped_robots": sorted(self.estopped_robots),
                 "started_at": self.started_at,
+                "robots": {
+                    f"{r.fleet_name}/{r.name}": {
+                        "online": r.is_online,
+                        "status": r.status,
+                        "last_heartbeat": r.last_heartbeat if r.heartbeat_received else 0,
+                        "busy": (
+                            r.current_execution is not None
+                            or r.active_task is not None
+                            or r.deferred_cmd_payload is not None
+                            or r.nav_suspended
+                        ),
+                    }
+                    for r in list(self.robots.values())
+                },
                 "fleets": {
                     name: {
                         "graph_idx": info.get("graph_idx", 0),
@@ -1310,6 +1325,7 @@ class MqttFleetAdapter:
                 if default_charger:
                     existing_robot.charger_waypoint = default_charger
                 existing_robot.last_heartbeat = time.time()
+                existing_robot.heartbeat_received = False
                 existing_robot.is_paused = fleet_name in self.paused_fleets
                 existing_robot.is_estopped = f"{fleet_name}/{robot_id}" in self.estopped_robots
                 self._sync_rmf_availability(existing_robot)
@@ -1546,6 +1562,7 @@ class MqttFleetAdapter:
             robot.map_name = level_name
             robot.status = status
             robot.last_heartbeat = time.time()
+            robot.heartbeat_received = True
             robot.is_online = True
             robot.is_off_graph = is_off_graph
             robot.off_graph_distance = round(dist_to_graph, 2)

@@ -16,7 +16,7 @@ from state import (
     save_fleet_adapters_data,
     broadcast,
 )
-from controller.adapter_controller import append_adapter_log, get_adapter_logs
+from controller.adapter_controller import append_adapter_log, get_adapter_logs, reload_fleet_adapter
 
 router = APIRouter(tags=["Robot Discovery & Auto-Adoption"])
 
@@ -85,6 +85,7 @@ def get_discovered_robots():
 async def adopt_discovered_robot(req: AdoptRequest):
     """Adopts a discovered robot: either creates a new Fleet Adapter or attaches to an existing one."""
     adapters = load_fleet_adapters_data()
+    pending_logs = []
 
     # Find discovered robot data
     robot_key = f"{req.fleet_name}_{req.robot_id}"
@@ -105,7 +106,7 @@ async def adopt_discovered_robot(req: AdoptRequest):
                     "charger_waypoint": def_charge,
                 })
                 existing_adapter["updated_at"] = "已更新"
-                append_adapter_log(existing_adapter["id"], f"[INFO] 車輛 '{req.robot_id}' 已自動納管至車隊 '{req.fleet_name}'")
+                pending_logs.append((existing_adapter["id"], f"[INFO] 車輛 '{req.robot_id}' 已自動納管至車隊 '{req.fleet_name}'"))
         else:
             # Create a brand new Fleet Adapter
             new_adapter_id = f"adapter_{req.fleet_name}_{int(time.time())}"
@@ -134,7 +135,7 @@ async def adopt_discovered_robot(req: AdoptRequest):
                 "latency_ms": 10,
                 "updated_at": "已儲存",
             }
-            append_adapter_log(new_adapter_id, f"[INFO] 自動建立車隊 '{req.fleet_name}' 並成功納管車輛 '{req.robot_id}'")
+            pending_logs.append((new_adapter_id, f"[INFO] 自動建立車隊 '{req.fleet_name}' 並成功納管車輛 '{req.robot_id}'"))
             adapters.append(new_adapter)
 
     elif req.action == "adopt_to_existing":
@@ -155,14 +156,11 @@ async def adopt_discovered_robot(req: AdoptRequest):
                 "charger_waypoint": def_charge,
             })
             target_adapter["updated_at"] = "已更新"
-            append_adapter_log(target_adapter["id"], f"[INFO] 車輛 '{req.robot_id}' 已成功納管")
+            pending_logs.append((target_adapter["id"], f"[INFO] 車輛 '{req.robot_id}' 已成功納管"))
 
-    save_fleet_adapters_data(adapters)
-    try:
-        from rmf_service import rmf_service
-        rmf_service.restart_fleet_adapter()
-    except Exception as e:
-        print(f"[WARN] Failed to restart fleet adapter on adopt: {e}")
+    await reload_fleet_adapter(lambda: save_fleet_adapters_data(adapters))
+    for adapter_id, message in pending_logs:
+        append_adapter_log(adapter_id, message)
 
     # Broadcast updates
     broadcast_adapters = []
@@ -197,6 +195,7 @@ async def batch_adopt_discovered_robots():
         return {"status": "ok", "message": "目前沒有待納管的車輛", "adopted_count": 0}
 
     adopted_count = 0
+    pending_logs = []
     # Group unadopted robots by fleet_name
     fleet_groups: Dict[str, List[Dict[str, Any]]] = {}
     for r in unadopted:
@@ -216,7 +215,7 @@ async def batch_adopt_discovered_robots():
                     })
                     adopted_count += 1
             existing_adapter["updated_at"] = "已更新"
-            append_adapter_log(existing_adapter["id"], f"[INFO] 批次自動納管 {len(robots)} 台車輛")
+            pending_logs.append((existing_adapter["id"], f"[INFO] 批次自動納管 {len(robots)} 台車輛"))
         else:
             # Create a brand new adapter for this fleet
             first_r = robots[0]
@@ -248,16 +247,13 @@ async def batch_adopt_discovered_robots():
                 "latency_ms": 10,
                 "updated_at": "已儲存",
             }
-            append_adapter_log(new_id, f"[INFO] 自動建立車隊 '{fleet_name}' 並納管 {len(robots)} 台車輛")
+            pending_logs.append((new_id, f"[INFO] 自動建立車隊 '{fleet_name}' 並納管 {len(robots)} 台車輛"))
             adapters.append(new_adapter)
             adopted_count += len(robots)
 
-    save_fleet_adapters_data(adapters)
-    try:
-        from rmf_service import rmf_service
-        rmf_service.restart_fleet_adapter()
-    except Exception as e:
-        print(f"[WARN] Failed to restart fleet adapter on batch adopt: {e}")
+    await reload_fleet_adapter(lambda: save_fleet_adapters_data(adapters))
+    for adapter_id, message in pending_logs:
+        append_adapter_log(adapter_id, message)
 
     # Broadcast updates
     broadcast_adapters = []

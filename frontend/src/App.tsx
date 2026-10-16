@@ -1295,11 +1295,11 @@ export function App() {
         body: JSON.stringify(payload),
       });
       const data = await res.json();
-      if (res.ok) {
+      if (res.ok && data.status !== 'error') {
         setStaleAdapterFleets(data.adapter_restart_required || []);
         setSaveToast(data.message || '已套用路網至各車隊');
       } else {
-        setSaveToast(`套用失敗：${data.detail || res.status}`);
+        setSaveToast(`套用失敗：${data.detail || data.message || res.status}`);
       }
     } catch (e) {
       setSaveToast('套用失敗 (伺服器離線)');

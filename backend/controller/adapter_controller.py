@@ -2,8 +2,8 @@ import asyncio
 import datetime
 import json
 from collections import defaultdict, deque
-from typing import Dict, Any, List
-from fastapi import APIRouter
+from typing import Callable, Dict, Any, List, Optional
+from fastapi import APIRouter, HTTPException
 import state
 from state import (
     load_fleet_adapters_data,
@@ -32,6 +32,19 @@ def get_adapter_logs(adapter_id: str) -> List[str]:
             f"[INFO] [easy_full_control]: Connected to Open-RMF Core scheduler",
         ]
     return logs
+
+
+async def reload_fleet_adapter(persist: Optional[Callable[[], None]] = None) -> None:
+    from rmf_service import AdapterReloadBlocked, rmf_service
+
+    try:
+        restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter, persist)
+    except AdapterReloadBlocked as e:
+        append_adapter_log("system", f"[WARN] {e}")
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    if not restarted:
+        raise HTTPException(status_code=503, detail="Fleet Adapter 重新載入失敗，設定已儲存但尚未確認生效，請檢查服務日誌。")
+
 
 @router.get("/api/fleet-adapters")
 def get_fleet_adapters():
@@ -70,17 +83,11 @@ async def save_or_update_fleet_adapter(adapter: Dict[str, Any]):
         adapters[idx] = adapter_clean
     else:
         adapters.append(adapter_clean)
+
+    await reload_fleet_adapter(lambda: save_fleet_adapters_data(adapters))
+    if idx < 0:
         append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter '{adapter_clean.get('name')}' created.")
-
-    save_fleet_adapters_data(adapters)
-
-    # Real execution: reload fleet adapter so newly configured kinematics/graphs take effect in Open-RMF
-    try:
-        from rmf_service import rmf_service
-        rmf_service.restart_fleet_adapter()
-        append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter reloaded to apply updated parameters.")
-    except Exception as e:
-        print(f"[WARN] Failed to reload adapter on save: {e}")
+    append_adapter_log(adapter_id, f"[INFO] [system]: Fleet Adapter reloaded to apply updated parameters.")
     
     # Broadcast with runtime logs attached
     broadcast_adapters = []
@@ -99,17 +106,11 @@ async def save_or_update_fleet_adapter(adapter: Dict[str, Any]):
 async def delete_fleet_adapter(adapter_id: str):
     adapters = load_fleet_adapters_data()
     adapters = [a for a in adapters if a.get("id") != adapter_id]
-    save_fleet_adapters_data(adapters)
+    await reload_fleet_adapter(lambda: save_fleet_adapters_data(adapters))
     
     # Also clear in-memory logs for deleted adapter
     if adapter_id in adapter_logs:
         del adapter_logs[adapter_id]
-
-    try:
-        from rmf_service import rmf_service
-        rmf_service.restart_fleet_adapter()
-    except Exception as e:
-        print(f"[WARN] Failed to reload adapter on delete: {e}")
 
     await broadcast({
         "type": "fleet_adapters_updated",
@@ -125,17 +126,9 @@ async def set_fleet_adapter_graph(adapter_id: str, payload: Dict[str, Any]):
     if not adapter:
         return {"status": "error", "message": "Adapter not found"}
 
-    old_idx = adapter.get("graph_idx", 0)
     adapter["graph_idx"] = new_graph_idx
-    save_fleet_adapters_data(adapters)
-
-    # Real execution: reload fleet adapter process to apply the new graph configuration
-    try:
-        from rmf_service import rmf_service
-        rmf_service.restart_fleet_adapter()
-        log_msg = f"[INFO] [easy_full_control]: Fleet '{adapter.get('fleet_name')}' switched to Graph {new_graph_idx}. Adapter process reloaded successfully."
-    except Exception as e:
-        log_msg = f"[ERROR] Failed to reload adapter on set_graph: {e}"
+    await reload_fleet_adapter(lambda: save_fleet_adapters_data(adapters))
+    log_msg = f"[INFO] [easy_full_control]: Fleet '{adapter.get('fleet_name')}' switched to Graph {new_graph_idx}. Adapter process reloaded successfully."
     append_adapter_log(adapter_id, log_msg)
 
     broadcast_adapters = []
@@ -168,9 +161,12 @@ async def fleet_adapter_action(adapter_id: str, payload: Dict[str, Any]):
     fleet_name = adapter.get("fleet_name", "")
 
     if action == "restart":
+        from rmf_service import AdapterReloadBlocked, rmf_service
         try:
-            from rmf_service import rmf_service
             restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter)
+        except AdapterReloadBlocked as e:
+            append_adapter_log(adapter_id, f"[WARN] {e}")
+            return {"status": "error", "action": action, "message": str(e)}
         except Exception as e:
             print(f"[ERROR] Failed to restart fleet adapter process: {e}")
             restarted = False

@@ -8,7 +8,8 @@ import asyncio
 import subprocess
 import threading
 import math
-from typing import Dict, Any, List, Optional, Tuple
+from functools import wraps
+from typing import Callable, Dict, Any, List, Optional, Set, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -43,6 +44,23 @@ def task_matches(task: Dict[str, Any], identifier: str) -> bool:
         or task.get("id") == identifier
     )
 
+
+class AdapterReloadBlocked(RuntimeError):
+    pass
+
+
+def guard_task_submission(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self.reload_lock:
+            if self.adapter_reloading:
+                return {"status": "error", "message": "Fleet Adapter 正在重新載入，暫停接收任務，請稍後再試。"}
+            if self.adapter_reload_failed:
+                return {"status": "error", "message": "Fleet Adapter 尚未確認載入路網，請先成功重新載入後再派遣任務。"}
+            return method(self, *args, **kwargs)
+    return guarded
+
+
 class RMFService:
     """
     Manages Open-RMF core ROS 2 background nodes, MQTT Fleet Adapter process,
@@ -64,6 +82,9 @@ class RMFService:
         # request_id -> {"event": threading.Event, "responses": [payload, ...]} for Task API calls awaiting a reply
         self.pending_requests: Dict[str, Dict[str, Any]] = {}
         self.lock = threading.Lock()
+        self.reload_lock = threading.RLock()
+        self.adapter_reloading = False
+        self.adapter_reload_failed = False
 
     def start_background_processes(self):
         """Starts rmf_traffic_schedule, rmf_task_dispatcher, lifts and mqtt_fleet_adapter."""
@@ -157,13 +178,131 @@ class RMFService:
         except Exception as e:
             print(f"[RMF FA ERROR] Failed to start mqtt_fleet_adapter: {e}")
 
-    def restart_fleet_adapter(self) -> bool:
-        """Kills and restarts mqtt_fleet_adapter to reload updated nav graphs from disk."""
+    def restart_fleet_adapter(self, persist: Optional[Callable[[], None]] = None) -> bool:
+        """Reserve a task-free reload before changing any configuration on disk."""
+        with self.reload_lock:
+            if self.adapter_reloading:
+                raise AdapterReloadBlocked("Fleet Adapter 正在重新載入，請稍後再試。")
+            self.reconcile_interrupted_tasks()
+            pending = [t for t in state.current_tasks if t.get("status") not in state.TERMINAL_STATES]
+            if pending:
+                labels = ", ".join(
+                    f"{t.get('fleet_name', '?')}/{t.get('booking_id') or t.get('id')} [{t.get('status')}]"
+                    for t in pending[:5]
+                )
+                raise AdapterReloadBlocked(
+                    f"共用 Fleet Adapter 仍有 {len(pending)} 筆未結束任務：{labels}。"
+                    "請先等待任務完成，或取消任務並確認車輛停止後再套用；此次未變更設定。"
+                )
+            if not state.is_fa_state_fresh() or not state.fa_state.get("mqtt_connected"):
+                raise AdapterReloadBlocked("無法確認 Fleet Adapter 與車輛狀態，請恢復連線後再套用。")
+            robots = state.fa_state.get("robots")
+            if not isinstance(robots, dict):
+                raise AdapterReloadBlocked("Fleet Adapter 尚未回報重載安全狀態，請先更新 Adapter。")
+            expected_robots = self._configured_robot_keys(state.load_fleet_adapters_data())
+            expected_robots.intersection_update(
+                f"{r.get('fleet')}/{r.get('id')}" for r in state.current_robots.values()
+            )
+            if expected_robots - robots.keys():
+                raise AdapterReloadBlocked("部分車輛尚未回報重載安全狀態，請確認所有車隊的車輛連線後再套用。")
+            for key, robot in robots.items():
+                if not self._robot_confirmed_stopped(robot):
+                    raise AdapterReloadBlocked(f"車輛 {key} 尚未確認停止或已離線，無法安全重載共用 Fleet Adapter。")
+            # Also covers RMF tasks submitted outside this backend.
+            if any(r.get("task_id") for r in state.current_robots.values()):
+                raise AdapterReloadBlocked("仍有車輛回報執行中任務，請確認任務結束後再套用。")
+            self.adapter_reloading = True
+        try:
+            if persist is not None:
+                persist()
+            self.adapter_reload_failed = True
+            restarted = self._restart_fleet_adapter_process()
+            self.adapter_reload_failed = not restarted
+            return restarted
+        finally:
+            with self.reload_lock:
+                self.adapter_reloading = False
+
+    @staticmethod
+    def _configured_robot_keys(adapters: List[Dict[str, Any]]) -> Set[str]:
+        return {
+            f"{a.get('fleet_name')}/{r.get('name') if isinstance(r, dict) else r}"
+            for a in adapters
+            for r in a.get("robots", [])
+        }
+
+    @staticmethod
+    def _robot_confirmed_stopped(robot: Dict[str, Any]) -> bool:
+        heartbeat = robot.get("last_heartbeat", 0)
+        return (
+            robot.get("online") is True
+            and robot.get("status") in ("idle", "charging")
+            and robot.get("busy") is False
+            and 0 <= time.time() - heartbeat < state.FA_STATE_STALE_S
+        )
+
+    def reconcile_interrupted_tasks(self) -> None:
+        """A new adapter cannot recover old queues; only close them after a fresh stop confirmation."""
+        if not state.is_fa_state_fresh() or not state.fa_state.get("mqtt_connected"):
+            return
+        started_at = state.fa_state.get("started_at", 0)
+        robots = state.fa_state.get("robots")
+        if not started_at or not isinstance(robots, dict):
+            return
+        for task in state.current_tasks:
+            if task.get("status") in state.TERMINAL_STATES:
+                continue
+            if not self._task_predates_adapter(task):
+                continue
+            robot = robots.get(f"{task.get('fleet_name')}/{task.get('robot_id')}")
+            if not robot or robot.get("last_heartbeat", 0) < started_at or not self._robot_confirmed_stopped(robot):
+                if not task.get("interruption_pending"):
+                    append_adapter_log(
+                        task.get("fleet_name") or "system",
+                        f"[WARN] Task [{task.get('id')}] interrupted by adapter reload; awaiting robot stop confirmation.",
+                    )
+                task["interruption_pending"] = True
+                task["detail"] = "任務因 Fleet Adapter／路網重載而中斷，尚未確認車輛停止；請確認車輛連線並停止。"
+                continue
+            task["status"] = "failed"
+            task["error"] = task["detail"] = "任務因 Fleet Adapter／路網重載而中斷，車輛已確認停止；請依新路網重新派遣。"
+            task["interruption_reason"] = "adapter_reloaded"
+            task.pop("interruption_pending", None)
+            task.pop("cancel_requested", None)
+            append_adapter_log(task.get("fleet_name") or "system", f"[ERROR] Task [{task.get('id')}] {task['detail']}")
+
+    @staticmethod
+    def _task_predates_adapter(task: Dict[str, Any]) -> bool:
+        if task.get("interruption_pending") or task.get("interruption_reason"):
+            return True
+        if not state.is_fa_state_fresh():
+            return False
+        started_at = state.fa_state.get("started_at", 0)
+        submitted_at = task.get("submitted_at")
+        if submitted_at is None:
+            # Compatibility with tasks created before submission timestamps were recorded.
+            parts = str(task.get("request_id") or task.get("id") or "").split("_")
+            if len(parts) < 2 or parts[0] != "task" or not parts[1].isdigit():
+                return False
+            submitted_at = int(parts[1]) / 1000.0
+        return bool(started_at and submitted_at < started_at)
+
+    def _restart_fleet_adapter_process(self) -> bool:
+        """Restart only the owned process and wait for the new adapter's loaded-graph report."""
         env = os.environ.copy()
         try:
             print("[RMF FA] Restarting Open-RMF MQTT Fleet Adapter to reload nav graphs...")
-            subprocess.run(["pkill", "-9", "-f", "mqtt_fleet_adapter.py"], capture_output=True)
-            time.sleep(0.8)
+            requested_at = time.time()
+            if self.adapter_process is None:
+                append_adapter_log("system", "無法確認 Fleet Adapter 程序擁有權，拒絕重啟。")
+                return False
+            if self.adapter_process.poll() is None:
+                self.adapter_process.terminate()
+                try:
+                    self.adapter_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.adapter_process.kill()
+                    self.adapter_process.wait(timeout=5)
 
             adapter_script = os.path.abspath(
                 os.path.join(os.path.dirname(__file__), "../workspace/mqtt_fleet_adapter/mqtt_fleet_adapter.py")
@@ -174,18 +313,37 @@ class RMFService:
             if os.path.exists(adapter_script):
                 log_file = open("/tmp/adapter.log", "w")
                 self.adapter_process = subprocess.Popen(
-                    ["bash", "-c", f"source /ros_entrypoint.sh && python3 -u {adapter_script}"],
+                    ["bash", "-c", f"source /ros_entrypoint.sh && exec python3 -u {adapter_script}"],
                     stdout=log_file,
                     stderr=log_file,
                     env=env,
                 )
-                time.sleep(1.0)
-                if self.adapter_process.poll() is not None:
-                    append_adapter_log("system", "Fleet Adapter 啟動後立即退出，請檢查 /tmp/adapter.log。")
-                    return False
-                print("[RMF FA] ✅ Open-RMF MQTT Fleet Adapter restarted successfully.")
-                append_adapter_log("system", "Fleet Adapter 重啟完成，已重新載入最新路網。")
-                return True
+                deadline = time.monotonic() + 15.0
+                while time.monotonic() < deadline:
+                    if self.adapter_process.poll() is not None:
+                        append_adapter_log("system", "Fleet Adapter 啟動後立即退出，請檢查 /tmp/adapter.log。")
+                        return False
+                    adapters = state.load_fleet_adapters_data()
+                    reported_robots = state.fa_state.get("robots") or {}
+                    if (
+                        state.is_fa_state_fresh()
+                        and state.fa_state.get("started_at", 0) >= requested_at
+                        and state.fa_state.get("mqtt_connected")
+                        and all(state.adapter_diagnostics(a).get("status") == "ok" for a in adapters)
+                        and all(
+                            key in reported_robots
+                            and reported_robots[key].get("last_heartbeat", 0) >= requested_at
+                            and self._robot_confirmed_stopped(reported_robots[key])
+                            for key in self._configured_robot_keys(adapters)
+                        )
+                    ):
+                        print("[RMF FA] ✅ Open-RMF MQTT Fleet Adapter restarted successfully.")
+                        append_adapter_log("system", "Fleet Adapter 重啟完成，已確認載入最新路網。")
+                        return True
+                    time.sleep(0.1)
+                append_adapter_log("system", "Fleet Adapter 未在期限內確認載入新路網，請檢查 /tmp/adapter.log。")
+                return False
+            append_adapter_log("system", "找不到 Fleet Adapter 腳本，無法重新載入。")
         except Exception as e:
             print(f"[RMF FA ERROR] Failed to restart mqtt_fleet_adapter: {e}")
             append_adapter_log("system", f"Fleet Adapter 重啟失敗: {e}")
@@ -233,6 +391,8 @@ class RMFService:
                         print(f"[RMF Task API] Request [{req_id}] REJECTED: {err_str}")
                         for t in state.current_tasks:
                             if task_matches(t, req_id):
+                                if t.get("interruption_reason") or t.get("interruption_pending"):
+                                    break
                                 t["status"] = "failed"
                                 t["error"] = err_str
                                 t["detail"] = err_str
@@ -259,6 +419,8 @@ class RMFService:
                             mapped_status = status_map.get(rmf_status, "queued")
                             for t in state.current_tasks:
                                 if task_matches(t, req_id):
+                                    if t.get("interruption_reason") or self._task_predates_adapter(t):
+                                        break
                                     if booking_id:
                                         t["booking_id"] = booking_id
                                     # Terminal state protection: do not let non-terminal override terminal
@@ -332,6 +494,8 @@ class RMFService:
                     stat = status_map.get(ts.state, "active")
                     for t in state.current_tasks:
                         if task_matches(t, t_id):
+                            if t.get("interruption_reason") or self._task_predates_adapter(t):
+                                break
                             # Terminal state protection
                             if t.get("status") in state.TERMINAL_STATES and stat not in state.TERMINAL_STATES:
                                 break
@@ -399,6 +563,8 @@ class RMFService:
 
                     if target_task:
                         t = target_task
+                        if t.get("interruption_reason") or self._task_predates_adapter(t):
+                            return
                         if cmd_id is not None:
                             t["cmd_id"] = cmd_id
 
@@ -508,6 +674,7 @@ class RMFService:
                     data = json.loads(msg.data)
                     if isinstance(data, dict):
                         state.update_fa_state(data)
+                        self.reconcile_interrupted_tasks()
                 except Exception as e:
                     print(f"[RMF Bridge] Error updating fleet adapter state: {e}")
 
@@ -529,6 +696,7 @@ class RMFService:
 
     def fleet_callback(self, msg: Any):
         state.last_ros2_time = time.time()
+        self.reconcile_interrupted_tasks()
         fleet_name = msg.name
         for r in msg.robots:
             r_id = r.name
@@ -623,7 +791,7 @@ class RMFService:
             if matched_task:
                 t = matched_task
                 # Terminal state protection: never revert terminated task back to active
-                if t.get("status") not in state.TERMINAL_STATES:
+                if t.get("status") not in state.TERMINAL_STATES and not self._task_predates_adapter(t):
                     if t.get("status") != "waiting":
                         t["status"] = "active"
                     t["robot_id"] = r_id
@@ -785,7 +953,7 @@ class RMFService:
                 if prev_task_id and prev_task_id != r.task_id:
                     for t in state.current_tasks:
                         if task_matches(t, prev_task_id):
-                            if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested"):
+                            if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested") and not self._task_predates_adapter(t):
                                 t["status"] = "completed"
                                 t["progress"] = 100
                                 if t.get("total_steps") and t.get("total_steps") > 1:
@@ -806,7 +974,7 @@ class RMFService:
                 if r.mode.mode not in (5, 8):
                     for t in state.current_tasks:
                         if task_matches(t, prev_task_id):
-                            if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested"):
+                            if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested") and not self._task_predates_adapter(t):
                                 t["status"] = "completed"
                                 t["progress"] = 100
                                 if t.get("total_steps") and t.get("total_steps") > 1:
@@ -831,6 +999,7 @@ class RMFService:
                             t.get("robot_id") == r_id
                             and t.get("status") == "active"
                             and not t.get("cancel_requested")
+                            and not self._task_predates_adapter(t)
                             and t.get("progress", 0) >= 80
                         ):
                             t["status"] = "completed"
@@ -941,11 +1110,14 @@ class RMFService:
         The owning fleet adapter removes a queued task from the robot's queue, or stops the active one
         (RMF then sends 'stop' to the robot through the MQTT Fleet Adapter). Blocking; call from a worker thread.
         """
+        self.reconcile_interrupted_tasks()
         task = next((t for t in state.current_tasks if task_matches(t, identifier)), None)
         if task is not None:
             if task.get("status") in state.TERMINAL_STATES:
                 return {"status": "error", "task_id": identifier,
-                        "message": f"任務已結束 ({task.get('status')})，無法取消。"}
+                        "message": task.get("detail") if task.get("interruption_reason") else f"任務已結束 ({task.get('status')})，無法取消。"}
+            if task.get("interruption_pending"):
+                return {"status": "error", "task_id": identifier, "message": task["detail"]}
             if task.get("type") == "multi_step":
                 # The robot confirms the cancel (task_status 'canceled') once the running step has stopped.
                 task["cancel_requested"] = True
@@ -1184,6 +1356,7 @@ class RMFService:
             phases.append({"activity": {"category": "sequence", "description": {"activities": [activity]}}})
         return phases, places, None
 
+    @guard_task_submission
     def dispatch_compose_task(
         self,
         steps: List[Dict[str, Any]],
@@ -1248,6 +1421,7 @@ class RMFService:
             "current_step": 0,
             "steps": steps,
             "created_at": time.strftime("%H:%M:%S"),
+            "submitted_at": time.time(),
             "detail": f"步驟 1/{len(steps)} ({first_desc}) 等待排程...",
         }
         state.current_tasks.insert(0, new_task)
@@ -1269,6 +1443,7 @@ class RMFService:
             "message": f"多步任務 [{req_id}] 已提交至 Open-RMF 調度器（compose）！",
         }
 
+    @guard_task_submission
     def dispatch_task(
         self,
         task_type: str,
@@ -1450,6 +1625,7 @@ class RMFService:
             "status": "queued",
             "progress": 0,
             "created_at": time.strftime("%H:%M:%S"),
+            "submitted_at": time.time(),
         }
         state.current_tasks.insert(0, new_task)
 
@@ -1471,6 +1647,7 @@ class RMFService:
             "message": f"任務 [{req_id}] 已成功提交至 Open-RMF 調度器！",
         }
 
+    @guard_task_submission
     def dispatch_multi_step_task(
         self,
         robot_id: str,
@@ -1535,6 +1712,7 @@ class RMFService:
             "auto_proceed": auto_proceed,
             "step_delay": step_delay,
             "created_at": time.strftime("%H:%M:%S"),
+            "submitted_at": time.time(),
             "detail": f"共 {len(steps)} 個步驟下派中",
         }
         state.current_tasks.insert(0, new_task)
@@ -1562,6 +1740,7 @@ class RMFService:
             "message": f"多步任務 [{req_id}] 已下派至車輛 {robot_id}！",
         }
 
+    @guard_task_submission
     def proceed_task(self, robot_id: str, fleet_name: Optional[str] = None, cmd_id: Optional[int] = None) -> Dict[str, Any]:
         """Dispatches 'proceed' action to release the next step for a waiting multi-step task."""
         target_fleet = fleet_name or state.find_robot_fleet(robot_id) or "fleet1"

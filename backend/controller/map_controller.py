@@ -11,6 +11,7 @@ from PIL import Image
 
 import nav_graph_builder
 import state
+from controller.adapter_controller import reload_fleet_adapter
 from state import (
     MapSaveRequest,
     UPLOAD_DIR,
@@ -103,38 +104,35 @@ async def save_map(req: MapSaveRequest):
         "lifts": built["lifts"],
     }
 
-    # 1. Save JSON
-    with open(ACTIVE_MAP_FILE, "w", encoding="utf-8") as f:
-        json.dump(map_data, f, indent=2, ensure_ascii=False)
+    def persist_map():
+        with open(ACTIVE_MAP_FILE, "w", encoding="utf-8") as f:
+            json.dump(map_data, f, indent=2, ensure_ascii=False)
 
-    # 2. Save Open-RMF Building Map YAML (.building.yaml), one entry per level
-    with open(ACTIVE_YAML_FILE, "w", encoding="utf-8") as f:
-        yaml.dump(built["building"], f, allow_unicode=True, sort_keys=False)
+        with open(ACTIVE_YAML_FILE, "w", encoding="utf-8") as f:
+            yaml.dump(built["building"], f, allow_unicode=True, sort_keys=False)
 
-    # 3. Save Open-RMF Nav Graphs for all graph indices (nav_graphs/{g_idx}.yaml)
-    saved_graph_files = []
-    for g_idx, g_data in built["nav_graphs"].items():
-        g_file = os.path.join(NAV_GRAPHS_DIR, f"{g_idx}.yaml")
-        with open(g_file, "w", encoding="utf-8") as f:
-            yaml.dump(g_data, f, allow_unicode=True, sort_keys=False)
-        saved_graph_files.append(g_file)
+        for g_idx, g_data in built["nav_graphs"].items():
+            g_file = os.path.join(NAV_GRAPHS_DIR, f"{g_idx}.yaml")
+            with open(g_file, "w", encoding="utf-8") as f:
+                yaml.dump(g_data, f, allow_unicode=True, sort_keys=False)
 
     restart_error = None
     if getattr(req, "restart_adapter", False):
         try:
-            from rmf_service import rmf_service
-            if not await asyncio.to_thread(rmf_service.restart_fleet_adapter):
-                restart_error = "Fleet Adapter 重新載入失敗，路網已儲存但尚未確認生效"
-        except Exception as e:
-            print(f"[Map Save] Note: Fleet adapter reload: {e}")
-            restart_error = "Fleet Adapter 重新載入失敗，路網已儲存但尚未確認生效"
+            await reload_fleet_adapter(persist_map)
+        except HTTPException as e:
+            if e.status_code != 503:
+                raise
+            restart_error = e.detail
+    else:
+        persist_map()
 
     await broadcast({
         "type": "map_updated",
         "map": map_data
     })
 
-    if getattr(req, "restart_adapter", False):
+    if getattr(req, "restart_adapter", False) and not restart_error:
         message = f"已將最新路網套用至各車隊 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)"
     else:
         message = f"路網已成功儲存 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)"
@@ -150,7 +148,7 @@ async def save_map(req: MapSaveRequest):
         message += f"；{restart_error}"
 
     return {
-        "status": "success",
+        "status": "error" if restart_error else "success",
         "message": message,
         "adapter_restart_required": stale_fleets,
         "adapter_restart_error": restart_error,
