@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 import numpy as np
@@ -25,6 +26,7 @@ try:
     from rclpy.parameter import Parameter
     from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
     from std_msgs.msg import String
+    from rmf_task_msgs.msg import ApiRequest, ApiResponse
     import rmf_adapter
     from rmf_adapter import Adapter
     import rmf_adapter.easy_full_control as rmf_easy
@@ -43,6 +45,9 @@ def find_backend_path(subpath: str) -> str:
     ]
     for c in candidates:
         if os.path.exists(c):
+            return c
+    for c in candidates:
+        if os.path.isdir(os.path.dirname(c)):
             return c
     return candidates[0]
 
@@ -197,6 +202,12 @@ class ManagedRobot:
         # cmd_id -> backend task info, kept until the robot reports a terminal state so that a
         # task superseded by RMF still reports its final state to the backend.
         self.task_refs: Dict[Any, Dict[str, Any]] = {}
+        self.session_id: Optional[str] = None
+        self.session_reset_pending = False
+        self.session_reset_error: Optional[str] = None
+        self.session_ready = threading.Event()
+        self.session_reset_lock = threading.Lock()
+        self.session_cleanup_at = 0.0
 
 
 def validate_task_steps(steps: Any) -> Tuple[bool, str, List[Dict[str, Any]]]:
@@ -301,6 +312,21 @@ class MqttFleetAdapter:
         # "{fleet}_{robot}" -> messages about configured charger/parking waypoints missing from the graph
         self.waypoint_warnings: Dict[str, List[str]] = {}
         self.started_at = time.time()
+        self.session_api_requests: Dict[str, Dict[str, Any]] = {}
+        self.sessions_path = find_backend_path("saved_maps/robot_sessions.json")
+        self.robot_sessions: Dict[str, Dict[str, Any]] = {}
+        if os.path.exists(self.sessions_path):
+            with open(self.sessions_path, encoding="utf-8") as f:
+                self.robot_sessions = json.load(f)
+            if not isinstance(self.robot_sessions, dict) or any(
+                not isinstance(record, dict)
+                or not isinstance(record.get("session_id"), str)
+                or not record["session_id"]
+                or not isinstance(record.get("retired_ids", []), list)
+                or any(not isinstance(value, str) for value in record.get("retired_ids", []))
+                for record in self.robot_sessions.values()
+            ):
+                raise ValueError("Invalid robot_sessions.json; refusing to discard session history")
 
         estop_file = find_backend_path("saved_maps/estopped_robots.json")
         if os.path.exists(estop_file):
@@ -378,6 +404,15 @@ class MqttFleetAdapter:
         target_fleet = fleet_name or self.fleet_name
         return self.robots.get((target_fleet, robot_id))
 
+    def _publish_command(self, robot: ManagedRobot, payload: Dict[str, Any]):
+        if robot.session_reset_pending and payload.get("action") != "stop":
+            print(f"[SESSION WARN] Command blocked during reset for '{robot.fleet_name}/{robot.name}'")
+            return
+        if robot.session_id:
+            payload = dict(payload, session_id=robot.session_id)
+        topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
+        self.mqtt_client.publish(topic, json.dumps(payload), qos=1)
+
     def _fleet_velocity_limits(
         self, fleet_config: Dict[str, Any], linear: float, angular: float
     ) -> Tuple[float, float]:
@@ -412,7 +447,24 @@ class MqttFleetAdapter:
             return
         try:
             more = robot.update_handle.more()
-            if not robot.is_online:
+            if more is None:
+                return
+            if robot.session_reset_pending:
+                commission = more.commission()
+                commission.accept_dispatched_tasks = False
+                commission.accept_direct_tasks = False
+                commission.perform_idle_behavior = False
+                more.set_commission(commission)
+                more.override_status("error" if robot.session_reset_error else None)
+            elif robot.session_id:
+                available = robot.is_online and not robot.is_estopped and not robot.is_paused
+                commission = more.commission()
+                commission.accept_dispatched_tasks = available
+                commission.accept_direct_tasks = available
+                commission.perform_idle_behavior = not robot.is_estopped and not robot.is_paused
+                more.set_commission(commission)
+                more.override_status("offline" if not robot.is_online else "error" if robot.is_estopped else None)
+            elif not robot.is_online:
                 more.override_status("offline")
                 more.unstable_decommission()
             elif robot.is_estopped:
@@ -430,6 +482,9 @@ class MqttFleetAdapter:
 
     def _defer_command(self, robot: ManagedRobot, execution: Any, cmd_payload: Dict[str, Any], err_msg: str):
         """Hold an RMF command for an offline/e-stopped robot instead of rejecting/replanning (avoids replan loops)."""
+        if robot.session_reset_pending:
+            print(f"[SESSION] Discarded old-session command for '{robot.name}' during reset")
+            return
         print(f"[RMF -> AMR WARN] {err_msg} Deferring until robot is back online and not e-stopped.")
         robot.is_holding = False
         robot.cmd_id += 1  # invalidate late results from earlier commands
@@ -453,6 +508,7 @@ class MqttFleetAdapter:
         payload = robot.last_cmd_payload
         if (
             robot.current_execution is None
+            or robot.session_reset_pending
             or payload is None
             or robot.deferred_cmd_payload is not None
             or robot.is_retrying
@@ -465,12 +521,12 @@ class MqttFleetAdapter:
             return
         robot.last_dispatch_time = now
         cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
-        self.mqtt_client.publish(cmd_topic, json.dumps(dict(payload, timestamp=now)), qos=1)
+        self._publish_command(robot, dict(payload, timestamp=now))
         print(f"[RMF -> AMR] Robot '{robot.name}' does not report cmd_id {robot.cmd_id} (reports {reported_cmd_id}); resent {payload.get('action')} via {cmd_topic}")
 
     def _dispatch_deferred_command(self, robot: ManagedRobot):
         payload = robot.deferred_cmd_payload
-        if payload is None or robot.is_estopped or not robot.is_online:
+        if payload is None or robot.is_estopped or not robot.is_online or robot.session_reset_pending:
             return
         robot.deferred_cmd_payload = None
         execution = robot.current_execution
@@ -496,9 +552,193 @@ class MqttFleetAdapter:
         robot.last_cmd_payload = payload
         robot.last_dispatch_time = time.time()
         cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
-        self.mqtt_client.publish(cmd_topic, json.dumps(payload), qos=1)
+        self._publish_command(robot, payload)
         print(f"[RMF -> AMR] Dispatched deferred {payload.get('action')} (cmd_id: {robot.cmd_id}) to '{robot.name}' via {cmd_topic}")
 
+    def _save_robot_sessions(self):
+        os.makedirs(os.path.dirname(self.sessions_path), exist_ok=True)
+        tmp_path = f"{self.sessions_path}.{os.getpid()}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(self.robot_sessions, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self.sessions_path)
+
+    def _session_matches(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]) -> bool:
+        robot = self._get_robot(fleet_name, robot_id)
+        record = getattr(self, "robot_sessions", {}).get(f"{fleet_name}/{robot_id}", {})
+        expected = robot.session_id if robot else record.get("session_id")
+        if expected and payload.get("session_id") != expected:
+            print(f"[SESSION WARN] Ignoring missing/stale session_id from '{fleet_name}/{robot_id}'")
+            return False
+        return True
+
+    def _on_session_api_response(self, msg):
+        try:
+            response = json.loads(msg.json_msg)
+        except (TypeError, ValueError) as e:
+            print(f"[SESSION ERROR] Invalid RMF response: {e}")
+            return
+        with self.lock:
+            pending = self.session_api_requests.get(msg.request_id)
+            if pending is not None:
+                pending["response"] = response
+                pending["event"].set()
+
+    def _call_session_api(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        request_id = f"session_{uuid.uuid4().hex}"
+        pending = {"event": threading.Event()}
+        with self.lock:
+            self.session_api_requests[request_id] = pending
+        try:
+            msg = ApiRequest()
+            msg.request_id = request_id
+            msg.json_msg = json.dumps(payload)
+            self.session_api_pub.publish(msg)
+            if not pending["event"].wait(10.0):
+                raise RuntimeError(f"RMF did not confirm {payload['type']}")
+            response = pending["response"]
+            if payload["type"] == "robot_commission_request":
+                confirmed = all(
+                    response.get(key, {}).get("success") is True
+                    for key in ("commission", "pending_dispatch_tasks_policy", "pending_direct_tasks_policy")
+                )
+            else:
+                confirmed = response.get("success") is True
+            if not confirmed:
+                raise RuntimeError(f"RMF rejected session cleanup: {response}")
+            return response
+        finally:
+            with self.lock:
+                self.session_api_requests.pop(request_id, None)
+
+    def _reset_session(self, robot: ManagedRobot, session_id: str, reset_tasks: bool, started_at: float):
+        with robot.session_reset_lock:
+            if self.running and robot.session_id == session_id:
+                self._reset_session_locked(robot, session_id, reset_tasks, started_at)
+
+    def _reset_session_locked(self, robot: ManagedRobot, session_id: str, reset_tasks: bool, started_at: float):
+        """Drain old work while fenced, then restore idle behavior from a fresh localized heartbeat."""
+        def current():
+            return self.running and robot.session_id == session_id
+
+        commission_request = {
+            "type": "robot_commission_request",
+            "fleet": robot.fleet_name,
+            "robot": robot.name,
+            "commission": {"dispatch_tasks": False, "direct_tasks": False, "idle_behavior": False},
+            "pending_dispatch_tasks_policy": "cancel",
+            "pending_direct_tasks_policy": "cancel",
+        }
+        try:
+            if not self.mock_rmf:
+                deadline = time.monotonic() + 10.0
+                while robot.update_handle.more() is None and current():
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("RMF robot handle did not become ready")
+                    time.sleep(0.05)
+                if not current():
+                    return
+                # Commissioning cancels idle behavior and drains both RMF queues without reassigning them.
+                self._call_session_api(commission_request)
+                if not current():
+                    return
+                task_id = robot.update_handle.more().current_task_id()
+                if task_id and not task_id.startswith("wait."):
+                    self._call_session_api({
+                        "type": "kill_task_request", "task_id": task_id,
+                        "labels": ["Vehicle started a new session"],
+                    })
+                # A second request is a worker-queue barrier: cancellation completion callbacks run
+                # before we restore commissioning, so the old wait cannot suppress the new wait.
+                self._call_session_api(commission_request)
+            if not current():
+                return
+            if reset_tasks:
+                with self.lock:
+                    if not current():
+                        return
+                    robot.session_cleanup_at = started_at
+                    self.robot_sessions[f"{robot.fleet_name}/{robot.name}"]["cleanup_at"] = started_at
+                    self._save_robot_sessions()
+                self._publish_fa_state()
+            while current():
+                if robot.session_ready.wait(0.5):
+                    break
+            with self.lock:
+                if not current():
+                    return
+                if (
+                    not robot.is_online or not robot.heartbeat_received or not robot.session_ready.is_set()
+                    or time.time() - robot.last_heartbeat > 10.0
+                ):
+                    raise RuntimeError("Localization became unavailable during session reset; register again")
+                if not self.mock_rmf:
+                    robot.update_handle.update(
+                        rmf_easy.RobotState(robot.map_name, robot.position, robot.battery_soc), None
+                    )
+                    robot.update_handle.more().enable_responsive_wait(
+                        bool(self.config_yaml.get("rmf_fleet", {}).get("responsive_wait", True))
+                    )
+                record = self.robot_sessions[f"{robot.fleet_name}/{robot.name}"]
+                record["reset_pending"] = False
+                self._save_robot_sessions()
+                robot.session_reset_pending = False
+                robot.session_reset_error = None
+                self._sync_rmf_availability(robot)
+            print(f"[SESSION] '{robot.fleet_name}/{robot.name}' ready in session {session_id}")
+        except Exception as e:
+            with self.lock:
+                if robot.session_id != session_id:
+                    return
+                robot.session_reset_pending = True
+                robot.session_reset_error = str(e)
+                self._sync_rmf_availability(robot)
+            print(f"[SESSION ERROR] '{robot.fleet_name}/{robot.name}' remains blocked: {e}")
+        self._publish_fa_state()
+
+    def _start_session_reset(self, robot: ManagedRobot, reset_tasks: bool, started_at: float):
+        robot.session_reset_pending = True
+        robot.session_reset_error = None
+        robot.session_ready.clear()
+        self._detach_active_task_locked(robot, "vehicle started a new session")
+        robot.task_refs.clear()
+        robot.cmd_id += 1
+        robot.current_execution = None
+        robot.deferred_cmd_payload = None
+        robot.last_cmd_payload = None
+        robot.target_position = None
+        robot.stop_cmd_id = None
+        robot.is_holding = False
+        robot.is_retrying = False
+        robot.nav_retries = 0
+        robot.pending_suspend_lift = None
+        robot.nav_suspended = False
+        robot.lift_entry_pose = None
+        self._sync_rmf_availability(robot)
+        threading.Thread(
+            target=self._reset_session,
+            args=(robot, robot.session_id, reset_tasks, started_at),
+            daemon=True,
+        ).start()
+
+
+    def _enable_legacy_responsive_wait(self, robot: ManagedRobot):
+        deadline = time.monotonic() + 10.0
+        while self.running and not robot.session_id:
+            more = robot.update_handle.more()
+            if more is not None:
+                with self.lock:
+                    if not robot.session_id:
+                        more.enable_responsive_wait(
+                            bool(self.config_yaml.get("rmf_fleet", {}).get("responsive_wait", True))
+                        )
+                return
+            if time.monotonic() >= deadline:
+                print(f"[RMF ERROR] Cannot enable responsive wait for '{robot.fleet_name}/{robot.name}': "
+                      "robot handle did not become ready")
+                return
+            time.sleep(0.05)
 
     @staticmethod
     def _point_to_segment_distance(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
@@ -622,6 +862,14 @@ class MqttFleetAdapter:
             rmf_adapter.init_rclcpp()
 
             self.node = rclpy.node.Node("rmf_mqtt_command_handle")
+            task_qos = QoSProfile(
+                depth=10, reliability=QoSReliabilityPolicy.RELIABLE,
+                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self.session_api_pub = self.node.create_publisher(ApiRequest, "/task_api_requests", task_qos)
+            self.session_api_sub = self.node.create_subscription(
+                ApiResponse, "/task_api_responses", self._on_session_api_response, task_qos
+            )
             self.discovered_pub = self.node.create_publisher(String, "/rmf/discovered_robots", 10)
             # Latched so a (re)started backend immediately learns paused fleets and MQTT link state.
             fa_state_qos = QoSProfile(
@@ -720,6 +968,8 @@ class MqttFleetAdapter:
                     cfg = rmf_easy.FleetConfiguration.from_config_files(fleet_cfg_path, nav_path)
                     if cfg:
                         cfg.fleet_name = f_name
+                        # New robots must not start idle navigation before their session is localized.
+                        cfg.default_responsive_wait = False
                         cfg.default_max_merge_waypoint_distance = OFF_GRAPH_THRESHOLD_M
                         cfg.default_max_merge_lane_distance = OFF_GRAPH_THRESHOLD_M
                         handle = self.adapter.add_easy_fleet(cfg)
@@ -734,6 +984,7 @@ class MqttFleetAdapter:
                 self.configured_fleets = set(self.fleet_handles.keys())
             else:
                 self.fleet_config = rmf_easy.FleetConfiguration.from_config_files(self.config_path, self.nav_graph_path)
+                self.fleet_config.default_responsive_wait = False
                 self.fleet_handle = self.adapter.add_easy_fleet(self.fleet_config)
                 self.fleet_handles[self.fleet_name] = self.fleet_handle
                 self.configured_fleets = {self.fleet_name}
@@ -957,13 +1208,13 @@ class MqttFleetAdapter:
         robot.cmd_id += 1  # late results of the interrupted command must not match
         robot.stop_cmd_id = robot.cmd_id
         cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
-        self.mqtt_client.publish(cmd_topic, json.dumps({
+        self._publish_command(robot, {
             "robot_id": robot.name,
             "cmd_id": robot.cmd_id,
             "action": "stop",
             "reason": "Emergency stop by operator",
             "timestamp": time.time(),
-        }), qos=1)
+        })
         print(f"[ROBOT CONTROL] EMERGENCY STOP (cmd_id: {robot.cmd_id}) sent to '{robot.name}' via {cmd_topic}")
         if robot.update_handle:
             try:
@@ -1071,11 +1322,16 @@ class MqttFleetAdapter:
                         "status": r.status,
                         "last_heartbeat": r.last_heartbeat if r.heartbeat_received else 0,
                         "busy": (
-                            r.current_execution is not None
+                            r.session_reset_pending
+                            or r.current_execution is not None
                             or r.active_task is not None
                             or r.deferred_cmd_payload is not None
                             or r.nav_suspended
                         ),
+                        "session_id": r.session_id,
+                        "session_reset_pending": r.session_reset_pending,
+                        "session_reset_error": r.session_reset_error,
+                        "session_cleanup_at": r.session_cleanup_at,
                     }
                     for r in list(self.robots.values())
                 },
@@ -1250,7 +1506,36 @@ class MqttFleetAdapter:
     def _handle_register(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         print(f"[REGISTER] Received registration request for robot '{robot_id}' in fleet '{fleet_name}': {payload}")
 
+        session_id = payload.get("session_id")
+        session_key = f"{fleet_name}/{robot_id}"
+        previous = self.robot_sessions.get(session_key, {})
+        if session_id is not None and (
+            not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 128
+        ):
+            self._send_register_ack(
+                robot_id, False, "session_id must be a non-empty string of at most 128 characters",
+                fleet_name=fleet_name,
+            )
+            return
+        if (previous and not session_id) or (session_id and session_id in previous.get("retired_ids", [])):
+            self._send_register_ack(
+                robot_id, False, "Missing or retired session_id; registration rejected",
+                fleet_name=fleet_name, session_id=session_id,
+            )
+            return
         loc = payload.get("initial_location", {})
+        if session_id and (
+            not isinstance(loc, dict)
+            or not all(
+                isinstance(loc.get(k), (int, float)) and not isinstance(loc[k], bool)
+                and math.isfinite(loc[k]) for k in ("x", "y", "yaw")
+            )
+        ):
+            self._send_register_ack(
+                robot_id, False, "Session registration requires finite initial_location x, y, yaw",
+                fleet_name=fleet_name, session_id=session_id,
+            )
+            return
         x = float(loc.get("x", 0.0))
         y = float(loc.get("y", 0.0))
         yaw = float(loc.get("yaw", 0.0))
@@ -1313,6 +1598,40 @@ class MqttFleetAdapter:
             # Check if robot already exists with a valid handle in the SAME fleet (reuse existing handle on re-register)
             robot_key = (fleet_name, robot_id)
             existing_robot = self.robots.get(robot_key)
+            same_session = bool(session_id and existing_robot and existing_robot.session_id == session_id)
+            needs_reset = bool(
+                session_id and (not same_session or existing_robot.session_reset_error)
+            )
+            reset_tasks = bool(
+                existing_robot or (previous and previous.get("session_id") != session_id)
+                or previous.get("reset_tasks", False) and previous.get("reset_pending", False)
+            )
+            if needs_reset:
+                retired = list(previous.get("retired_ids", []))
+                if previous.get("session_id") and previous["session_id"] != session_id:
+                    retired.append(previous["session_id"])
+                self.robot_sessions[session_key] = {
+                    "session_id": session_id, "retired_ids": retired,
+                    "reset_pending": True, "reset_tasks": reset_tasks,
+                    "cleanup_at": previous.get("cleanup_at", 0),
+                    "started_at": now,
+                }
+                try:
+                    self._save_robot_sessions()
+                except OSError as e:
+                    if previous:
+                        self.robot_sessions[session_key] = previous
+                    else:
+                        self.robot_sessions.pop(session_key, None)
+                    self._send_register_ack(
+                        robot_id, False, f"Cannot persist session: {e}",
+                        fleet_name=fleet_name, session_id=session_id,
+                    )
+                    print(f"[SESSION ERROR] Registration rejected: {e}")
+                    return
+            elif not session_id:
+                print(f"[SESSION WARN] '{session_key}' uses legacy registration without session_id; "
+                      "new-session detection is unavailable")
 
             if existing_robot and (self.mock_rmf or existing_robot.update_handle is not None):
                 print(f"[REGISTER] Robot '{robot_id}' ({fleet_name}) re-registered. Reusing existing update_handle and updating position to ({x:.3f}, {y:.3f}, {yaw:.3f}).")
@@ -1328,11 +1647,14 @@ class MqttFleetAdapter:
                 existing_robot.heartbeat_received = False
                 existing_robot.is_paused = fleet_name in self.paused_fleets
                 existing_robot.is_estopped = f"{fleet_name}/{robot_id}" in self.estopped_robots
+                if needs_reset:
+                    existing_robot.session_id = session_id
+                    self._start_session_reset(existing_robot, reset_tasks, now)
                 self._sync_rmf_availability(existing_robot)
 
                 # Fresh registration signifies a new session/boot: abort any stale execution from prior session.
                 # A deferred command was never sent to the robot, so it is not stale: dispatch it below.
-                if existing_robot.current_execution and existing_robot.deferred_cmd_payload is None:
+                if not session_id and existing_robot.current_execution and existing_robot.deferred_cmd_payload is None:
                     print(f"[REGISTER WARN] Aborting stale execution for '{robot_id}' from prior session (cmd_id: {existing_robot.cmd_id}).")
                     existing_robot.current_execution = None
                     existing_robot.target_position = None
@@ -1341,12 +1663,14 @@ class MqttFleetAdapter:
                     existing_robot.is_retrying = False
                     existing_robot.stop_cmd_id = None
 
-                existing_robot.status = "idle"
+                if not same_session:
+                    existing_robot.status = "idle"
 
                 if not self.mock_rmf and existing_robot.update_handle:
                     try:
                         rmf_state = rmf_easy.RobotState(level_name, initial_pos, existing_robot.battery_soc)
-                        existing_robot.update_handle.update(rmf_state, None)
+                        activity = existing_robot.current_execution.identifier if existing_robot.current_execution else None
+                        existing_robot.update_handle.update(rmf_state, activity)
                     except Exception as e:
                         print(f"[WARN] Failed to update RMF state on re-register for '{robot_id}': {e}")
 
@@ -1446,6 +1770,8 @@ class MqttFleetAdapter:
                 charger_waypoint=default_charger,
             )
             managed_robot.is_off_graph = is_off_graph
+            managed_robot.session_id = session_id
+            managed_robot.session_cleanup_at = previous.get("cleanup_at", 0)
             managed_robot.off_graph_distance = round(dist_to_graph, 2)
             if is_off_graph:
                 print(f"[OFF-GRAPH WARN] ⚠️ 車輛 '{robot_id}' 距離路網 {dist_to_graph:.2f}m > {OFF_GRAPH_THRESHOLD_M}m，標記為偏離路網，禁止競標與操控！")
@@ -1454,13 +1780,20 @@ class MqttFleetAdapter:
             # Restore fleet pause / persisted operator e-stop for a newly added robot
             managed_robot.is_paused = fleet_name in self.paused_fleets
             managed_robot.is_estopped = f"{fleet_name}/{robot_id}" in self.estopped_robots
+            if needs_reset:
+                self._start_session_reset(managed_robot, reset_tasks, now)
+            elif not self.mock_rmf and update_handle:
+                threading.Thread(
+                    target=self._enable_legacy_responsive_wait, args=(managed_robot,), daemon=True
+                ).start()
             if managed_robot.is_paused or managed_robot.is_estopped:
                 self._sync_rmf_availability(managed_robot)
 
         # Send ACK back to AMR
         self._send_register_ack(robot_id, success=True, msg="Registered successfully", fleet_name=fleet_name)
 
-    def _send_register_ack(self, robot_id: str, success: bool, msg: str, status: Optional[str] = None, fleet_name: Optional[str] = None):
+    def _send_register_ack(self, robot_id: str, success: bool, msg: str, status: Optional[str] = None,
+                           fleet_name: Optional[str] = None, session_id: Optional[str] = None):
         target_fleet = fleet_name or self.fleet_name
         ack_topic = f"{self.topic_prefix}/{target_fleet}/robot/{robot_id}/register_ack"
         final_status = status if status else ("success" if success else "error")
@@ -1471,6 +1804,9 @@ class MqttFleetAdapter:
             "assigned_fleet": target_fleet,
             "server_time": time.time(),
         }
+        session_id = session_id or self.robot_sessions.get(f"{target_fleet}/{robot_id}", {}).get("session_id")
+        if session_id:
+            ack_payload["session_id"] = session_id
         self.mqtt_client.publish(ack_topic, json.dumps(ack_payload), qos=1)
         print(f"[REGISTER] Sent ACK to '{robot_id}' on {ack_topic}: {ack_payload}")
 
@@ -1479,6 +1815,20 @@ class MqttFleetAdapter:
     # ==========================================================================
     def _handle_heartbeat(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
         robot_id = payload.get("robot_id") or robot_id
+        if not self._session_matches(robot_id, fleet_name, payload):
+            self._send_register_ack(
+                robot_id, False, "Session not registered; please register", status="require_register",
+                fleet_name=fleet_name, session_id=payload.get("session_id"),
+            )
+            return
+        robot_entry = self._get_robot(fleet_name, robot_id)
+        if robot_entry and robot_entry.session_id and not all(
+            isinstance(payload.get(k), (int, float)) and not isinstance(payload[k], bool)
+            and math.isfinite(payload[k]) for k in ("x", "y", "yaw")
+        ):
+            robot_entry.session_ready.clear()
+            print(f"[SESSION WARN] Invalid localized heartbeat from '{fleet_name}/{robot_id}'")
+            return
 
         # Update discovered_robots record
         robot_key = f"{fleet_name}_{robot_id}"
@@ -1539,7 +1889,11 @@ class MqttFleetAdapter:
             if not robot or (not self.mock_rmf and robot.update_handle is None):
                 # Robot sent heartbeat without registering first (e.g. FA late startup or restart)
                 print(f"[WARN] Heartbeat from robot '{robot_id}' without active RMF handle ({fleet_name}). Requesting registration...")
-                self._send_register_ack(robot_id, success=False, msg="Robot not registered in RMF, please register", status="require_register", fleet_name=fleet_name)
+                self._send_register_ack(
+                    robot_id, success=False, msg="Robot not registered in RMF, please register",
+                    status="require_register", fleet_name=fleet_name,
+                    **({"session_id": payload["session_id"]} if payload.get("session_id") else {}),
+                )
                 return
 
             # Update telemetry (preserve frozen pose/map while navigation is suspended inside a lift)
@@ -1596,11 +1950,23 @@ class MqttFleetAdapter:
                     robot.update_handle.update(rmf_state, activity_id)
                 except Exception as e:
                     print(f"[ERROR] rmf update error for '{robot_id}': {e}")
+                    return
+            if robot.session_reset_pending:
+                robot.session_ready.clear()
+            if (
+                robot.session_reset_pending and payload.get("localization_ready") is True
+                and not is_off_graph and level_name in self.fleet_waypoint_info.get(fleet_name, {}).get("levels", {})
+                and status in ("idle", "charging") and "current_cmd_id" in payload
+                and payload["current_cmd_id"] is None
+            ):
+                robot.session_ready.set()
 
     # ==========================================================================
     # Handler 3: Deregister & Status (正常離線與異常斷線 LWT)
     # ==========================================================================
     def _handle_deregister(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
+        if not self._session_matches(robot_id, fleet_name, payload):
+            return
         print(f"[DEREGISTER] Robot '{robot_id}' in '{fleet_name}' requested deregistration: {payload}")
         robot_key = f"{fleet_name}_{robot_id}"
         with self.lock:
@@ -1612,6 +1978,7 @@ class MqttFleetAdapter:
             robot = self._get_robot(fleet_name, robot_id)
             if robot:
                 robot.is_online = False
+                robot.session_ready.clear()
                 robot.status = "offline"
                 robot.pending_suspend_lift = None
                 robot.nav_suspended = False
@@ -1644,6 +2011,8 @@ class MqttFleetAdapter:
                 print(f"[DEREGISTER WARN] Cannot deregister '{robot_id}': robot not found in fleet '{fleet_name}'. Ignoring.")
 
     def _handle_status(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
+        if not self._session_matches(robot_id, fleet_name, payload):
+            return
         status = payload.get("status", "unknown")
         print(f"[STATUS/LWT] Robot '{robot_id}' ({fleet_name}) reported status: {status}")
         robot_key = f"{fleet_name}_{robot_id}"
@@ -1659,6 +2028,7 @@ class MqttFleetAdapter:
                     if not robot.is_online and robot.status == "offline":
                         return
                     robot.is_online = False
+                    robot.session_ready.clear()
                     robot.status = "offline"
                     self._sync_rmf_availability(robot)
                     print(f"[ALERT] Robot '{robot_id}' marked OFFLINE due to status message.")
@@ -1666,6 +2036,8 @@ class MqttFleetAdapter:
                     print(f"[STATUS WARN] Cannot update status for '{robot_id}': robot not found in fleet '{fleet_name}'. Ignoring.")
 
     def _handle_command_result(self, robot_id: str, fleet_name: str, payload: Dict[str, Any]):
+        if not self._session_matches(robot_id, fleet_name, payload):
+            return
         cmd_id = payload.get("cmd_id")
         status = payload.get("status")
         print(f"[CMD_RESULT] Robot '{robot_id}' ({fleet_name}) reported cmd_id {cmd_id} status: {status}")
@@ -1765,7 +2137,7 @@ class MqttFleetAdapter:
                                     payload_to_send = dict(robot.last_cmd_payload)
                                     payload_to_send["timestamp"] = time.time()
                                     robot.last_dispatch_time = time.time()
-                                    self.mqtt_client.publish(cmd_topic, json.dumps(payload_to_send), qos=1)
+                                    self._publish_command(robot, payload_to_send)
                                     print(f"[NAV RETRY] Re-dispatched cmd_id {cmd_id} to '{robot_id}'")
                         threading.Timer(1.2, retry_nav).start()
                     else:
@@ -1851,6 +2223,8 @@ class MqttFleetAdapter:
         - succeeded / aborted / rejected / canceled: terminal
         - canceling: stop received, waiting for the step to end
         """
+        if not self._session_matches(robot_id, fleet_name, payload):
+            return
         cmd_id = payload.get("cmd_id")
         status = payload.get("status")
         rel_step = int(payload.get("step", 0) or 0)
@@ -1978,6 +2352,8 @@ class MqttFleetAdapter:
         all_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         fleet_name, robot_id = robot.fleet_name, robot.name
+        if robot.session_reset_pending:
+            return {"status": "error", "message": "Vehicle session is awaiting cleanup and valid localization"}
         if not robot.is_online or robot.is_estopped:
             reason = "emergency-stopped" if robot.is_estopped else "offline"
             return {"status": "error", "message": f"Cannot execute task: robot '{robot_id}' in fleet '{fleet_name}' is {reason}."}
@@ -2042,7 +2418,7 @@ class MqttFleetAdapter:
             robot.target_position = None
 
         cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
-        self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+        self._publish_command(robot, cmd_payload)
         print(f"[RMF -> AMR] Dispatched TASK '{task_id}' (cmd_id: {cmd_id}, steps: {step_offset + 1}-{step_offset + len(validated_steps)}/{len(all_steps)}, auto_proceed: {auto_proceed}) to '{robot_id}' via {cmd_topic}")
         self._publish_task_status(fleet_name, robot_id, cmd_id, "dispatched", step_offset, len(all_steps), "Task dispatched", task_id)
         return {
@@ -2096,12 +2472,12 @@ class MqttFleetAdapter:
             print(f"[PROCEED HOLD] '{robot.name}' is paused or emergency-stopped; release held until resumed.")
             return False
         cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
-        self.mqtt_client.publish(cmd_topic, json.dumps({
+        self._publish_command(robot, {
             "robot_id": robot.name,
             "cmd_id": task["cmd_id"],
             "action": "proceed",
             "timestamp": time.time(),
-        }), qos=1)
+        })
         task["step_status"] = "releasing"
         task["release_pending"] = False
         task["current_step"] = min(task.get("current_step", 0) + 1, len(task["all_steps"]) - 1)
@@ -2149,13 +2525,13 @@ class MqttFleetAdapter:
         robot.cmd_id += 1
         robot.stop_cmd_id = robot.cmd_id
         cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
-        self.mqtt_client.publish(cmd_topic, json.dumps({
+        self._publish_command(robot, {
             "robot_id": robot.name,
             "cmd_id": robot.cmd_id,
             "action": "stop",
             "reason": "Operator / Scheduler STOP command",
             "timestamp": time.time(),
-        }), qos=1)
+        })
         print(f"[RMF -> AMR] Dispatched STOP (cmd_id: {robot.cmd_id}) to '{robot.name}' via {cmd_topic}")
         if task:
             self._publish_task_status(robot.fleet_name, robot.name, task["cmd_id"], "canceling",
@@ -2296,7 +2672,7 @@ class MqttFleetAdapter:
         robot.last_cmd_payload = cmd_payload
         robot.last_dispatch_time = time.time()
         cmd_topic = f"{self.topic_prefix}/{robot.fleet_name}/robot/{robot.name}/command"
-        self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+        self._publish_command(robot, cmd_payload)
         self._publish_task_status(
             robot.fleet_name,
             robot.name,
@@ -2316,6 +2692,9 @@ class MqttFleetAdapter:
             robot = self._get_robot(fleet_name, robot_id)
             if not robot:
                 print(f"[RMF -> AMR WARN] Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' not found.")
+                return
+            if robot.session_reset_pending or not execution.okay():
+                print(f"[SESSION] Suppressed stale or reset NAVIGATE for '{fleet_name}/{robot_id}'")
                 return
             self._detach_active_task_locked(robot, "superseded by RMF navigate")
             target_pos = np.array(
@@ -2360,7 +2739,7 @@ class MqttFleetAdapter:
             robot.last_cmd_payload = cmd_payload
             robot.last_dispatch_time = time.time()
 
-            self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+            self._publish_command(robot, cmd_payload)
             self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "nav_started", -1, -1, f"navigate:{target_map}:{target_pos[0]:.2f},{target_pos[1]:.2f}")
             action_label = f"DOCK ({dock_name})" if dock_name else "NAVIGATE"
             print(f"[RMF -> AMR] Dispatched {action_label} (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}: target=[{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}], map='{target_map}'")
@@ -2412,6 +2791,9 @@ class MqttFleetAdapter:
         recorded at prepare_floor_change mapped onto that floor (see _lift_exit_pose_locked)."""
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
+            if robot and (robot.session_reset_pending or not execution.okay()):
+                print(f"[SESSION] Suppressed stale or reset LOCALIZE for '{fleet_name}/{robot_id}'")
+                return
             if not robot:
                 print(f"[RMF -> AMR WARN] Cannot localize: robot '{robot_id}' in fleet '{fleet_name}' not found.")
                 return
@@ -2440,7 +2822,7 @@ class MqttFleetAdapter:
             robot.last_cmd_payload = cmd_payload
             robot.last_dispatch_time = time.time()
             cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
-            self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+            self._publish_command(robot, cmd_payload)
             self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "nav_started", -1, -1,
                                       f"change_floor:{floor}:{position[0]:.2f},{position[1]:.2f}")
             print(f"[RMF -> AMR] Dispatched CHANGE_FLOOR (cmd_id: {robot.cmd_id}) to '{robot_id}': "
@@ -2451,6 +2833,10 @@ class MqttFleetAdapter:
             robot = self._get_robot(fleet_name, robot_id)
             if not robot:
                 print(f"[RMF STOP WARN] Robot '{robot_id}' in '{fleet_name}' not found. Ignoring STOP.")
+                return
+            if robot.session_reset_pending:
+                return
+            if robot.session_id and robot.current_execution is None:
                 return
 
             # Verify that activity_id matches the active execution to avoid stopping newer commands
@@ -2490,7 +2876,7 @@ class MqttFleetAdapter:
                 "reason": "RMF traffic schedule hold/pause",
                 "timestamp": time.time(),
             }
-            self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+            self._publish_command(robot, cmd_payload)
             print(f"[RMF -> AMR] Dispatched STOP (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}")
 
 
@@ -2499,6 +2885,9 @@ class MqttFleetAdapter:
             robot = self._get_robot(fleet_name, robot_id)
             if not robot:
                 print(f"[RMF -> AMR WARN] Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' not found.")
+                return
+            if robot.session_reset_pending or not execution.okay():
+                print(f"[SESSION] Suppressed ACTION during reset for '{fleet_name}/{robot_id}'")
                 return
 
             # Parse description; a malformed description fails the RMF action instead of raising in the callback.
@@ -2584,7 +2973,7 @@ class MqttFleetAdapter:
             cmd_topic = f"{self.topic_prefix}/{fleet_name}/robot/{robot_id}/command"
             robot.last_cmd_payload = cmd_payload
             robot.last_dispatch_time = time.time()
-            self.mqtt_client.publish(cmd_topic, json.dumps(cmd_payload), qos=1)
+            self._publish_command(robot, cmd_payload)
             self._publish_task_status(fleet_name, robot_id, robot.cmd_id, "action_started", -1, -1, f"action:{category}")
             print(f"[RMF -> AMR] Dispatched ACTION '{category}' (cmd_id: {robot.cmd_id}) to '{robot_id}' via {cmd_topic}")
 

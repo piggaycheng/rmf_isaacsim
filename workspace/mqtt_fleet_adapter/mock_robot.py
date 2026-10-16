@@ -11,6 +11,7 @@ import signal
 import sys
 import time
 import threading
+import uuid
 import paho.mqtt.client as mqtt
 
 class MockRobot:
@@ -26,6 +27,7 @@ class MockRobot:
         level: str = "1F",
     ):
         self.robot_id = robot_id
+        self.session_id = str(uuid.uuid4())
         self.fleet_name = fleet_name
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
@@ -67,6 +69,7 @@ class MockRobot:
         # Configure MQTT Last Will and Testament (LWT)
         lwt_payload = json.dumps({
             "robot_id": self.robot_id,
+            "session_id": self.session_id,
             "status": "offline",
             "reason": "Unexpected connection loss (LWT)",
             "timestamp": time.time()
@@ -81,8 +84,8 @@ class MockRobot:
             client.subscribe(self.topic_command, qos=1)
             print(f"[AMR] Subscribed to ACK & COMMAND topics")
 
-            # Immediately trigger Registration
-            self.send_registration()
+            if not self.is_registered:
+                self.send_registration()
         else:
             print(f"[AMR ERROR] MQTT connection failed: {rc}")
 
@@ -90,6 +93,7 @@ class MockRobot:
         """Sends registration packet to Fleet Adapter."""
         payload = {
             "robot_id": self.robot_id,
+            "session_id": self.session_id,
             "fleet_name": self.fleet_name,
             "timestamp": time.time(),
             "initial_location": {
@@ -115,6 +119,8 @@ class MockRobot:
         payload = json.loads(msg.payload.decode("utf-8"))
 
         if topic == self.topic_register_ack:
+            if payload.get("session_id") != self.session_id:
+                return
             status = payload.get("status")
             if status == "success":
                 print(f"[AMR] ✅ Registration SUCCESSFUL! Adapter acknowledged: {payload.get('message')}")
@@ -130,6 +136,8 @@ class MockRobot:
             self.handle_command(payload)
 
     def handle_command(self, cmd: dict):
+        if not self.is_registered or cmd.get("session_id") != self.session_id:
+            return
         target_robot = cmd.get("robot_id")
         if target_robot and target_robot != self.robot_id:
             return  # Not for this robot
@@ -160,6 +168,7 @@ class MockRobot:
                 print(f"[AMR] 🛗🔒 Prepared floor change (suspended navigation) inside lift '{lift_name}' on floor '{self.level}'")
             self.client.publish(self.topic_cmd_result, json.dumps({
                 "robot_id": self.robot_id,
+                "session_id": self.session_id,
                 "cmd_id": cmd_id,
                 "status": "completed" if ok else "failed",
                 "message": f"Prepared floor change in {lift_name}" if ok else "Cannot prepare floor change while moving",
@@ -179,6 +188,7 @@ class MockRobot:
                 print(f"[AMR] 🛗🔓 Switched to floor '{floor}' at ({self.x:.2f}, {self.y:.2f}, {self.yaw:.2f}) and resumed navigation")
             self.client.publish(self.topic_cmd_result, json.dumps({
                 "robot_id": self.robot_id,
+                "session_id": self.session_id,
                 "cmd_id": cmd_id,
                 "status": "completed" if ok else "failed",
                 "message": f"Floor switched to {floor}" if ok else "Invalid change_floor or robot is moving",
@@ -211,6 +221,7 @@ class MockRobot:
                     print(f"\n[AMR] 🎯 ARRIVED at target! Reporting command_result...")
                     result_payload = {
                         "robot_id": self.robot_id,
+                        "session_id": self.session_id,
                         "cmd_id": self.current_cmd_id,
                         "status": "completed",
                         "message": "Reached destination successfully",
@@ -240,6 +251,8 @@ class MockRobot:
 
             hb_payload = {
                 "robot_id": self.robot_id,
+                "session_id": self.session_id,
+                "localization_ready": True,
                 "x": round(self.x, 3),
                 "y": round(self.y, 3),
                 "yaw": round(self.yaw, 3),
@@ -283,6 +296,7 @@ class MockRobot:
         self.running = False
         dereg_payload = {
             "robot_id": self.robot_id,
+            "session_id": self.session_id,
             "fleet_name": self.fleet_name,
             "reason": "Graceful shutdown",
             "timestamp": time.time()

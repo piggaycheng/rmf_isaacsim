@@ -272,6 +272,26 @@ class RMFService:
             append_adapter_log(task.get("fleet_name") or "system", f"[ERROR] Task [{task.get('id')}] {task['detail']}")
 
     @staticmethod
+    def reconcile_vehicle_sessions() -> None:
+        if not state.is_fa_state_fresh():
+            return
+        robots = state.fa_state.get("robots") or {}
+        for task in state.current_tasks:
+            if task.get("status") in state.TERMINAL_STATES:
+                continue
+            robot = robots.get(f"{task.get('fleet_name')}/{task.get('robot_id')}", {})
+            reset_at = robot.get("session_cleanup_at", 0)
+            submitted_at = task.get("submitted_at")
+            if not reset_at or submitted_at is None or submitted_at >= reset_at:
+                continue
+            task["status"] = "canceled"
+            task["interruption_reason"] = "vehicle_session_changed"
+            task["detail"] = "車輛已重新開機，舊 session 任務已取消，請重新派遣。"
+            task.pop("cancel_requested", None)
+            task.pop("interruption_pending", None)
+            append_adapter_log(task.get("fleet_name") or "system", f"[WARN] Task [{task.get('id')}] {task['detail']}")
+
+    @staticmethod
     def _task_predates_adapter(task: Dict[str, Any]) -> bool:
         if task.get("interruption_pending") or task.get("interruption_reason"):
             return True
@@ -674,6 +694,7 @@ class RMFService:
                     data = json.loads(msg.data)
                     if isinstance(data, dict):
                         state.update_fa_state(data)
+                        self.reconcile_vehicle_sessions()
                         self.reconcile_interrupted_tasks()
                 except Exception as e:
                     print(f"[RMF Bridge] Error updating fleet adapter state: {e}")
@@ -696,6 +717,7 @@ class RMFService:
 
     def fleet_callback(self, msg: Any):
         state.last_ros2_time = time.time()
+        self.reconcile_vehicle_sessions()
         self.reconcile_interrupted_tasks()
         fleet_name = msg.name
         for r in msg.robots:
@@ -722,10 +744,15 @@ class RMFService:
             # Keep the previous task id while offline so completion is only inferred after reconnecting.
             task_id = r.task_id or (prev_task_id if is_offline else "")
             is_off_graph, off_dist = state.is_robot_off_graph(fleet_name, r_id, float(r.location.x), float(r.location.y))
+            session = (state.fa_state.get("robots") or {}).get(f"{fleet_name}/{r_id}", {})
             if is_estopped:
                 current_task = f"緊急停車（{task_id}）" if task_id else "緊急停車"
             elif is_offline:
                 current_task = f"離線（{task_id}）" if task_id else "離線"
+            elif session.get("session_reset_pending"):
+                reset_error = session.get("session_reset_error")
+                mode_str = "error" if reset_error else "paused"
+                current_task = f"新 session 初始化失敗：{reset_error}" if reset_error else "新 session 清理中／等待有效定位"
             elif is_off_graph:
                 mode_str = "off_graph"
                 current_task = f"偏離路網 ({off_dist}m) · 禁止派工"

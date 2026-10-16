@@ -77,7 +77,8 @@
   1. **開機首次發送**：車輛系統啟動完成且定位成功後立即發送。
   2. **3 秒自動重試機制（晚開機應對）**：發送後**若超過 3 秒未收到 `register_ack`**（例如 Fleet Adapter 較晚啟動或重啟中），車端**必須以 3 秒為間隔持續自動重發**，直到收到 `status: "success"` 的 ACK 為止。
   3. **逆向要求重註冊**：若車輛運行中收到 `register_ack` 帶有 `status: "require_register"`（代表 FA 剛重啟遺失了名冊），車端**必須立即重新發送**此註冊封包。
-  4. **MQTT 重連不得重新註冊**：`register` 代表新的車端 session，FA 收到後會中斷前一 session 已下發但未完成的命令。同一程序內僅 MQTT／網路斷線重連時，車端**不得**重送 `register`（除非收到 `require_register`），只需恢復 `heartbeat`，進行中的命令照常回報 `command_result`。
+  4. **MQTT 重連沿用 session**：同一車端程序的網路重連沿用相同 `session_id`，恢復 heartbeat 即可；若 FA 要求補註冊，必須使用原 ID。重複 `register` 不會取消同一 session 的活動。
+  5. **重新開機產生新 session**：每次車端控制程序啟動時以 `str(uuid.uuid4())` 產生 ID，僅存在該次執行的記憶體中；不可在 MQTT `on_connect` 中重新產生。Isaac Sim 若重置模擬、位置或命令執行狀態，即使 Python 程序未退出，也必須開始新 session。
 - **說明**：告知 FA 該車輛的物理幾何形狀與預設站點。未完成註冊前，車輛不可切換至 `idle` 亦不可接受調度指令。
 
 #### JSON Schema 與欄位定義
@@ -85,6 +86,7 @@
 {
   "robot_id": "tinyRobot1",
   "fleet_name": "tinyRobot",
+  "session_id": "6e479742-f91a-4cb7-9648-7109abc089cf",
   "timestamp": 1728312000.123,
   "initial_location": {
     "x": 0.7,
@@ -107,6 +109,7 @@
 | :--- | :---: | :---: | :--- |
 | `robot_id` | String | **是** | 車輛唯一識別碼 (需與 Client ID 相符) |
 | `fleet_name` | String | **是** | 所屬車隊名稱 (需與 FA 管理之車隊名稱相符) |
+| `session_id` | String | **是（新版車端）** | 每次開機／模擬重置重新產生的 UUID；重連、註冊重試及 FA 重啟後補註冊時不得更換，長度上限 128 |
 | `timestamp` | Float | **是** | 發送時之 Unix 時間戳記 (秒) |
 | `initial_location.x` | Float | **是** | 開機完成時的定位 X 座標 (m) |
 | `initial_location.y` | Float | **是** | 開機完成時的定位 Y 座標 (m) |
@@ -118,6 +121,28 @@
 | `specs.max_angular_velocity`| Float | 否 | 車輛最大角速度 (rad/s) |
 | `default_charger` | String | 否 | 該車指定充電樁名稱 (若無則使用車隊預設) |
 | `default_parking` | String | 否 | 該車指定待命停泊點名稱 |
+
+#### Session 切換與舊工作處理
+
+FA 將最後接受的 session 與已淘汰的 ID 原子寫入 `backend/saved_maps/robot_sessions.json`，
+因此 FA 重啟後仍能辨識相同 session 與車端重新開機。重複／延遲的舊 ID 註冊會被拒絕。
+
+同 ID 重連不取消任務；新 ID 則禁止下發導航、清除舊 command／deferred command／多步任務定時器，
+透過 RMF Task API 取消該車待執行的直接與派遣任務、終止執行中的任務，並取消舊 idle behavior。
+未完成的舊工作會標記取消或中止，不會當作成功完成。其他車輛的工作不受影響。
+FA 確認清理完成，且收到相同 session 的新 heartbeat（`localization_ready: true`、
+有限座標、已知樓層、路網範圍內、`status: idle/charging`、`current_cmd_id: null`）後，
+才依原設定恢復接單及 responsive wait。清理失敗會保持禁止下發，並回報 `session_reset_error`；
+排除錯誤後可用相同 ID 重新註冊重試。這不是開機後永久原地鎖定：新的 responsive wait 仍可能移往附近等待點或讓路。
+
+ACK 與所有下行 command 都包含對應 `session_id`；車端必須忽略不同 ID 的 ACK／命令，
+避免 MQTT 延遲封包跨 session 執行。車端所有上行封包（heartbeat、command_result、task_state、
+deregister、status/LWT）都必須攜帶相同 ID，FA 會忽略舊 session 或缺少 ID 的封包。
+`localization_ready` 必須來自真正的定位就緒狀態，不得只因 MQTT 已連線就設為 true。
+
+尚未帶 `session_id` 的舊車端保留舊協定行為並記錄警告，**不具備上述開機隔離保證**；
+一旦某車採用新版 ID，之後缺少 ID 的註冊與上行封包將被拒絕。Repo 內的 `mock_robot.py`
+已示範新協定；外部 Isaac Sim client 必須同步更新，不能只更新 FA。
 
 ---
 
@@ -131,6 +156,7 @@
 ```json
 {
   "robot_id": "tinyRobot1",
+  "session_id": "6e479742-f91a-4cb7-9648-7109abc089cf",
   "status": "success",
   "message": "Robot registered to Open-RMF scheduler successfully",
   "assigned_graph_idx": 0,
@@ -143,6 +169,7 @@
 {
   "robot_id": "tinyRobot1",
   "status": "error",
+  "session_id": "6e479742-f91a-4cb7-9648-7109abc089cf",
   "error_code": "GRAPH_OUT_OF_BOUNDS",
   "message": "Initial location is too far from any valid waypoint in nav graph 0",
   "server_time": 1728312000.456
@@ -154,6 +181,7 @@
 {
   "robot_id": "tinyRobot1",
   "status": "require_register",
+  "session_id": "6e479742-f91a-4cb7-9648-7109abc089cf",
   "message": "Robot not recognized by FA, please re-register immediately",
   "server_time": 1728312000.456
 }
@@ -167,12 +195,14 @@
 - **方向**：車載端 $\rightarrow$ Fleet Adapter
 - **QoS**：`0`
 - **建議發送頻率**：`2 Hz` ~ `5 Hz` (每 200ms ~ 500ms 一次)
-- **說明**：包含車輛識別碼與 Open-RMF 交通調度與避障所必需的 7 個標準欄位。自包含 `robot_id` 有助於日誌追蹤與封包除錯。
+- **說明**：包含車輛識別碼與 Open-RMF 交通調度與避障所需的座標、狀態及 session 欄位。自包含 `robot_id` 有助於日誌追蹤與封包除錯。
 
-#### 核心標準 JSON 封包範例 (7 個標準欄位)
+#### 核心標準 JSON 封包範例
 ```json
 {
   "robot_id": "tinyRobot1",
+  "session_id": "6e479742-f91a-4cb7-9648-7109abc089cf",
+  "localization_ready": true,
   "x": 2.345,
   "y": 1.120,
   "yaw": 0.785,
@@ -185,6 +215,8 @@
 | 欄位名稱 | 型別 | 必填 | 單位 / 範圍 | 說明與 Open-RMF 對應 |
 | :--- | :---: | :---: | :---: | :--- |
 | **`robot_id`** | String | **是** | 字串 (例: `"tinyRobot1"`) | 車輛唯一識別碼 (需與註冊及 Topic 一致) |
+| **`session_id`** | String | **新版必填** | 與 register 相同 | 車端本次執行識別碼 |
+| **`localization_ready`** | Boolean | **新版必填** | true / false | 定位與樓層已確認就緒；新 session 須收到 true 才能恢復調度 |
 | **`x`** | Float | **是** | 公尺 (m) | 當前 2D SLAM 世界座標 X $\rightarrow$ `RobotState.position[0]` |
 | **`y`** | Float | **是** | 公尺 (m) | 當前 2D SLAM 世界座標 Y $\rightarrow$ `RobotState.position[1]` |
 | **`yaw`** | Float | **是** | 弧度 (rad, $[-\pi, \pi]$) | 車頭偏航角（逆時針為正） $\rightarrow$ `RobotState.position[2]` |
@@ -329,7 +361,7 @@
 - **Topic**：`rmf/{fleet_name}/robot/{robot_id}/deregister`
 - **方向**：車載端 $\rightarrow$ Fleet Adapter
 - **QoS**：`1`
-- **說明**：車輛欲關機、重啟、回廠保養或切換為手動遙控 (Manual) 前發送。此動作代表當前車端執行 session 終止：若車輛尚有進行中之導航或動作任務，FA 將主動通報 Open-RMF 中斷並重規劃 (`replan`)，清除任務狀態。車輛後續重新開機註冊 (`register`) 時將以全新 `idle` 狀態加入，不會沿用或誤報前次 session 的未完成任務。（註：若僅為 Wi-Fi 或 MQTT 網路短暫瞬斷重連，車載端**無須**發送 `deregister` 或 `register`，僅需維持常態 `heartbeat` 發送即可無縫恢復任務追蹤）。
+- **說明**：車輛欲關機、重啟、回廠保養或切換為手動遙控 (Manual) 前發送，FA 先將車輛標為離線、不接受新工作。新版車端下次開機必須產生新的 `session_id`；FA 在接受新 session 時才確認取消舊任務、排隊工作與 idle behavior，並等待有效定位後恢復。`deregister` 本身不代表舊 RMF 工作已清除。若只是 Wi-Fi／MQTT 短暫斷線，無須發送 `deregister` 或改變 ID，恢復 heartbeat 即可沿用任務。
 
 ```json
 {
@@ -347,7 +379,7 @@
 - **QoS**：`1`
 - **Retained**：`False`
 - **說明**：車載端在建立 MQTT 連線時，**必須**向 Broker 設定遺囑訊息 (Will Message)。若車輛遭遇異常斷電或無線訊號中斷，EMQX Broker 會立即自動發布此訊息給 FA。
-- **FA 離線處理**（LWT、`deregister` 或心跳逾時 10 秒）：車輛標為 `offline` 並 decommission（不接新任務），已下發的命令保留不結束。離線期間 RMF 下派的導航／動作**不會發送**，FA 以 `log_error` 回報並暫存（同一車只保留最新一筆，不呼叫 `replan` 以免循環）。車輛恢復（心跳或註冊成功後）時，暫存命令以新的 `cmd_id` 下發一次；若 RMF 已取消該 activity 則丟棄。恢復後的可派遣狀態依「離線 > 車隊暫停 > 可用」決定，暫停中的車隊不會因重連而恢復接單。
+- **FA 離線處理**（LWT、`deregister` 或心跳逾時 10 秒）：車輛標為 `offline` 並 decommission（不接新任務），已下發的命令保留不結束。離線期間 RMF 下派的導航／動作**不會發送**，FA 以 `log_error` 回報並暫存（同一車只保留最新一筆，不呼叫 `replan` 以免循環）。**同 session** 恢復時，暫存命令以新的 `cmd_id` 下發一次；若 RMF 已取消該 activity 則丟棄。**新 session** 則依 4.1 清除舊工作，禁止重播暫存命令。恢復後仍遵守離線、緊急停車及車隊暫停狀態，不會因重連自行恢復接單。
 - **遺失命令重送**：MQTT 使用 clean session，斷線期間（FA 尚未判定離線前）下發的命令可能遺失。已下發命令若超過 5 秒心跳仍未回報該 `cmd_id`，FA 會以**相同 `cmd_id`** 重送；車端收到與執行中命令相同 `cmd_id` 時**必須**去重，不得重新開始。
 
 #### 車端建立 MQTT 連線時設定之 LWT 內容：
