@@ -33,7 +33,7 @@ rmf_fleet:
     delivery: true
   actions: ["teleop", "gimbal_move", "gimbal_rotate", "task", "multi_step_task"]
   finishing_request: "nothing" # Options: park, charge, nothing
-  responsive_wait: false
+  responsive_wait: true
   reassign_task_interval: 60 # seconds
 
   # Known robots (Pre-configured robots, optional. Dynamic robots can be added at runtime via MQTT)
