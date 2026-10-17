@@ -4,7 +4,7 @@ import asyncio
 import math
 from typing import List, Dict, Any, Optional, Tuple
 from fastapi import WebSocket
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from PIL import Image
 import yaml
 
@@ -36,11 +36,36 @@ OFF_GRAPH_THRESHOLD_M = 5.0
 # ==========================================
 # Pydantic Request / Data Models
 # ==========================================
+def validate_rounds(val: Any) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Validates patrol rounds:
+    - Must be a strict integer (rejects bool, str, float, null, 0, negative numbers, dicts, lists).
+    - Must be > 0.
+    Returns (validated_int, error_message). If invalid, (None, error_message).
+    """
+    if val is None:
+        return None, "巡邏輪數 (rounds) 不能為 null，必須為正整數"
+    if isinstance(val, bool) or not isinstance(val, int):
+        return None, "巡邏輪數 (rounds) 必須為整數型別，不可為布林值、小數或字串"
+    if val <= 0:
+        return None, "巡邏輪數 (rounds) 必須為大於 0 的正整數"
+    return val, None
+
+
 class TaskRequest(BaseModel):
     type: str  # 'patrol', 'delivery', 'goto', 'multi_step'
     target_waypoint: Optional[str] = None
     destination_waypoint: Optional[str] = None
     robot_id: Optional[str] = None
+    rounds: Optional[Any] = 1
+
+    @field_validator("rounds", mode="before")
+    @classmethod
+    def check_rounds(cls, v):
+        validated, err = validate_rounds(v)
+        if err:
+            raise ValueError(err)
+        return validated
 
 class MultiStepTaskRequest(BaseModel):
     robot_id: str

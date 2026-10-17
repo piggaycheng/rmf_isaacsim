@@ -311,6 +311,15 @@ export interface Task {
   auto_proceed?: boolean;
   step_delay?: number;
   steps?: any[];
+  rounds?: number;
+}
+
+export interface DispatchTaskRequest {
+  type: 'patrol' | 'delivery' | 'goto';
+  target_waypoint: string;
+  destination_waypoint?: string;
+  robot_id?: string;
+  rounds?: number;
 }
 
 

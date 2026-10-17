@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { Button } from './ui/button';
-import { Waypoint, Robot } from '@/types/rmf';
+import { Waypoint, Robot, DispatchTaskRequest } from '@/types/rmf';
 import { OFF_GRAPH_THRESHOLD_M } from '@/lib/constants';
 import { Send, Navigation, PackageCheck, Repeat, AlertTriangle, ListOrdered } from 'lucide-react';
 
@@ -11,12 +11,7 @@ interface DispatchModalProps {
   selectedWaypoint: Waypoint | null;
   waypoints: Waypoint[];
   robots: Robot[];
-  onDispatchTask: (task: {
-    type: 'patrol' | 'delivery' | 'goto';
-    target_waypoint: string;
-    destination_waypoint?: string;
-    robot_id?: string;
-  }) => void;
+  onDispatchTask: (task: DispatchTaskRequest) => void;
   onOpenMultiStep?: () => void;
 }
 
@@ -33,7 +28,21 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
   const [targetWaypointId, setTargetWaypointId] = useState<string>(selectedWaypoint?.id || '');
   const [destinationWaypointId, setDestinationWaypointId] = useState<string>('');
   const [selectedRobotId, setSelectedRobotId] = useState<string>('any');
+  const [rounds, setRounds] = useState<string>('1');
+  const [roundsTouched, setRoundsTouched] = useState<boolean>(false);
   const [validationError, setValidationError] = useState<string>('');
+
+  const getRoundsError = (val: string): string => {
+    const trimmed = val.trim();
+    if (!trimmed) {
+      return '請輸入巡邏輪數！';
+    }
+    const num = Number(trimmed);
+    if (!Number.isInteger(num) || num <= 0) {
+      return '巡邏輪數必須為大於 0 的正整數！';
+    }
+    return '';
+  };
 
   const allRobotsOffGraph = robots.length > 0 && robots.every((r) => r.is_off_graph || r.status === 'off_graph');
   const selectedRobot = robots.find((r) => r.id === selectedRobotId);
@@ -44,6 +53,14 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
       setTargetWaypointId(selectedWaypoint.id);
     }
   }, [selectedWaypoint]);
+
+  React.useEffect(() => {
+    if (open) {
+      setValidationError('');
+      setRounds('1');
+      setRoundsTouched(false);
+    }
+  }, [open]);
 
   React.useEffect(() => {
     setValidationError('');
@@ -85,6 +102,17 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
       }
     }
 
+    let parsedRounds: number | undefined = undefined;
+    if (taskType === 'patrol') {
+      const err = getRoundsError(rounds);
+      if (err) {
+        setRoundsTouched(true);
+        setValidationError(err);
+        return;
+      }
+      parsedRounds = Number(rounds.trim());
+    }
+
     const destWp = waypoints.find((w) => w.id === destinationWaypointId);
 
     onDispatchTask({
@@ -92,15 +120,20 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
       target_waypoint: targetWp.name,
       destination_waypoint: destWp?.name,
       robot_id: selectedRobotId === 'any' ? undefined : selectedRobotId,
+      rounds: taskType === 'patrol' ? parsedRounds : undefined,
     });
     onOpenChange(false);
   };
+
+  const roundsError = taskType === 'patrol' && roundsTouched ? getRoundsError(rounds) : '';
+  const isRoundsInvalid = taskType === 'patrol' && Boolean(getRoundsError(rounds));
 
   const isSubmitDisabled =
     !targetWaypointId ||
     (taskType === 'delivery' && (!destinationWaypointId || destinationWaypointId === targetWaypointId)) ||
     (selectedRobotId === 'any' && allRobotsOffGraph) ||
-    isSelectedRobotOffGraph;
+    isSelectedRobotOffGraph ||
+    isRoundsInvalid;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -223,6 +256,39 @@ export const DispatchModal: React.FC<DispatchModalProps> = ({
                   </option>
                 ))}
             </select>
+          </div>
+        )}
+
+        {/* Patrol Rounds */}
+        {taskType === 'patrol' && (
+          <div>
+            <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5 block">
+              巡邏輪數 (Rounds)
+            </label>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={rounds}
+              onChange={(e) => {
+                setRounds(e.target.value);
+                setRoundsTouched(true);
+              }}
+              onBlur={() => setRoundsTouched(true)}
+              className={`w-full bg-slate-900 border ${
+                roundsError ? 'border-rose-500 focus:ring-rose-500' : 'border-slate-700 focus:ring-primary'
+              } rounded-md px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1`}
+              placeholder="請輸入巡邏輪數 (預設: 1)"
+            />
+            {roundsError ? (
+              <p className="text-xs text-rose-400 mt-1.5 flex items-center gap-1 font-medium">
+                ⚠️ {roundsError}
+              </p>
+            ) : (
+              <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                每輪依序走訪所選站點（例如站點 A、B 設定 2 輪時，行進順序為 A → B → A → B，最終停靠於 B）。
+              </p>
+            )}
           </div>
         )}
 

@@ -41,6 +41,7 @@ async def dispatch_task_endpoint(req: TaskRequest):
         target_waypoint=req.target_waypoint,
         destination_waypoint=req.destination_waypoint,
         robot_id=assigned_robot,
+        rounds=req.rounds,
     )
     if res.get("status") == "error":
         raise HTTPException(status_code=400, detail=res.get("message", "任務派遣失敗"))
@@ -204,12 +205,26 @@ async def websocket_endpoint(websocket: WebSocket):
                     assigned_robot = None
                 dest_wp = payload.get("destination_waypoint")
 
+                # Validate rounds from payload if provided (or default to 1)
+                rounds_arg = payload.get("rounds", 1) if "rounds" in payload else 1
+                rounds_val, rounds_err = state.validate_rounds(rounds_arg)
+                if rounds_err:
+                    await websocket.send_json({
+                        "type": "dispatch_response",
+                        "status": "error",
+                        "task_id": None,
+                        "request_id": None,
+                        "message": rounds_err,
+                    })
+                    continue
+
                 # Dispatch via Open-RMF scheduler
                 res = rmf_service.dispatch_task(
                     task_type=task_type,
                     target_waypoint=target_wp,
                     destination_waypoint=dest_wp,
                     robot_id=assigned_robot,
+                    rounds=rounds_val,
                 )
 
                 # Send explicit dispatch response back to the requesting client

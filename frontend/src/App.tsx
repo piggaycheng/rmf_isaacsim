@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform, isPreciseArrival } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform, isPreciseArrival, DispatchTaskRequest } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { MapOverlayAlignModal } from '@/components/MapOverlayAlignModal';
 import { WorldMap } from '@/components/WorldMap';
@@ -913,12 +913,7 @@ export function App() {
   }, [selectedWaypointIds, selectedLaneIds]);
 
   // Dispatch Action
-  const handleDispatchTask = (taskReq: {
-    type: 'patrol' | 'delivery' | 'goto';
-    target_waypoint: string;
-    destination_waypoint?: string;
-    robot_id?: string;
-  }) => {
+  const handleDispatchTask = (taskReq: DispatchTaskRequest) => {
     // If connected to real backend, send over WebSocket and rely on backend authoritative state
     if (isConnected && wsRef.current) {
       wsRef.current.send(
@@ -938,6 +933,7 @@ export function App() {
         status: 'active',
         progress: 5,
         created_at: new Date().toLocaleTimeString(),
+        rounds: taskReq.type === 'patrol' ? (taskReq.rounds ?? 1) : undefined,
       };
 
       setTasks((prev) => [newTask, ...prev]);
@@ -949,7 +945,9 @@ export function App() {
             ? {
                 ...r,
                 status: 'moving',
-                current_task: `執行 ${taskReq.type} 前往 ${taskReq.target_waypoint}`,
+                current_task: `執行 ${taskReq.type} 前往 ${taskReq.target_waypoint}${
+                  taskReq.type === 'patrol' ? ` (${taskReq.rounds ?? 1} 輪)` : ''
+                }`,
               }
             : r
         )
@@ -3148,6 +3146,11 @@ export function App() {
                                       多步
                                     </Badge>
                                   )}
+                                  {task.type === 'patrol' && (
+                                    <Badge variant="outline" className="text-[9px] px-1 py-0 border-primary/40 text-primary shrink-0 font-mono">
+                                      設定 {task.rounds ?? 1} 輪
+                                    </Badge>
+                                  )}
                                   <span className="font-medium text-slate-300 capitalize truncate max-w-[130px]" title={task.target_waypoint}>
                                     {task.type}: {task.target_waypoint}
                                   </span>
@@ -3210,9 +3213,16 @@ export function App() {
                                       ? 'bg-rose-500'
                                       : isWaiting
                                       ? 'bg-amber-400'
+                                      : task.type === 'patrol' && task.status === 'active'
+                                      ? 'bg-primary/80 animate-pulse'
                                       : 'bg-primary'
                                   }`}
-                                  style={{ width: `${task.progress}%` }}
+                                  style={{
+                                    width:
+                                      task.type === 'patrol' && task.status === 'active'
+                                        ? `${Math.max(15, task.progress)}%`
+                                        : `${task.progress}%`,
+                                  }}
                                 />
                               </div>
                               <div className="flex justify-between text-[10px] text-slate-500">
@@ -3220,6 +3230,10 @@ export function App() {
                                 {task.total_steps && task.total_steps > 1 ? (
                                   <span className="text-indigo-400/90 font-mono">
                                     步驟 {task.status === 'completed' ? task.total_steps : ((task.current_step ?? 0) + 1)} / {task.total_steps} ({task.progress}%)
+                                  </span>
+                                ) : task.type === 'patrol' && task.status === 'active' ? (
+                                  <span className="text-primary font-medium">
+                                    巡邏執行中
                                   </span>
                                 ) : (
                                   <span>{task.progress}%</span>

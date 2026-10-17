@@ -1055,6 +1055,392 @@ class TestRMFDispatchRegression(unittest.TestCase):
             self.assertFalse(rmf_service.send_robot_control("fleet1", "carter1", "release", timeout_s=0.3))
         state.estopped_robots.clear()
 
+    # --------------------------------------------------------------------------
+    # Patrol Rounds Regression Tests
+    # --------------------------------------------------------------------------
+    def test_patrol_rounds_omitted_defaults_to_one(self):
+        import rclpy
+        state.current_tasks.clear()
+        mock_pub = MagicMock()
+        with patch.object(rmf_service, "task_pub", mock_pub), patch.object(rclpy, "ok", return_value=True):
+            res = rmf_service.dispatch_task("patrol", "wp_1", destination_waypoint="wp_2")
+            self.assertEqual(res["status"], "success")
+            self.assertEqual(mock_pub.publish.call_count, 1)
+            payload = json.loads(mock_pub.publish.call_args[0][0].json_msg)
+            self.assertEqual(payload["request"]["description"]["places"], ["wp_1", "wp_2"])
+            self.assertEqual(payload["request"]["description"]["rounds"], 1)
+            self.assertEqual(state.current_tasks[0]["rounds"], 1)
+
+    def test_patrol_rounds_valid_directed_and_auto(self):
+        import rclpy
+        state.current_tasks.clear()
+        mock_pub = MagicMock()
+        with patch.object(rmf_service, "task_pub", mock_pub), patch.object(rclpy, "ok", return_value=True):
+            # Auto bidding request with rounds = 3
+            res_auto = rmf_service.dispatch_task("patrol", "wp_1", destination_waypoint="wp_2", rounds=3)
+            self.assertEqual(res_auto["status"], "success")
+            payload_auto = json.loads(mock_pub.publish.call_args[0][0].json_msg)
+            self.assertEqual(payload_auto["type"], "dispatch_task_request")
+            self.assertEqual(payload_auto["request"]["description"]["rounds"], 3)
+            self.assertEqual(state.current_tasks[0]["rounds"], 3)
+
+            # Directed robot request with rounds = 2
+            mock_pub.reset_mock()
+            res_dir = rmf_service.dispatch_task("patrol", "wp_1", destination_waypoint="wp_2", robot_id="carter1", rounds=2)
+            self.assertEqual(res_dir["status"], "success")
+            payload_dir = json.loads(mock_pub.publish.call_args[0][0].json_msg)
+            self.assertEqual(payload_dir["type"], "robot_task_request")
+            self.assertEqual(payload_dir["robot"], "carter1")
+            self.assertEqual(payload_dir["request"]["description"]["rounds"], 2)
+            self.assertEqual(state.current_tasks[0]["rounds"], 2)
+
+    def test_patrol_rounds_invalid_values_rejected(self):
+        import rclpy
+        invalid_values = [None, True, False, "3", 0, -1, 1.5, [], {}]
+        for val in invalid_values:
+            state.current_tasks.clear()
+            mock_pub = MagicMock()
+            with patch.object(rmf_service, "task_pub", mock_pub), patch.object(rclpy, "ok", return_value=True):
+                res = rmf_service.dispatch_task("patrol", "wp_1", destination_waypoint="wp_2", rounds=val)
+                self.assertEqual(res["status"], "error", f"Expected error for rounds={val!r}")
+                self.assertIn("巡邏輪數", res["message"])
+                mock_pub.publish.assert_not_called()
+                self.assertEqual(len(state.current_tasks), 0)
+
+    def test_patrol_rounds_single_and_duplicate_waypoints(self):
+        import rclpy
+        state.current_tasks.clear()
+        mock_pub = MagicMock()
+        with patch.object(rmf_service, "task_pub", mock_pub), patch.object(rclpy, "ok", return_value=True):
+            # Single waypoint
+            res_single = rmf_service.dispatch_task("patrol", "wp_1", rounds=4)
+            self.assertEqual(res_single["status"], "success")
+            payload_single = json.loads(mock_pub.publish.call_args[0][0].json_msg)
+            self.assertEqual(payload_single["request"]["description"]["places"], ["wp_1"])
+            self.assertEqual(payload_single["request"]["description"]["rounds"], 4)
+            self.assertEqual(state.current_tasks[0]["rounds"], 4)
+
+            # Same waypoint for target and destination -> deduplicated to single place
+            mock_pub.reset_mock()
+            res_dup = rmf_service.dispatch_task("patrol", "wp_1", destination_waypoint="wp_1", rounds=5)
+            self.assertEqual(res_dup["status"], "success")
+            payload_dup = json.loads(mock_pub.publish.call_args[0][0].json_msg)
+            self.assertEqual(payload_dup["request"]["description"]["places"], ["wp_1"])
+            self.assertEqual(payload_dup["request"]["description"]["rounds"], 5)
+            self.assertEqual(state.current_tasks[0]["rounds"], 5)
+
+    def test_patrol_rounds_goto_and_delivery_regression(self):
+        import rclpy
+        mock_pub = MagicMock()
+        with patch.object(rmf_service, "task_pub", mock_pub), patch.object(rclpy, "ok", return_value=True):
+            # Goto with rounds=3: category patrol, places [wp_1], rounds MUST remain 1
+            state.current_tasks.clear()
+            res_goto = rmf_service.dispatch_task("goto", "wp_1", rounds=3)
+            self.assertEqual(res_goto["status"], "success")
+            payload_goto = json.loads(mock_pub.publish.call_args[0][0].json_msg)
+            self.assertEqual(payload_goto["request"]["description"]["places"], ["wp_1"])
+            self.assertEqual(payload_goto["request"]["description"]["rounds"], 1)
+            self.assertNotIn("rounds", state.current_tasks[0])
+
+            # Delivery with rounds=3: delivery payload description must NOT contain rounds
+            state.current_tasks.clear()
+            mock_pub.reset_mock()
+            res_deliv = rmf_service.dispatch_task("delivery", "wp_1", destination_waypoint="wp_2", rounds=3)
+            self.assertEqual(res_deliv["status"], "success")
+            payload_deliv = json.loads(mock_pub.publish.call_args[0][0].json_msg)
+            self.assertNotIn("rounds", payload_deliv["request"]["description"])
+            self.assertNotIn("rounds", state.current_tasks[0])
+
+            # Explicitly invalid rounds on goto and delivery must still report error
+            mock_pub.reset_mock()
+            res_bad_goto = rmf_service.dispatch_task("goto", "wp_1", rounds=-1)
+            self.assertEqual(res_bad_goto["status"], "error")
+            mock_pub.publish.assert_not_called()
+
+            res_bad_deliv = rmf_service.dispatch_task("delivery", "wp_1", destination_waypoint="wp_2", rounds="3")
+            self.assertEqual(res_bad_deliv["status"], "error")
+            mock_pub.publish.assert_not_called()
+
+    def test_patrol_rounds_rest_endpoint_validation(self):
+        import asyncio
+        import rclpy
+        from controller.fleet_controller import dispatch_task_endpoint
+        from state import TaskRequest
+        from pydantic import ValidationError
+
+        mock_pub = MagicMock()
+        with patch.object(rmf_service, "task_pub", mock_pub), patch.object(rclpy, "ok", return_value=True):
+            # Valid patrol with rounds 3
+            state.current_tasks.clear()
+            req = TaskRequest(type="patrol", target_waypoint="wp_1", destination_waypoint="wp_2", rounds=3)
+            res = asyncio.run(dispatch_task_endpoint(req))
+            self.assertEqual(res["status"], "success")
+            self.assertEqual(state.current_tasks[0]["rounds"], 3)
+
+            # Default rounds (omitted)
+            state.current_tasks.clear()
+            req_default = TaskRequest(type="patrol", target_waypoint="wp_1")
+            res_default = asyncio.run(dispatch_task_endpoint(req_default))
+            self.assertEqual(res_default["status"], "success")
+            self.assertEqual(state.current_tasks[0]["rounds"], 1)
+
+            # Pydantic validation rejects illegal types and values
+            for bad in [None, True, False, "3", 0, -1, 1.5, [], {}]:
+                with self.assertRaises(ValidationError, msg=f"Should raise for {bad!r}"):
+                    TaskRequest(type="patrol", target_waypoint="wp_1", rounds=bad)
+
+    def test_patrol_rounds_websocket_dispatch_and_error_handling(self):
+        import asyncio
+        import rclpy
+        from controller.fleet_controller import websocket_endpoint
+
+        mock_pub = MagicMock()
+        with patch.object(rmf_service, "task_pub", mock_pub), patch.object(rclpy, "ok", return_value=True):
+            sent_messages = []
+
+            class FakeWebSocket:
+                def __init__(self, incoming_messages):
+                    self.incoming = list(incoming_messages)
+
+                async def accept(self):
+                    pass
+
+                async def send_json(self, data):
+                    sent_messages.append(data)
+
+                async def receive_text(self):
+                    if not self.incoming:
+                        raise Exception("Done")
+                    return self.incoming.pop(0)
+
+            # Sequence of messages:
+            # 1. Invalid rounds: 0 (should return error dispatch_response, NOT crash)
+            # 2. Invalid rounds: "bad" (should return error dispatch_response, NOT crash)
+            # 3. Invalid rounds: None (should return error dispatch_response, NOT crash)
+            # 4. Valid rounds: 3 (should return success dispatch_response, rounds recorded)
+            messages = [
+                json.dumps({"action": "dispatch_task", "payload": {"type": "patrol", "target_waypoint": "wp_1", "rounds": 0}}),
+                json.dumps({"action": "dispatch_task", "payload": {"type": "patrol", "target_waypoint": "wp_1", "rounds": "bad"}}),
+                json.dumps({"action": "dispatch_task", "payload": {"type": "patrol", "target_waypoint": "wp_1", "rounds": None}}),
+                json.dumps({"action": "dispatch_task", "payload": {"type": "patrol", "target_waypoint": "wp_1", "destination_waypoint": "wp_2", "rounds": 3}}),
+            ]
+
+            ws = FakeWebSocket(messages)
+            try:
+                asyncio.run(websocket_endpoint(ws))
+            except Exception as e:
+                if str(e) != "Done":
+                    raise
+
+            # Filter for dispatch_response
+            dispatch_responses = [m for m in sent_messages if m.get("type") == "dispatch_response"]
+            self.assertEqual(len(dispatch_responses), 4)
+
+            # First 3 are errors
+            self.assertEqual(dispatch_responses[0]["status"], "error")
+            self.assertIn("巡邏輪數", dispatch_responses[0]["message"])
+            self.assertEqual(dispatch_responses[1]["status"], "error")
+            self.assertIn("巡邏輪數", dispatch_responses[1]["message"])
+            self.assertEqual(dispatch_responses[2]["status"], "error")
+            self.assertIn("巡邏輪數", dispatch_responses[2]["message"])
+
+            # 4th message succeeded
+            self.assertEqual(dispatch_responses[3]["status"], "success")
+            self.assertEqual(state.current_tasks[0]["rounds"], 3)
+
+    def test_patrol_completion_detail_formatting(self):
+        # Patrol with 2 stations and 2 rounds: final stop is destination_waypoint
+        task_patrol_2 = {
+            "type": "patrol",
+            "target_waypoint": "wp_1",
+            "destination_waypoint": "wp_2",
+            "rounds": 2,
+        }
+        detail_patrol_2 = rmf_service._format_task_completion_detail(task_patrol_2)
+        self.assertEqual(detail_patrol_2, "巡邏任務完成（共 2 輪，已抵達終點 wp_2）")
+
+        # Single station patrol: final stop is target_waypoint
+        task_patrol_single = {
+            "type": "patrol",
+            "target_waypoint": "wp_1",
+            "rounds": 1,
+        }
+        detail_patrol_single = rmf_service._format_task_completion_detail(task_patrol_single)
+        self.assertEqual(detail_patrol_single, "巡邏任務完成（共 1 輪，已抵達終點 wp_1）")
+
+        # Delivery task
+        task_deliv = {
+            "type": "delivery",
+            "target_waypoint": "wp_1",
+            "destination_waypoint": "wp_2",
+        }
+        detail_deliv = rmf_service._format_task_completion_detail(task_deliv)
+        self.assertEqual(detail_deliv, "物料已送達 wp_2")
+
+        # Goto task
+        task_goto = {
+            "type": "goto",
+            "target_waypoint": "wp_1",
+        }
+        detail_goto = rmf_service._format_task_completion_detail(task_goto)
+        self.assertEqual(detail_goto, "已抵達 wp_1")
+
+    def test_patrol_progress_does_not_jump_to_98_at_first_station(self):
+        state.current_tasks.clear()
+        state.current_robots.clear()
+        state.fa_state.clear()
+        task = {
+            "id": "patrol_test_prog",
+            "booking_id": "patrol_test_prog",
+            "type": "patrol",
+            "target_waypoint": "wp_1",
+            "destination_waypoint": "wp_2",
+            "target_x": 0.0,
+            "target_y": 0.0,
+            "robot_id": "carter1",
+            "fleet_name": "fleet1",
+            "status": "active",
+            "progress": 5,
+            "rounds": 2,
+        }
+        state.current_tasks.append(task)
+
+        # Mock robot state arriving right at wp_1 (0.0, 0.0)
+        mock_robot = MagicMock()
+        mock_robot.name = "carter1"
+        mock_robot.task_id = "patrol_test_prog"
+        mock_robot.location.x = 0.05
+        mock_robot.location.y = 0.05
+        mock_robot.location.yaw = 0.0
+        mock_robot.location.level_name = "1F"
+        mock_robot.battery_percent = 99.0
+        mock_robot.mode.mode = 2  # moving
+
+        mock_fleet = MagicMock()
+        mock_fleet.name = "fleet1"
+        mock_fleet.robots = [mock_robot]
+
+        with patch.object(rmf_service, "get_waypoint_coords", return_value=(0.0, 0.0)), \
+             patch.object(state, "is_robot_offline", return_value=False), \
+             patch.object(state, "is_robot_estopped", return_value=False), \
+             patch.object(state, "is_robot_off_graph", return_value=(False, 0.0)):
+            rmf_service.fleet_callback(mock_fleet)
+
+        # Ensure progress did NOT jump to 98%
+        self.assertLessEqual(task["progress"], 10)
+        self.assertIn("巡邏執行中", task.get("detail", ""))
+        self.assertIn("設定 2 輪", task.get("detail", ""))
+        self.assertTrue(task.get("patrol_started"))
+
+    def test_task_response_cb_patrol_completion_path(self):
+        from types import SimpleNamespace
+        from rmf_service import RMFService
+
+        test_service = RMFService()
+        mock_node = MagicMock()
+        with patch("rmf_service.Node", return_value=mock_node), \
+             patch("rmf_service.rclpy.ok", return_value=True), \
+             patch("rmf_service.threading.Thread"):
+            test_service.init_ros2_node()
+
+        callbacks = {call.args[1]: call.args[2] for call in mock_node.create_subscription.call_args_list}
+        self.assertIn("/task_api_responses", callbacks)
+        task_response_cb = callbacks["/task_api_responses"]
+
+        # 1. Two-round, two-station patrol task
+        state.current_tasks.clear()
+        task_patrol_2 = {
+            "id": "test-resp-patrol-2",
+            "request_id": "test-resp-patrol-2",
+            "booking_id": "test-resp-patrol-2",
+            "type": "patrol",
+            "target_waypoint": "wp_12",
+            "destination_waypoint": "charger_1",
+            "rounds": 2,
+            "status": "active",
+            "progress": 5,
+            "detail": "巡邏執行中 (wp_12 ⇄ charger_1 · 設定 2 輪)",
+        }
+        state.current_tasks.append(task_patrol_2)
+
+        with patch.object(test_service, "_task_predates_adapter", return_value=False):
+            task_response_cb(SimpleNamespace(
+                request_id=task_patrol_2["request_id"],
+                json_msg=json.dumps({
+                    "success": True,
+                    "state": {
+                        "booking": {"id": task_patrol_2["booking_id"]},
+                        "status": "completed",
+                    },
+                }),
+            ))
+
+        self.assertEqual(task_patrol_2["status"], "completed")
+        self.assertEqual(task_patrol_2["progress"], 100)
+        self.assertEqual(task_patrol_2["detail"], "巡邏任務完成（共 2 輪，已抵達終點 charger_1）")
+
+        # 2. Single-station patrol task
+        state.current_tasks.clear()
+        task_patrol_single = {
+            "id": "test-resp-patrol-single",
+            "request_id": "test-resp-patrol-single",
+            "booking_id": "test-resp-patrol-single",
+            "type": "patrol",
+            "target_waypoint": "wp_1",
+            "rounds": 1,
+            "status": "active",
+            "progress": 5,
+            "detail": "巡邏執行中 (wp_1 · 設定 1 輪)",
+        }
+        state.current_tasks.append(task_patrol_single)
+
+        with patch.object(test_service, "_task_predates_adapter", return_value=False):
+            task_response_cb(SimpleNamespace(
+                request_id=task_patrol_single["request_id"],
+                json_msg=json.dumps({
+                    "success": True,
+                    "state": {
+                        "booking": {"id": task_patrol_single["booking_id"]},
+                        "status": "completed",
+                    },
+                }),
+            ))
+
+        self.assertEqual(task_patrol_single["status"], "completed")
+        self.assertEqual(task_patrol_single["progress"], 100)
+        self.assertEqual(task_patrol_single["detail"], "巡邏任務完成（共 1 輪，已抵達終點 wp_1）")
+
+        # 3. Delivery task
+        state.current_tasks.clear()
+        task_deliv = {
+            "id": "test-resp-deliv",
+            "request_id": "test-resp-deliv",
+            "booking_id": "test-resp-deliv",
+            "type": "delivery",
+            "target_waypoint": "wp_1",
+            "destination_waypoint": "wp_2",
+            "status": "active",
+            "progress": 50,
+            "detail": "前往 wp_2 配送中",
+        }
+        state.current_tasks.append(task_deliv)
+
+        with patch.object(test_service, "_task_predates_adapter", return_value=False):
+            task_response_cb(SimpleNamespace(
+                request_id=task_deliv["request_id"],
+                json_msg=json.dumps({
+                    "success": True,
+                    "state": {
+                        "booking": {"id": task_deliv["booking_id"]},
+                        "status": "completed",
+                    },
+                }),
+            ))
+
+        self.assertEqual(task_deliv["status"], "completed")
+        self.assertEqual(task_deliv["progress"], 100)
+        self.assertEqual(task_deliv["detail"], "物料已送達 wp_2")
+
 
 if __name__ == "__main__":
     unittest.main()

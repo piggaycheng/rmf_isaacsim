@@ -292,6 +292,30 @@ class RMFService:
             append_adapter_log(task.get("fleet_name") or "system", f"[WARN] Task [{task.get('id')}] {task['detail']}")
 
     @staticmethod
+    def _format_task_completion_detail(task: Dict[str, Any]) -> str:
+        """Returns an accurate completion message based on task type."""
+        task_type = task.get("type")
+        if task.get("total_steps") and task.get("total_steps") > 1:
+            return f"全部 {task['total_steps']} 個步驟已完成"
+        elif task_type == "patrol":
+            rounds = task.get("rounds", 1)
+            target_wp = task.get("target_waypoint")
+            dest_wp = task.get("destination_waypoint")
+            final_stop = dest_wp if dest_wp and dest_wp != target_wp else target_wp
+            if final_stop:
+                return f"巡邏任務完成（共 {rounds} 輪，已抵達終點 {final_stop}）"
+            return f"巡邏任務完成（共 {rounds} 輪）"
+        elif task_type == "delivery":
+            dest_wp = task.get("destination_waypoint")
+            if dest_wp:
+                return f"物料已送達 {dest_wp}"
+            return "配送任務已完成"
+        elif task.get("target_waypoint"):
+            return f"已抵達 {task['target_waypoint']}"
+        else:
+            return "任務已完成"
+
+    @staticmethod
     def _task_predates_adapter(task: Dict[str, Any]) -> bool:
         if task.get("interruption_pending") or task.get("interruption_reason"):
             return True
@@ -448,6 +472,9 @@ class RMFService:
                                         t["status"] = mapped_status
                                         if mapped_status == "completed":
                                             t["progress"] = 100
+                                            t["detail"] = self._format_task_completion_detail(t)
+                                            if t.get("total_steps"):
+                                                t["current_step"] = t["total_steps"] - 1
                                     break
                 except Exception as ex:
                     print(f"[RMF Task API] Error parsing response: {ex}")
@@ -526,9 +553,9 @@ class RMFService:
                                 t["fleet_name"] = ts.fleet_name
                             if stat == "completed":
                                 t["progress"] = 100
+                                t["detail"] = self._format_task_completion_detail(t)
                                 if t.get("total_steps"):
                                     t["current_step"] = t["total_steps"] - 1
-                                    t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
                             elif stat in ["failed", "canceled"]:
                                 if ts.status:
                                     t["error"] = ts.status
@@ -927,8 +954,19 @@ class RMFService:
                             waiting_prog = round(((curr + 1) / tot) * 100)
                             t["progress"] = min(99, max(t.get("progress", 0), waiting_prog))
 
+                    elif t.get("type") == "patrol":
+                        # Patrol task: multi-station or multi-round patrol progress cannot be derived from
+                        # the single-point distance to the initial target waypoint.
+                        rounds = t.get("rounds", 1)
+                        target_wp = t.get("target_waypoint")
+                        dest_wp = t.get("destination_waypoint")
+                        route_str = f"{target_wp} ⇄ {dest_wp}" if dest_wp and dest_wp != target_wp else (target_wp or "未知站點")
+                        t["detail"] = f"巡邏執行中 ({route_str} · 設定 {rounds} 輪)"
+                        t["patrol_started"] = True
+                        if t.get("progress", 0) < 5:
+                            t["progress"] = 5
                     else:
-                        # SINGLE-STEP TASK
+                        # SINGLE-STEP TASK (goto / delivery)
                         target_wp = t.get("target_waypoint")
                         tx = t.get("target_x")
                         ty = t.get("target_y")
@@ -983,13 +1021,9 @@ class RMFService:
                             if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested") and not self._task_predates_adapter(t):
                                 t["status"] = "completed"
                                 t["progress"] = 100
+                                t["detail"] = self._format_task_completion_detail(t)
                                 if t.get("total_steps") and t.get("total_steps") > 1:
                                     t["current_step"] = t["total_steps"] - 1
-                                    t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
-                                elif t.get("target_waypoint"):
-                                    t["detail"] = f"已抵達 {t['target_waypoint']}"
-                                else:
-                                    t["detail"] = "任務已完成"
                                 append_adapter_log(
                                     fleet_name,
                                     f"[INFO] Task [{prev_task_id}] completed by robot [{r_id}].",
@@ -1004,13 +1038,9 @@ class RMFService:
                             if t.get("status") not in state.TERMINAL_STATES and not t.get("cancel_requested") and not self._task_predates_adapter(t):
                                 t["status"] = "completed"
                                 t["progress"] = 100
+                                t["detail"] = self._format_task_completion_detail(t)
                                 if t.get("total_steps") and t.get("total_steps") > 1:
                                     t["current_step"] = t["total_steps"] - 1
-                                    t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
-                                elif t.get("target_waypoint"):
-                                    t["detail"] = f"已抵達 {t['target_waypoint']}"
-                                else:
-                                    t["detail"] = "任務已完成"
                                 t["robot_id"] = r_id
                                 t["fleet_name"] = fleet_name
                                 append_adapter_log(
@@ -1027,17 +1057,13 @@ class RMFService:
                             and t.get("status") == "active"
                             and not t.get("cancel_requested")
                             and not self._task_predates_adapter(t)
-                            and t.get("progress", 0) >= 80
+                            and (t.get("progress", 0) >= 80 or (t.get("type") == "patrol" and t.get("patrol_started")))
                         ):
                             t["status"] = "completed"
                             t["progress"] = 100
+                            t["detail"] = self._format_task_completion_detail(t)
                             if t.get("total_steps") and t.get("total_steps") > 1:
                                 t["current_step"] = t["total_steps"] - 1
-                                t["detail"] = f"全部 {t['total_steps']} 個步驟已完成"
-                            elif t.get("target_waypoint"):
-                                t["detail"] = f"已抵達 {t['target_waypoint']}"
-                            else:
-                                t["detail"] = "任務已完成"
                             append_adapter_log(
                                 fleet_name,
                                 f"[INFO] Task [{t.get('booking_id') or t.get('id')}] confirmed completed by robot [{r_id}].",
@@ -1478,6 +1504,7 @@ class RMFService:
         destination_waypoint: Optional[str] = None,
         robot_id: Optional[str] = None,
         fleet_name: Optional[str] = None,
+        rounds: Optional[Any] = 1,
     ) -> Dict[str, Any]:
         """
         Dispatches a task to Open-RMF Task Dispatcher via ROS 2 ApiRequest.
@@ -1485,6 +1512,16 @@ class RMFService:
         and fleet adapter will dispatch down to AMR via MQTT.
         """
         req_id = generate_task_id()
+
+        # Validate rounds: explicitly provided rounds must be a valid positive integer
+        validated_rounds, rounds_err = state.validate_rounds(rounds)
+        if rounds_err:
+            return {
+                "status": "error",
+                "task_id": None,
+                "request_id": None,
+                "message": rounds_err,
+            }
         
         # 1. Validate task_type
         valid_types = {"goto", "patrol", "delivery"}
@@ -1576,7 +1613,7 @@ class RMFService:
                 places.append(destination_waypoint)
             description = {
                 "places": places,
-                "rounds": 1,
+                "rounds": validated_rounds,
             }
         else: # goto
             category = "patrol"
@@ -1654,6 +1691,10 @@ class RMFService:
             "created_at": time.strftime("%H:%M:%S"),
             "submitted_at": time.time(),
         }
+        if task_type == "patrol":
+            new_task["rounds"] = validated_rounds
+            route_str = f"{target_waypoint} ⇄ {destination_waypoint}" if destination_waypoint and destination_waypoint != target_waypoint else target_waypoint
+            new_task["detail"] = f"巡邏任務等待排程中 ({route_str} · 設定 {validated_rounds} 輪)"
         state.current_tasks.insert(0, new_task)
 
         # Publish to ROS 2 /task_api_requests
