@@ -431,11 +431,56 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         ctx.fillText(badge, pos.x, pos.y);
       }
 
-      // Waypoint Name below
-      ctx.fillStyle = isSelected ? '#fbbf24' : '#e2e8f0';
-      ctx.font = isSelected ? 'bold 11px sans-serif' : '11px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(wp.name, pos.x, pos.y + 20);
+      // Waypoint Name below with a high-contrast background box / pill
+      if (wp.name) {
+        ctx.font = isSelected ? 'bold 11px sans-serif' : '10.5px sans-serif';
+        const textMetrics = ctx.measureText(wp.name);
+        const textWidth = textMetrics.width;
+        const paddingX = 6;
+        const boxWidth = Math.max(textWidth + paddingX * 2, 24);
+        const boxHeight = 18;
+        const boxX = pos.x - boxWidth / 2;
+        const boxY = pos.y + 15;
+        const cornerRadius = 4;
+
+        // Shadow for elevation and contrast against light or dark map backgrounds
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.65)';
+        ctx.shadowBlur = 4;
+        ctx.shadowOffsetY = 1;
+
+        // Background box fill: dark slate with high opacity to guarantee 100% legibility on white maps
+        ctx.fillStyle = isSelected
+          ? 'rgba(15, 23, 42, 0.95)'
+          : 'rgba(15, 23, 42, 0.88)';
+
+        // Border styling matching graph color or waypoint type accent
+        ctx.strokeStyle = isSelected
+          ? '#f59e0b'
+          : isDimmed
+          ? 'rgba(71, 85, 105, 0.5)'
+          : accentBorderColor !== '#ffffff'
+          ? accentBorderColor
+          : graphColor;
+        ctx.lineWidth = isSelected ? 1.5 : 1.2;
+
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(boxX, boxY, boxWidth, boxHeight, cornerRadius);
+        } else {
+          ctx.rect(boxX, boxY, boxWidth, boxHeight);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+
+        // Waypoint Name text inside the box
+        ctx.fillStyle = isSelected ? '#fbbf24' : isDimmed ? '#94a3b8' : '#f8fafc';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(wp.name, pos.x, boxY + boxHeight / 2);
+      }
 
       ctx.restore();
     });
@@ -638,7 +683,21 @@ export const MapCanvas: React.FC<MapCanvasProps> = ({
         }
         const screenPos = worldToScreen(wp.x, wp.y);
         const dist = Math.hypot(screenPos.x - clientX, screenPos.y - clientY);
-        return dist <= 14;
+        if (dist <= 15) return true;
+
+        // Also hit-test the waypoint name label box below the waypoint
+        if (wp.name) {
+          const approxHalfW = Math.max(16, (wp.name.length * 7) / 2 + 6);
+          if (
+            clientX >= screenPos.x - approxHalfW &&
+            clientX <= screenPos.x + approxHalfW &&
+            clientY >= screenPos.y + 13 &&
+            clientY <= screenPos.y + 35
+          ) {
+            return true;
+          }
+        }
+        return false;
       });
 
       if (mode === 'monitor') {

@@ -368,10 +368,33 @@ export const MapOverlayAlignModal: React.FC<MapOverlayAlignModalProps> = ({
       ctx.lineWidth = 1.5;
       ctx.stroke();
       if (w.type === 'lift') {
+        const text = `🛗 ${w.name}`;
+        ctx.font = 'bold 10px sans-serif';
+        const tw = ctx.measureText(text).width;
+        const bw = tw + 10;
+        const bh = 18;
+        const bx = s.x - bw / 2;
+        const by = s.y - 25;
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 1.2;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = 4;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(bx, by, bw, bh, 4);
+        } else {
+          ctx.rect(bx, by, bw, bh);
+        }
+        ctx.fill();
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
         ctx.fillStyle = '#a7f3d0';
-        ctx.font = 'bold 9px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(`🛗 ${w.name}`, s.x, s.y - 12);
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, s.x, by + bh / 2);
       }
       ctx.restore();
     });
@@ -389,10 +412,33 @@ export const MapOverlayAlignModal: React.FC<MapOverlayAlignModalProps> = ({
       ctx.lineWidth = 1.5;
       ctx.stroke();
       if (w.type === 'lift') {
+        const text = `🛗 ${w.name}`;
+        ctx.font = 'bold 10px sans-serif';
+        const tw = ctx.measureText(text).width;
+        const bw = tw + 10;
+        const bh = 18;
+        const bx = s.x - bw / 2;
+        const by = s.y + 13;
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 1.2;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = 4;
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+          ctx.roundRect(bx, by, bw, bh, 4);
+        } else {
+          ctx.rect(bx, by, bw, bh);
+        }
+        ctx.fill();
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
         ctx.fillStyle = '#bae6fd';
-        ctx.font = 'bold 9px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText(`🛗 ${w.name}`, s.x, s.y + 18);
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, s.x, by + bh / 2);
       }
       ctx.restore();
     });
