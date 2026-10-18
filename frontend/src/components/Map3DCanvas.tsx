@@ -336,6 +336,10 @@ interface WaypointNode3DProps {
   bounds: { cx: number; cy: number };
   isSelected: boolean;
   graphColor: string;
+  isFocusedFloor: boolean;
+  lockActiveFloor: boolean;
+  hideNonActiveBadges: boolean;
+  elevationOrder: number;
   onSelect?: (id: string | null) => void;
   onClickInMonitor?: (waypoint: Waypoint) => void;
 }
@@ -345,11 +349,18 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
   bounds,
   isSelected,
   graphColor,
+  isFocusedFloor,
+  lockActiveFloor,
+  hideNonActiveBadges,
+  elevationOrder,
   onSelect,
   onClickInMonitor,
 }) => {
   const localX = waypoint.x - bounds.cx;
   const localY = waypoint.y - bounds.cy;
+
+  const isInteractive = isFocusedFloor || !lockActiveFloor;
+  const showBadge = !hideNonActiveBadges || isFocusedFloor;
 
   let badgeIcon = null;
   if (waypoint.type === 'charger') badgeIcon = <span className="text-amber-400">⚡</span>;
@@ -362,7 +373,11 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
       {/* 3D Vertical Marker Stem */}
       <mesh position={[0, 0, 0.11]}>
         <cylinderGeometry args={[0.015, 0.015, 0.22, 8]} />
-        <meshBasicMaterial color={isSelected ? '#f59e0b' : graphColor} transparent opacity={0.65} />
+        <meshBasicMaterial
+          color={isSelected ? '#f59e0b' : graphColor}
+          transparent
+          opacity={isFocusedFloor ? 0.65 : 0.25}
+        />
       </mesh>
 
       {/* 3D Anchor Node Dot */}
@@ -371,29 +386,51 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
         <meshStandardMaterial
           color={isSelected ? '#fbbf24' : graphColor}
           emissive={isSelected ? '#f59e0b' : graphColor}
-          emissiveIntensity={0.6}
+          emissiveIntensity={isFocusedFloor ? 0.6 : 0.15}
+          transparent
+          opacity={isFocusedFloor ? 1.0 : 0.4}
         />
       </mesh>
 
-      {/* Upright Floating Billboard Name Badge (same style as Elevator) */}
-      <Html position={[0, 0, 0.44]} center distanceFactor={26}>
-        <div
-          onClick={(e) => {
-            e.stopPropagation();
-            onSelect?.(waypoint.id);
-            onClickInMonitor?.(waypoint);
+      {/* Upright Floating Billboard Name Badge */}
+      {showBadge && (
+        <Html
+          position={[0, 0, 0.44]}
+          center
+          distanceFactor={26}
+          style={{
+            pointerEvents: isInteractive ? 'auto' : 'none',
+            zIndex: isFocusedFloor ? 50 : Math.max(1, 10 + elevationOrder),
           }}
-          className={`cursor-pointer select-none px-2 py-0.5 rounded-lg border text-[11px] font-semibold shadow-xl backdrop-blur flex items-center gap-1 whitespace-nowrap transition-all ${
-            isSelected
-              ? 'bg-amber-950/95 border-amber-400 text-amber-300 ring-2 ring-amber-400/50 scale-110 z-10'
-              : 'bg-slate-950/85 border-slate-700/80 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 hover:scale-105'
-          }`}
-          title={`站點: ${waypoint.name} (點擊快速派單)`}
         >
-          {badgeIcon}
-          <span>{waypoint.name}</span>
-        </div>
-      </Html>
+          <div
+            onClick={
+              isInteractive
+                ? (e) => {
+                    e.stopPropagation();
+                    onSelect?.(waypoint.id);
+                    onClickInMonitor?.(waypoint);
+                  }
+                : undefined
+            }
+            className={`select-none px-2 py-0.5 rounded-lg border text-[11px] font-semibold shadow-xl backdrop-blur flex items-center gap-1 whitespace-nowrap transition-all ${
+              isSelected
+                ? 'bg-amber-950/95 border-amber-400 text-amber-300 ring-2 ring-amber-400/50 scale-110 z-10 cursor-pointer pointer-events-auto'
+                : isFocusedFloor
+                ? 'bg-slate-950/85 border-slate-700/80 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 hover:scale-105 cursor-pointer pointer-events-auto'
+                : 'bg-slate-950/50 border-slate-800/50 text-slate-400 opacity-40 cursor-default pointer-events-none'
+            }`}
+            title={
+              isInteractive
+                ? `站點: ${waypoint.name} (點擊快速派單)`
+                : `站點: ${waypoint.name} (非聚焦樓層)`
+            }
+          >
+            {badgeIcon}
+            <span>{waypoint.name}</span>
+          </div>
+        </Html>
+      )}
     </group>
   );
 };
@@ -404,10 +441,22 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
 interface RobotBadge3DProps {
   robot: Robot;
   bounds: { cx: number; cy: number };
+  isFocusedFloor: boolean;
+  lockActiveFloor: boolean;
+  hideNonActiveBadges: boolean;
+  elevationOrder: number;
   onClick?: () => void;
 }
 
-const RobotBadge3D: React.FC<RobotBadge3DProps> = ({ robot, bounds, onClick }) => {
+const RobotBadge3D: React.FC<RobotBadge3DProps> = ({
+  robot,
+  bounds,
+  isFocusedFloor,
+  lockActiveFloor,
+  hideNonActiveBadges,
+  elevationOrder,
+  onClick,
+}) => {
   const localX = robot.x - bounds.cx;
   const localY = robot.y - bounds.cy;
 
@@ -417,30 +466,50 @@ const RobotBadge3D: React.FC<RobotBadge3DProps> = ({ robot, bounds, onClick }) =
   const statusColor = isEstopped ? '#ef4444' : isOffGraph ? '#f59e0b' : isMoving ? '#06b6d4' : '#10b981';
   const statusLabel = isEstopped ? '急停' : isOffGraph ? '偏移' : isMoving ? '移動中' : '待命';
 
+  const isInteractive = isFocusedFloor || !lockActiveFloor;
+  const showBadge = !hideNonActiveBadges || isFocusedFloor;
+
   return (
     <group position={[localX, localY, 0]}>
-      {/* Upright Floating Billboard Status Badge hovering above 2D AMR icon */}
-      <Html position={[0, 0, 0.95]} center distanceFactor={28}>
-        <div
-          onClick={(e) => {
-            e.stopPropagation();
-            onClick?.();
+      {showBadge && (
+        <Html
+          position={[0, 0, 0.95]}
+          center
+          distanceFactor={28}
+          style={{
+            pointerEvents: isInteractive ? 'auto' : 'none',
+            zIndex: isFocusedFloor ? 60 : Math.max(1, 10 + elevationOrder),
           }}
-          className="cursor-pointer select-none px-2.5 py-1 rounded-xl bg-slate-950/90 border border-slate-700/80 hover:border-cyan-400 shadow-2xl backdrop-blur flex items-center gap-1.5 whitespace-nowrap transition-all hover:scale-105"
         >
-          <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: statusColor }} />
-          <span className="font-bold text-xs text-white">🤖 {robot.name}</span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-900 text-cyan-300 font-mono font-bold border border-slate-800">
-            ⚡ {Math.round(robot.battery)}%
-          </span>
-          <span
-            className="text-[9px] px-1.5 py-0.5 rounded font-bold"
-            style={{ backgroundColor: `${statusColor}25`, color: statusColor }}
+          <div
+            onClick={
+              isInteractive
+                ? (e) => {
+                    e.stopPropagation();
+                    onClick?.();
+                  }
+                : undefined
+            }
+            className={`select-none px-2.5 py-1 rounded-xl shadow-2xl backdrop-blur flex items-center gap-1.5 whitespace-nowrap transition-all ${
+              isFocusedFloor
+                ? 'bg-slate-950/90 border border-slate-700/80 hover:border-cyan-400 shadow-2xl hover:scale-105 cursor-pointer pointer-events-auto'
+                : 'bg-slate-950/50 border border-slate-800/50 opacity-40 cursor-default pointer-events-none'
+            }`}
           >
-            {statusLabel}
-          </span>
-        </div>
-      </Html>
+            <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: statusColor }} />
+            <span className="font-bold text-xs text-white">🤖 {robot.name}</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-900 text-cyan-300 font-mono font-bold border border-slate-800">
+              ⚡ {Math.round(robot.battery)}%
+            </span>
+            <span
+              className="text-[9px] px-1.5 py-0.5 rounded font-bold"
+              style={{ backgroundColor: `${statusColor}25`, color: statusColor }}
+            >
+              {statusLabel}
+            </span>
+          </div>
+        </Html>
+      )}
     </group>
   );
 };
@@ -451,13 +520,16 @@ const RobotBadge3D: React.FC<RobotBadge3DProps> = ({ robot, bounds, onClick }) =
 interface FloorLevelPlaneProps {
   level: MapLevel;
   elevation: number;
+  elevationOrder: number;
+  isFocusedFloor: boolean;
+  lockActiveFloor: boolean;
+  hideNonActiveBadges: boolean;
   slamMap?: SlamMap;
   waypoints: Waypoint[];
   lanes: Lane[];
   robots: Robot[];
   graphs?: NavGraph[];
   selectedWaypointIds?: string[];
-  floorOpacity: number;
   onSelectWaypoint?: (id: string | null) => void;
   onWaypointClickInMonitor?: (waypoint: Waypoint) => void;
   onFocusFloor?: (levelName: string) => void;
@@ -466,13 +538,16 @@ interface FloorLevelPlaneProps {
 const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
   level,
   elevation,
+  elevationOrder,
+  isFocusedFloor,
+  lockActiveFloor,
+  hideNonActiveBadges,
   slamMap,
   waypoints,
   lanes,
   robots,
   graphs,
   selectedWaypointIds,
-  floorOpacity,
   onSelectWaypoint,
   onWaypointClickInMonitor,
   onFocusFloor,
@@ -607,6 +682,15 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
   // Click on floor to dispatch or select waypoint
   const handleFloorClick = useCallback(
     (e: ThreeEvent<MouseEvent>) => {
+      // 1. Always stop propagation so ray does not penetrate to lower floors
+      e.stopPropagation();
+
+      // 2. If locked to focused floor and this floor is NOT focused:
+      // Completely ignore map clicks on non-focused floor planes (never switch focus or trigger points on map click)
+      if (lockActiveFloor && !isFocusedFloor) {
+        return;
+      }
+
       if (!e.uv) return;
       // Convert UV [0, 1] back to local floor coords
       // UV x=0 is minX, x=1 is maxX
@@ -625,13 +709,20 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
       }
 
       if (nearestWp) {
-        e.stopPropagation();
         onSelectWaypoint?.(nearestWp.id);
         onWaypointClickInMonitor?.(nearestWp);
       }
     },
-    [bounds, waypoints, onSelectWaypoint, onWaypointClickInMonitor]
+    [bounds, waypoints, onSelectWaypoint, onWaypointClickInMonitor, isFocusedFloor, lockActiveFloor]
   );
+
+  // Effective floor map opacity: 100% (1.0) when focused or unlocked, 35% (0.35) semi-transparent for non-focused floors when locked
+  const effectiveFloorOpacity = useMemo(() => {
+    if (lockActiveFloor && !isFocusedFloor) {
+      return 0.35;
+    }
+    return 1.0;
+  }, [lockActiveFloor, isFocusedFloor]);
 
   return (
     <group
@@ -644,24 +735,41 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
         <meshBasicMaterial
           map={texture}
           transparent
-          opacity={floorOpacity}
+          opacity={effectiveFloorOpacity}
           depthWrite={false}
           side={THREE.DoubleSide}
         />
       </mesh>
 
       {/* Floating Floor Label Badge in Corner */}
-      <Html position={[-bounds.W / 2 + 1.2, bounds.H / 2 - 1.2, 0.15]} center={false}>
+      <Html
+        position={[-bounds.W / 2 + 1.2, bounds.H / 2 - 1.2, 0.15]}
+        center={false}
+        style={{
+          zIndex: isFocusedFloor ? 70 : Math.max(1, 20 + elevationOrder),
+        }}
+      >
         <div
           onClick={(e) => {
             e.stopPropagation();
             onFocusFloor?.(level.name);
           }}
-          className="cursor-pointer select-none px-2.5 py-1 rounded-lg bg-slate-900/95 border border-cyan-500/50 text-cyan-300 text-xs font-bold shadow-xl backdrop-blur hover:bg-slate-800 hover:border-cyan-400 transition-all flex items-center gap-1.5 whitespace-nowrap"
+          className={`cursor-pointer select-none px-2.5 py-1 rounded-lg text-xs font-bold shadow-xl backdrop-blur transition-all flex items-center gap-1.5 whitespace-nowrap pointer-events-auto ${
+            isFocusedFloor
+              ? 'bg-cyan-950/95 border-2 border-cyan-400 text-cyan-200 ring-2 ring-cyan-400/30 scale-105'
+              : 'bg-slate-900/85 border border-slate-700/70 text-slate-400 hover:border-cyan-500/70 hover:text-cyan-300 hover:scale-105'
+          }`}
           title={`點擊聚焦至 ${level.name} 樓層`}
         >
-          <span className="text-cyan-400">🏢 {level.name}</span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800/60 font-mono">
+          <span className={isFocusedFloor ? 'text-cyan-300 font-extrabold' : 'text-slate-400'}>
+            🏢 {level.name}
+          </span>
+          {isFocusedFloor && (
+            <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-normal">
+              聚焦中
+            </span>
+          )}
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-950 text-cyan-300 border border-cyan-800/60 font-mono">
             {robots.length} 台車
           </span>
           <span className="text-[10px] text-slate-400 font-mono">
@@ -685,6 +793,10 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
             bounds={bounds}
             isSelected={isSelected}
             graphColor={graphColor}
+            isFocusedFloor={isFocusedFloor}
+            lockActiveFloor={lockActiveFloor}
+            hideNonActiveBadges={hideNonActiveBadges}
+            elevationOrder={elevationOrder}
             onSelect={onSelectWaypoint}
             onClickInMonitor={onWaypointClickInMonitor}
           />
@@ -697,6 +809,10 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
           key={robot.id}
           robot={robot}
           bounds={bounds}
+          isFocusedFloor={isFocusedFloor}
+          lockActiveFloor={lockActiveFloor}
+          hideNonActiveBadges={hideNonActiveBadges}
+          elevationOrder={elevationOrder}
         />
       ))}
     </group>
@@ -898,8 +1014,8 @@ const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
         )}
 
         {/* 4. 3D Floating Status Badge */}
-        <Html position={[0, 0, cabinHeight + 0.6]} center distanceFactor={28}>
-          <div className="select-none px-2.5 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/60 text-slate-100 shadow-2xl backdrop-blur flex flex-col items-center gap-1 min-w-[130px]">
+        <Html position={[0, 0, cabinHeight + 0.6]} center distanceFactor={28} style={{ pointerEvents: 'none' }}>
+          <div className="select-none px-2.5 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/60 text-slate-100 shadow-2xl backdrop-blur flex flex-col items-center gap-1 min-w-[130px] pointer-events-none">
             <div className="flex items-center gap-1.5 text-xs font-bold">
               <span className="text-indigo-400">🛗 {lift.name}</span>
               <span
@@ -1018,13 +1134,35 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
 }) => {
   // Visual adjustment parameters
   const [floorSpacing, setFloorSpacing] = useState<number>(12); // meters
-  const [floorOpacity, setFloorOpacity] = useState<number>(0.92);
   const [focusSignal, setFocusSignal] = useState<string | null>(null);
+  const [lockActiveFloor, setLockActiveFloor] = useState<boolean>(true); // default true: avoid misclicking lower floors
+  const [hideNonActiveBadges, setHideNonActiveBadges] = useState<boolean>(false);
+
+  // Sync focusSignal with activeLevel prop
+  useEffect(() => {
+    if (activeLevel) {
+      setFocusSignal(activeLevel);
+    }
+  }, [activeLevel]);
+
+  const focusedFloor = focusSignal || activeLevel || levels[0]?.name || '1F';
 
   // Compute floor Z elevations dynamically based on logical floor order & spacing
   const elevations = useMemo(() => {
     return resolveLevelElevations(levels, floorSpacing);
   }, [levels, floorSpacing]);
+
+  // Floor elevation ranking for DOM z-index hierarchy
+  const elevationOrderMap = useMemo(() => {
+    const sorted = [...levels].sort(
+      (a, b) => (elevations[a.name] ?? 0) - (elevations[b.name] ?? 0)
+    );
+    const map: Record<string, number> = {};
+    sorted.forEach((l, idx) => {
+      map[l.name] = idx;
+    });
+    return map;
+  }, [levels, elevations]);
 
   // Project robots to each floor's local frame
   const floorRobotsMap = useMemo(() => {
@@ -1138,23 +1276,30 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
         />
 
         {/* Floor Planes */}
-        {levels.map((lvl) => (
-          <FloorLevelPlane
-            key={lvl.name}
-            level={lvl}
-            elevation={elevations[lvl.name] ?? 0}
-            slamMap={floorSlamMaps[lvl.name]}
-            waypoints={floorWaypointsMap[lvl.name] || []}
-            lanes={floorLanesMap[lvl.name] || []}
-            robots={floorRobotsMap[lvl.name] || []}
-            graphs={graphs}
-            selectedWaypointIds={selectedWaypointIds}
-            floorOpacity={floorOpacity}
-            onSelectWaypoint={onSelectWaypoint}
-            onWaypointClickInMonitor={onWaypointClickInMonitor}
-            onFocusFloor={handleFocusFloorInternal}
-          />
-        ))}
+        {levels.map((lvl) => {
+          const isFocused = focusedFloor === lvl.name;
+          const order = elevationOrderMap[lvl.name] ?? 0;
+          return (
+            <FloorLevelPlane
+              key={lvl.name}
+              level={lvl}
+              elevation={elevations[lvl.name] ?? 0}
+              elevationOrder={order}
+              isFocusedFloor={isFocused}
+              lockActiveFloor={lockActiveFloor}
+              hideNonActiveBadges={hideNonActiveBadges}
+              slamMap={floorSlamMaps[lvl.name]}
+              waypoints={floorWaypointsMap[lvl.name] || []}
+              lanes={floorLanesMap[lvl.name] || []}
+              robots={floorRobotsMap[lvl.name] || []}
+              graphs={graphs}
+              selectedWaypointIds={selectedWaypointIds}
+              onSelectWaypoint={onSelectWaypoint}
+              onWaypointClickInMonitor={onWaypointClickInMonitor}
+              onFocusFloor={handleFocusFloorInternal}
+            />
+          );
+        })}
 
         {/* 3D Lifts (Shaft + Moving Cabin + Telemetry) */}
         {activeLifts.map((lift) => (
@@ -1200,41 +1345,27 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
             />
           </div>
 
-          {/* Floor Opacity Slider */}
-          <div className="flex flex-col gap-1 text-[11px]">
-            <div className="flex justify-between text-slate-300">
-              <span>地圖透明度</span>
-              <span className="font-mono text-cyan-400 font-bold">
-                {Math.round(floorOpacity * 100)}%
-              </span>
-            </div>
-            <input
-              type="range"
-              min="0.2"
-              max="1.0"
-              step="0.05"
-              value={floorOpacity}
-              onChange={(e) => setFloorOpacity(Number(e.target.value))}
-              className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
-            />
-          </div>
+          {/* Floor Interaction & Protection Options */}
+          <div className="flex flex-col gap-1.5 pt-1.5 border-t border-slate-800/80 text-[11px]">
+            <label className="flex items-center gap-2 cursor-pointer text-slate-300 hover:text-white select-none">
+              <input
+                type="checkbox"
+                checked={lockActiveFloor}
+                onChange={(e) => setLockActiveFloor(e.target.checked)}
+                className="w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer accent-cyan-500"
+              />
+              <span className="flex-1 font-medium">鎖定聚焦樓層 (防誤觸底層)</span>
+            </label>
 
-          {/* Quick Floor Focus Buttons */}
-          <div className="flex flex-wrap items-center gap-1 pt-1 border-t border-slate-800/80">
-            <span className="text-[10px] text-slate-400 mr-1">聚焦：</span>
-            {levels.map((l) => (
-              <button
-                key={l.name}
-                onClick={() => handleFocusFloorInternal(l.name)}
-                className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
-                  (focusSignal || activeLevel) === l.name
-                    ? 'bg-cyan-500 text-white shadow'
-                    : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                {l.name}
-              </button>
-            ))}
+            <label className="flex items-center gap-2 cursor-pointer text-slate-300 hover:text-white select-none">
+              <input
+                type="checkbox"
+                checked={hideNonActiveBadges}
+                onChange={(e) => setHideNonActiveBadges(e.target.checked)}
+                className="w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer accent-cyan-500"
+              />
+              <span className="flex-1 font-medium">僅顯示當前樓層標籤</span>
+            </label>
           </div>
         </div>
 
@@ -1280,10 +1411,16 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
 
       {/* Floating Bottom-Left Interaction Helper */}
       <div className="absolute bottom-4 left-4 z-20 pointer-events-none">
-        <div className="bg-slate-950/80 backdrop-blur border border-slate-800/80 px-3 py-1.5 rounded-xl shadow-xl flex items-center gap-2 text-slate-400 text-xs">
+        <div className="bg-slate-950/85 backdrop-blur border border-slate-800/80 px-3 py-1.5 rounded-xl shadow-xl flex items-center gap-2 text-slate-400 text-xs">
           <span className="font-semibold text-cyan-400">💡 3D 操作提示</span>
           <span className="text-slate-600">|</span>
-          <span>按住左鍵旋轉 · 右鍵平移 · 滾輪縮放 · 點擊站點可派單</span>
+          <span>按住左鍵旋轉 · 右鍵平移 · 滾輪縮放</span>
+          <span className="text-slate-600">|</span>
+          <span className="text-cyan-300 font-medium">
+            {lockActiveFloor
+              ? `已鎖定 [${focusedFloor}] 互動，點選左上角樓層按鈕或樓層牌切換聚焦`
+              : '全樓層自由互動模式'}
+          </span>
         </div>
       </div>
     </div>
