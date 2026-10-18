@@ -32,6 +32,10 @@ def get_robots():
 def get_tasks():
     return current_tasks
 
+@router.get("/api/lifts")
+def get_lifts():
+    return list(state.current_lifts.values())
+
 @router.post("/api/tasks/dispatch")
 async def dispatch_task_endpoint(req: TaskRequest):
     """Submits task dispatch request to Open-RMF scheduler."""
@@ -103,6 +107,7 @@ class EmergencyStopRequest(BaseModel):
 async def _broadcast_fleet_and_tasks():
     await broadcast({"type": "fleet_states", "robots": list(current_robots.values())})
     await broadcast({"type": "tasks", "tasks": current_tasks})
+    await broadcast({"type": "lift_states", "lifts": list(state.current_lifts.values())})
 
 
 @router.post("/api/tasks/{task_id}/cancel")
@@ -190,6 +195,10 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json({
             "type": "discovered_robots",
             "discovered": get_discovered_robots_list(),
+        })
+        await websocket.send_json({
+            "type": "lift_states",
+            "lifts": list(state.current_lifts.values()),
         })
         while True:
             data = await websocket.receive_text()
@@ -323,5 +332,9 @@ async def simulation_loop():
             await broadcast({
                 "type": "tasks",
                 "tasks": current_tasks,
+            })
+            await broadcast({
+                "type": "lift_states",
+                "lifts": list(state.current_lifts.values()),
             })
 

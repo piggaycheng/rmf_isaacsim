@@ -132,6 +132,9 @@ DISCOVERY_OFFLINE_S = 15.0
 # Discovered Robots (Synced from Fleet Adapter)
 discovered_robots: Dict[str, Dict[str, Any]] = {}
 
+# Current Lifts (Synced from /lift_states or MockLift)
+current_lifts: Dict[str, Dict[str, Any]] = {}
+
 active_connections: List[WebSocket] = []
 last_ros2_time: float = 0.0
 

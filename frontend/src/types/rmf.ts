@@ -91,6 +91,56 @@ export interface MapLift {
   depth?: number;
 }
 
+export interface LiftRuntimeState {
+  lift_name: string;
+  available_floors: string[];
+  current_floor: string;
+  destination_floor: string;
+  door_state: 'closed' | 'moving' | 'open' | 'unknown';
+  motion_state: 'stopped' | 'up' | 'down' | 'unknown';
+  current_mode: 'human' | 'agv' | 'fire' | 'offline' | 'emergency' | 'unknown';
+  session_id?: string;
+  updated_at?: number;
+}
+
+export function parseFloorOrder(levelName: string): number | null {
+  const trimmed = levelName.trim();
+  const bMatch = trimmed.match(/^B(\d+)$/i);
+  if (bMatch) {
+    return -Number(bMatch[1]);
+  }
+  const fMatch = trimmed.match(/^(\d+)F$/i) || trimmed.match(/^[LF](\d+)$/i);
+  if (fMatch) {
+    return Number(fMatch[1]) - 1;
+  }
+  if (/^G(F)?$/i.test(trimmed)) {
+    return 0;
+  }
+  return null;
+}
+
+export function resolveLevelElevations(levels: MapLevel[], spacingM = 12): Record<string, number> {
+  const elevations: Record<string, number> = {};
+  if (!levels || levels.length === 0) return elevations;
+
+  levels.forEach((lvl, idx) => {
+    let order: number;
+    if (typeof lvl.elevation === 'number' && Number.isFinite(lvl.elevation)) {
+      order = lvl.elevation;
+    } else {
+      const parsed = parseFloorOrder(lvl.name);
+      if (parsed !== null) {
+        order = parsed;
+      } else {
+        order = idx;
+      }
+    }
+    elevations[lvl.name] = order * spacingM;
+  });
+
+  return elevations;
+}
+
 export const DEFAULT_LEVEL = '1F';
 
 export function waypointLevel(wp: Waypoint, levels: MapLevel[]): string {
@@ -141,6 +191,59 @@ export interface Lane {
   bidirectional: boolean;
   speed_limit?: number; // m/s
   graph_idx?: number; // 0, 1, 2... default: 0
+}
+
+/**
+ * Automatically computes the elevator orientation (yaw in radians)
+ * so that the elevator doors face the approach/exit corridor lane.
+ */
+export function computeLiftYawFromLanes(
+  liftName: string,
+  waypoints: Waypoint[],
+  lanes: Lane[],
+  levels: MapLevel[]
+): number | null {
+  // Find all waypoints associated with this lift
+  const liftWps = waypoints.filter(
+    (w) => (w.type === 'lift' || w.lift) && (w.lift === liftName || w.name.startsWith(liftName))
+  );
+  if (liftWps.length === 0) return null;
+
+  // Prefer 1F or first available floor
+  const sortedWps = [...liftWps].sort((a, b) => {
+    const aIs1F = waypointLevel(a, levels) === '1F' ? -1 : 1;
+    const bIs1F = waypointLevel(b, levels) === '1F' ? -1 : 1;
+    return aIs1F - bIs1F;
+  });
+
+  for (const wp of sortedWps) {
+    const connectedLanes = lanes.filter(
+      (l) => l.start_id === wp.id || l.end_id === wp.id
+    );
+
+    for (const lane of connectedLanes) {
+      const neighborId = lane.start_id === wp.id ? lane.end_id : lane.start_id;
+      const neighborWp = waypoints.find((w) => w.id === neighborId);
+      if (!neighborWp || neighborWp.lift === liftName || neighborWp.name.startsWith(liftName)) {
+        continue;
+      }
+
+      const wpLvl = levels.find((l) => l.name === waypointLevel(wp, levels));
+      const neighborLvl = levels.find((l) => l.name === waypointLevel(neighborWp, levels));
+      const wpBldg = toBuildingCoords(wpLvl?.transform, wp.x, wp.y);
+      const neighborBldg = toBuildingCoords(neighborLvl?.transform, neighborWp.x, neighborWp.y);
+
+      const dx = neighborBldg.x - wpBldg.x;
+      const dy = neighborBldg.y - wpBldg.y;
+      if (Math.hypot(dx, dy) > 0.05) {
+        // Door is at local -Y, so rotation theta = atan2(dy, dx) + PI/2
+        const alpha = Math.atan2(dy, dx);
+        return alpha + Math.PI / 2;
+      }
+    }
+  }
+
+  return null;
 }
 
 export interface Robot {

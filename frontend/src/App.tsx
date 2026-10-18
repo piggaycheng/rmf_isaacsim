@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { MapCanvas, EditorTool } from '@/components/MapCanvas';
+import { Map3DCanvas } from '@/components/Map3DCanvas';
 import { DispatchModal } from '@/components/DispatchModal';
 import { OFF_GRAPH_THRESHOLD_M } from '@/lib/constants';
 import { MultiStepTaskModal } from '@/components/MultiStepTaskModal';
@@ -7,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform, isPreciseArrival, DispatchTaskRequest } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform, isPreciseArrival, DispatchTaskRequest, LiftRuntimeState, computeLiftYawFromLanes } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { MapOverlayAlignModal } from '@/components/MapOverlayAlignModal';
 import { WorldMap } from '@/components/WorldMap';
@@ -22,6 +23,7 @@ import {
   BatteryCharging,
   SquareParking,
   Boxes,
+  Box,
   Send,
   Download,
   Trash2,
@@ -80,6 +82,25 @@ export function App() {
     return 'world';
   });
   const [tool, setTool] = useState<EditorTool>('select');
+
+  // Monitor View Mode ('2d' | '3d')
+  const [monitorViewMode, setMonitorViewMode] = useState<'2d' | '3d'>(() => {
+    try {
+      const cached = localStorage.getItem('rmf_monitor_view_mode');
+      if (cached === '2d' || cached === '3d') return cached;
+    } catch (e) {}
+    return '2d';
+  });
+
+  const handleSetMonitorViewMode = (nextMode: '2d' | '3d') => {
+    setMonitorViewMode(nextMode);
+    try {
+      localStorage.setItem('rmf_monitor_view_mode', nextMode);
+    } catch (e) {}
+  };
+
+  // Lift runtime telemetry states
+  const [liftStates, setLiftStates] = useState<Record<string, LiftRuntimeState>>({});
 
   // Plant Sites & Isaac Sim Modal State
   const [plantSites, setPlantSites] = useState<PlantSite[]>(loadPlantSites);
@@ -219,6 +240,23 @@ export function App() {
     const ids = new Set(levelWaypoints.map((w) => w.id));
     return lanes.filter((l) => ids.has(l.start_id) && ids.has(l.end_id));
   }, [lanes, levels, levelWaypoints]);
+
+  // Only consider lifts active if at least one 'lift' waypoint references them
+  const activeLifts = useMemo(() => {
+    return lifts
+      .filter((l) =>
+        waypoints.some(
+          (w) => (w.type === 'lift' || w.lift) && (w.lift === l.name || w.name.startsWith(l.name))
+        )
+      )
+      .map((l) => {
+        const laneYaw = computeLiftYawFromLanes(l.name, waypoints, lanes, levels);
+        return {
+          ...l,
+          yaw: laneYaw !== null ? laneYaw : (l.yaw ?? 0),
+        };
+      });
+  }, [lifts, waypoints, lanes, levels]);
 
   const [overlayAlignModalOpen, setOverlayAlignModalOpen] = useState<boolean>(false);
 
@@ -411,6 +449,9 @@ export function App() {
             if (Array.isArray(data.graphs) && data.graphs.length > 0) setGraphs(data.graphs);
             if (Array.isArray(data.levels)) setLevels(data.levels);
             if (Array.isArray(data.lifts)) setLifts(data.lifts);
+          } else {
+            if (Array.isArray(data.levels) && data.levels.length > 0) setLevels(data.levels);
+            if (Array.isArray(data.lifts)) setLifts(data.lifts);
           }
         }
       })
@@ -505,6 +546,17 @@ export function App() {
                 setSaveToast(data.message || `車輛 ${data.robot_id} 放行指令已送出`);
               }
             }
+            if (data.type === 'lift_states' && Array.isArray(data.lifts)) {
+              setLiftStates((prev) => {
+                const next = { ...prev };
+                data.lifts.forEach((l: LiftRuntimeState) => {
+                  if (l.lift_name) {
+                    next[l.lift_name] = l;
+                  }
+                });
+                return next;
+              });
+            }
             if (data.type === 'slam_map') {
               if (data.maps && typeof data.maps === 'object') {
                 setFloorSlamMaps(data.maps);
@@ -564,6 +616,21 @@ export function App() {
     };
 
     connectWs();
+
+    // Fetch initial lifts state
+    fetch('/api/lifts')
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          const map: Record<string, LiftRuntimeState> = {};
+          data.forEach((l: LiftRuntimeState) => {
+            if (l.lift_name) map[l.lift_name] = l;
+          });
+          setLiftStates(map);
+        }
+      })
+      .catch(() => {});
+
     const interval = setInterval(() => {
       if (!wsRef.current || wsRef.current.readyState === WebSocket.CLOSED) {
         connectWs();
@@ -675,9 +742,13 @@ export function App() {
     setSelectedLaneIds([]);
 
     if (type === 'lift' && liftName) {
+      const currentLevelObj = levels.find((l) => l.name === currentLevel);
+      const bCoord = toBuildingCoords(currentLevelObj?.transform, x, y);
       setLifts((prev) => {
-        if (prev.some((l) => l.name === liftName)) return prev;
-        return [...prev, { name: liftName, x, y, yaw: 0, width: 2.0, depth: 2.0 }];
+        if (prev.some((l) => l.name === liftName)) {
+          return prev.map((l) => (l.name === liftName ? { ...l, x: bCoord.x, y: bCoord.y } : l));
+        }
+        return [...prev, { name: liftName, x: bCoord.x, y: bCoord.y, yaw: 0, width: 2.0, depth: 2.0 }];
       });
     }
   };
@@ -687,8 +758,10 @@ export function App() {
       prev.map((w) => {
         if (w.id === id) {
           if (w.type === 'lift' && w.lift) {
+            const currentLevelObj = levels.find((l) => l.name === waypointLevel(w, levels));
+            const bCoord = toBuildingCoords(currentLevelObj?.transform, x, y);
             setLifts((prevLifts) =>
-              prevLifts.map((l) => (l.name === w.lift ? { ...l, x, y } : l))
+              prevLifts.map((l) => (l.name === w.lift ? { ...l, x: bCoord.x, y: bCoord.y } : l))
             );
           }
           return { ...w, x, y };
@@ -876,7 +949,17 @@ export function App() {
     if (selectedWaypointIds.length === 0 && selectedLaneIds.length === 0) return;
 
     // Delete selected waypoints
-    setWaypoints((prev) => prev.filter((w) => !selectedWaypointIds.includes(w.id)));
+    const remainingWps = waypoints.filter((w) => !selectedWaypointIds.includes(w.id));
+    setWaypoints(remainingWps);
+
+    // If any lift no longer has any lift waypoint, remove it from lifts state
+    setLifts((prev) =>
+      prev.filter((l) =>
+        remainingWps.some(
+          (w) => (w.type === 'lift' || w.lift) && (w.lift === l.name || w.name.startsWith(l.name))
+        )
+      )
+    );
 
     // Delete selected lanes OR lanes connected to deleted waypoints
     setLanes((prev) =>
@@ -1226,10 +1309,27 @@ export function App() {
   // Save Map to Backend & LocalStorage (Pure save without restarting Fleet Adapters)
   const handleSaveMap = async () => {
     setIsSaving(true);
-    const finalLifts: MapLift[] = [...lifts];
-    waypoints.forEach((w) => {
-      if (w.lift && !finalLifts.some((l) => l.name === w.lift)) {
-        finalLifts.push({ name: w.lift, x: w.x, y: w.y, yaw: 0, width: 2.0, depth: 2.0 });
+    // Only persist lifts that currently have at least one lift waypoint
+    const liftWaypoints = waypoints.filter((w) => w.type === 'lift' || w.lift);
+    const liftNamesWithWps = new Set(
+      liftWaypoints.map((w) => w.lift || (w.name.startsWith('lift_') ? w.name.split('_').slice(0, 2).join('_') : 'lift_1'))
+    );
+    const finalLifts: MapLift[] = [];
+    liftNamesWithWps.forEach((liftName) => {
+      const existing = lifts.find((l) => l.name === liftName);
+      const wp = liftWaypoints.find((w) => w.lift === liftName || w.name.startsWith(liftName));
+      if (wp) {
+        const lvl = levels.find((l) => l.name === waypointLevel(wp, levels));
+        const bPos = toBuildingCoords(lvl?.transform, wp.x, wp.y);
+        const laneYaw = computeLiftYawFromLanes(liftName, waypoints, lanes, levels);
+        finalLifts.push({
+          name: liftName,
+          x: existing?.x ?? bPos.x,
+          y: existing?.y ?? bPos.y,
+          yaw: laneYaw !== null ? laneYaw : (existing?.yaw ?? 0),
+          width: existing?.width ?? 2.0,
+          depth: existing?.depth ?? 2.0,
+        });
       }
     });
 
@@ -1269,10 +1369,27 @@ export function App() {
   // Apply Map to Fleet Adapters (Save & Reload all Fleet Adapters)
   const handleApplyMapToFleets = async () => {
     setIsApplyingMap(true);
-    const finalLifts: MapLift[] = [...lifts];
-    waypoints.forEach((w) => {
-      if (w.lift && !finalLifts.some((l) => l.name === w.lift)) {
-        finalLifts.push({ name: w.lift, x: w.x, y: w.y, yaw: 0, width: 2.0, depth: 2.0 });
+    // Only persist lifts that currently have at least one lift waypoint
+    const liftWaypoints = waypoints.filter((w) => w.type === 'lift' || w.lift);
+    const liftNamesWithWps = new Set(
+      liftWaypoints.map((w) => w.lift || (w.name.startsWith('lift_') ? w.name.split('_').slice(0, 2).join('_') : 'lift_1'))
+    );
+    const finalLifts: MapLift[] = [];
+    liftNamesWithWps.forEach((liftName) => {
+      const existing = lifts.find((l) => l.name === liftName);
+      const wp = liftWaypoints.find((w) => w.lift === liftName || w.name.startsWith(liftName));
+      if (wp) {
+        const lvl = levels.find((l) => l.name === waypointLevel(wp, levels));
+        const bPos = toBuildingCoords(lvl?.transform, wp.x, wp.y);
+        const laneYaw = computeLiftYawFromLanes(liftName, waypoints, lanes, levels);
+        finalLifts.push({
+          name: liftName,
+          x: existing?.x ?? bPos.x,
+          y: existing?.y ?? bPos.y,
+          yaw: laneYaw !== null ? laneYaw : (existing?.yaw ?? 0),
+          width: existing?.width ?? 2.0,
+          depth: existing?.depth ?? 2.0,
+        });
       }
     });
 
@@ -1889,42 +2006,93 @@ export function App() {
           )}
 
           <div className="flex-1 h-full relative">
-            {mode === 'edit' && lifts.length > 0 && (
+            {mode === 'edit' && activeLifts.length > 0 && (
               <div className="absolute top-2 left-2 z-20 flex items-center space-x-1.5 bg-[#0b101d]/90 border border-indigo-900/60 rounded-md px-2.5 py-1 text-[11px] text-indigo-300 shadow-md">
                 <ArrowUpDown className="w-3.5 h-3.5 text-indigo-400" />
                 <span className="font-semibold text-slate-300">電梯:</span>
-                <span className="font-mono text-indigo-200">{lifts.map((l) => l.name).join(', ')}</span>
+                <span className="font-mono text-indigo-200">{activeLifts.map((l) => l.name).join(', ')}</span>
               </div>
             )}
-            <MapCanvas
-              mode={mode}
-              tool={tool}
-              waypoints={levelWaypoints}
-              lanes={levelLanes}
-              robots={visibleRobots}
-              slamMap={slamMap}
-              graphs={graphs}
-              activeGraphIdx={activeGraphIdx}
-              focusActiveGraph={focusActiveGraph}
-              selectedWaypointIds={selectedWaypointIds}
-              selectedLaneIds={selectedLaneIds}
-              lifts={lifts}
-              levelTransform={levels.find((l) => l.name === currentLevel)?.transform}
-              onSelectWaypoint={handleSelectWaypoint}
-              onSelectMultiple={handleSelectMultiple}
-              onAddWaypoint={handleAddWaypoint}
-              onMoveWaypoint={handleMoveWaypoint}
-              onAddLane={handleAddLane}
-              onWaypointClickInMonitor={(wp) => {
-                setDispatchPresetWp(wp);
-                setDispatchModalOpen(true);
-              }}
-            />
+            {mode === 'monitor' && monitorViewMode === '3d' ? (
+              <Map3DCanvas
+                levels={levels}
+                activeLevel={currentLevel}
+                floorSlamMaps={floorSlamMaps}
+                waypoints={waypoints}
+                lanes={lanes}
+                robots={robots}
+                lifts={activeLifts}
+                liftStates={liftStates}
+                graphs={graphs}
+                selectedWaypointIds={selectedWaypointIds}
+                onSelectWaypoint={handleSelectWaypoint}
+                onWaypointClickInMonitor={(wp) => {
+                  setDispatchPresetWp(wp);
+                  setDispatchModalOpen(true);
+                }}
+                onFocusFloor={(lvl) => {
+                  setActiveLevel(lvl);
+                }}
+              />
+            ) : (
+              <MapCanvas
+                mode={mode}
+                tool={tool}
+                waypoints={levelWaypoints}
+                lanes={levelLanes}
+                robots={visibleRobots}
+                slamMap={slamMap}
+                graphs={graphs}
+                activeGraphIdx={activeGraphIdx}
+                focusActiveGraph={focusActiveGraph}
+                selectedWaypointIds={selectedWaypointIds}
+                selectedLaneIds={selectedLaneIds}
+                lifts={activeLifts}
+                levelTransform={levels.find((l) => l.name === currentLevel)?.transform}
+                onSelectWaypoint={handleSelectWaypoint}
+                onSelectMultiple={handleSelectMultiple}
+                onAddWaypoint={handleAddWaypoint}
+                onMoveWaypoint={handleMoveWaypoint}
+                onAddLane={handleAddLane}
+                onWaypointClickInMonitor={(wp) => {
+                  setDispatchPresetWp(wp);
+                  setDispatchModalOpen(true);
+                }}
+              />
+            )}
           </div>
 
           {/* Monitor Mode: Floating Floor Switcher & Quick Dispatch Toolbar */}
           {mode === 'monitor' && (
             <div className="absolute top-4 left-4 flex flex-wrap items-center gap-2.5 pointer-events-auto z-20">
+              {/* 2D / 3D Mode Toggle */}
+              <div className="bg-[#0b101d]/90 backdrop-blur border border-slate-800 p-1 rounded-xl shadow-xl flex items-center space-x-1">
+                <button
+                  onClick={() => handleSetMonitorViewMode('2d')}
+                  className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                    monitorViewMode === '2d'
+                      ? 'bg-cyan-600 text-white shadow-md'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/80'
+                  }`}
+                  title="切換為 2D 單樓層平面監控"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>2D 平面</span>
+                </button>
+                <button
+                  onClick={() => handleSetMonitorViewMode('3d')}
+                  className={`flex items-center space-x-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                    monitorViewMode === '3d'
+                      ? 'bg-indigo-600 text-white shadow-md'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/80'
+                  }`}
+                  title="切換為 3D 多樓層立體同屏監控（含電梯動態）"
+                >
+                  <Box className="w-3.5 h-3.5" />
+                  <span>3D 立體</span>
+                </button>
+              </div>
+
               {/* Floor Switcher Tabs */}
               <div className="bg-[#0b101d]/90 backdrop-blur border border-slate-800 p-1 px-2 rounded-xl shadow-xl flex items-center space-x-1.5">
                 <div className="flex items-center space-x-1 text-slate-300 px-1.5 py-0.5 text-xs font-semibold">
@@ -3318,7 +3486,7 @@ export function App() {
         currentLevelName={currentLevel}
         floorSlamMaps={floorSlamMaps}
         waypoints={waypoints}
-        lifts={lifts}
+        lifts={activeLifts}
         onSaveLevelTransform={handleSaveLevelTransform}
       />
 
