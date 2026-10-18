@@ -360,14 +360,14 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
   return (
     <group position={[localX, localY, 0]}>
       {/* 3D Vertical Marker Stem */}
-      <mesh position={[0, 0, 0.16]}>
-        <cylinderGeometry args={[0.015, 0.015, 0.32, 8]} />
+      <mesh position={[0, 0, 0.11]}>
+        <cylinderGeometry args={[0.015, 0.015, 0.22, 8]} />
         <meshBasicMaterial color={isSelected ? '#f59e0b' : graphColor} transparent opacity={0.65} />
       </mesh>
 
       {/* 3D Anchor Node Dot */}
-      <mesh position={[0, 0, 0.34]}>
-        <sphereGeometry args={[0.08, 16, 16]} />
+      <mesh position={[0, 0, 0.22]}>
+        <sphereGeometry args={[0.07, 16, 16]} />
         <meshStandardMaterial
           color={isSelected ? '#fbbf24' : graphColor}
           emissive={isSelected ? '#f59e0b' : graphColor}
@@ -376,7 +376,7 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
       </mesh>
 
       {/* Upright Floating Billboard Name Badge (same style as Elevator) */}
-      <Html position={[0, 0, 0.62]} center distanceFactor={26}>
+      <Html position={[0, 0, 0.44]} center distanceFactor={26}>
         <div
           onClick={(e) => {
             e.stopPropagation();
@@ -399,15 +399,15 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
 };
 
 // -------------------------------------------------------------
-// Component: RobotEntity3D (3D AMR Model + Floating Telemetry Badge)
+// Component: RobotBadge3D (Upright Floating Billboard Status Badge)
 // -------------------------------------------------------------
-interface RobotEntity3DProps {
+interface RobotBadge3DProps {
   robot: Robot;
   bounds: { cx: number; cy: number };
   onClick?: () => void;
 }
 
-const RobotEntity3D: React.FC<RobotEntity3DProps> = ({ robot, bounds, onClick }) => {
+const RobotBadge3D: React.FC<RobotBadge3DProps> = ({ robot, bounds, onClick }) => {
   const localX = robot.x - bounds.cx;
   const localY = robot.y - bounds.cy;
 
@@ -419,43 +419,7 @@ const RobotEntity3D: React.FC<RobotEntity3DProps> = ({ robot, bounds, onClick })
 
   return (
     <group position={[localX, localY, 0]}>
-      {/* 3D AMR Chassis oriented by robot.yaw */}
-      <group rotation={[0, 0, robot.yaw]}>
-        {/* Ground Glow Ring */}
-        <mesh position={[0, 0, 0.02]}>
-          <ringGeometry args={[0.32, 0.42, 32]} />
-          <meshBasicMaterial color={statusColor} transparent opacity={0.4} side={THREE.DoubleSide} />
-        </mesh>
-
-        {/* AMR Body Chassis */}
-        <mesh position={[0, 0, 0.12]}>
-          <cylinderGeometry args={[0.35, 0.38, 0.22, 24]} />
-          <meshStandardMaterial
-            color="#0f172a"
-            metalness={0.7}
-            roughness={0.3}
-          />
-          <Edges color={statusColor} threshold={20} />
-        </mesh>
-
-        {/* Top Sensor Turret / Lidar */}
-        <mesh position={[0, 0, 0.26]}>
-          <cylinderGeometry args={[0.14, 0.16, 0.08, 16]} />
-          <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.2} />
-        </mesh>
-
-        {/* Directional Headlight Wedge (pointing along +X in local robot frame) */}
-        <mesh position={[0.32, 0, 0.14]} rotation={[0, 0, -Math.PI / 2]}>
-          <coneGeometry args={[0.08, 0.18, 3]} />
-          <meshStandardMaterial
-            color={statusColor}
-            emissive={statusColor}
-            emissiveIntensity={0.8}
-          />
-        </mesh>
-      </group>
-
-      {/* Upright Floating Billboard Status Badge (same style as Elevator) */}
+      {/* Upright Floating Billboard Status Badge hovering above 2D AMR icon */}
       <Html position={[0, 0, 0.95]} center distanceFactor={28}>
         <div
           onClick={(e) => {
@@ -727,9 +691,9 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
         );
       })}
 
-      {/* 3D AMR Robots (3D Chassis + Floating Billboard Status Badge) */}
+      {/* 2D AMR Robots with Upright Floating Billboard Status Badges */}
       {robots.map((robot) => (
-        <RobotEntity3D
+        <RobotBadge3D
           key={robot.id}
           robot={robot}
           bounds={bounds}
