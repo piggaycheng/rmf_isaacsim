@@ -252,30 +252,7 @@ function renderFloorToCanvas({
       ctx.fillText(badge, pos.x, pos.y);
     }
 
-    // Name label box below
-    if (wp.name) {
-      ctx.font = isSelected ? 'bold 10.5px sans-serif' : '10px sans-serif';
-      const textMetrics = ctx.measureText(wp.name);
-      const textWidth = textMetrics.width;
-      const boxWidth = Math.max(textWidth + 10, 24);
-      const boxHeight = 16;
-      const boxX = pos.x - boxWidth / 2;
-      const boxY = pos.y + 13;
-
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-      ctx.strokeStyle = isSelected ? '#f59e0b' : '#334155';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect ? ctx.roundRect(boxX, boxY, boxWidth, boxHeight, 4) : ctx.rect(boxX, boxY, boxWidth, boxHeight);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.fillStyle = isSelected ? '#fbbf24' : '#e2e8f0';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(wp.name, pos.x, boxY + boxHeight / 2);
-    }
-
+    // In 3D mode, waypoint names are rendered via upright 3D billboard badges (WaypointNode3D)
     ctx.restore();
   });
 
@@ -347,37 +324,162 @@ function renderFloorToCanvas({
 
     ctx.restore();
 
-    // Name & Battery Badge
-    ctx.save();
-    ctx.translate(rPos.x, rPos.y);
-    ctx.font = 'bold 9.5px sans-serif';
-    ctx.textAlign = 'center';
-
-    const nameText = isEstopped
-      ? `${robot.name} 🛑`
-      : isOffGraph
-      ? `${robot.name} ⚠️`
-      : `${robot.name} (${Math.round(robot.battery)}%)`;
-    const textWidth = ctx.measureText(nameText).width;
-    const pillW = textWidth + 10;
-    const pillH = 15;
-
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-    ctx.strokeStyle = statusColor;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.roundRect
-      ? ctx.roundRect(-pillW / 2, 22, pillW, pillH, 4)
-      : ctx.rect(-pillW / 2, 22, pillW, pillH);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = '#ffffff';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(nameText, 0, 22 + pillH / 2);
-    ctx.restore();
+    // In 3D mode, AMR robot status and names are rendered via upright 3D billboard entities (RobotEntity3D)
   });
 }
+
+// -------------------------------------------------------------
+// Component: WaypointNode3D (Floating Billboard Badge + 3D Anchor)
+// -------------------------------------------------------------
+interface WaypointNode3DProps {
+  waypoint: Waypoint;
+  bounds: { cx: number; cy: number };
+  isSelected: boolean;
+  graphColor: string;
+  onSelect?: (id: string | null) => void;
+  onClickInMonitor?: (waypoint: Waypoint) => void;
+}
+
+const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
+  waypoint,
+  bounds,
+  isSelected,
+  graphColor,
+  onSelect,
+  onClickInMonitor,
+}) => {
+  const localX = waypoint.x - bounds.cx;
+  const localY = waypoint.y - bounds.cy;
+
+  let badgeIcon = null;
+  if (waypoint.type === 'charger') badgeIcon = <span className="text-amber-400">⚡</span>;
+  else if (waypoint.type === 'parking') badgeIcon = <span className="text-purple-400 font-bold">P</span>;
+  else if (waypoint.type === 'workcell') badgeIcon = <span className="text-emerald-400 font-bold">W</span>;
+  else if (waypoint.type === 'lift') badgeIcon = <span className="text-indigo-400">🛗</span>;
+
+  return (
+    <group position={[localX, localY, 0]}>
+      {/* 3D Vertical Marker Stem */}
+      <mesh position={[0, 0, 0.16]}>
+        <cylinderGeometry args={[0.015, 0.015, 0.32, 8]} />
+        <meshBasicMaterial color={isSelected ? '#f59e0b' : graphColor} transparent opacity={0.65} />
+      </mesh>
+
+      {/* 3D Anchor Node Dot */}
+      <mesh position={[0, 0, 0.34]}>
+        <sphereGeometry args={[0.08, 16, 16]} />
+        <meshStandardMaterial
+          color={isSelected ? '#fbbf24' : graphColor}
+          emissive={isSelected ? '#f59e0b' : graphColor}
+          emissiveIntensity={0.6}
+        />
+      </mesh>
+
+      {/* Upright Floating Billboard Name Badge (same style as Elevator) */}
+      <Html position={[0, 0, 0.62]} center distanceFactor={26}>
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect?.(waypoint.id);
+            onClickInMonitor?.(waypoint);
+          }}
+          className={`cursor-pointer select-none px-2 py-0.5 rounded-lg border text-[11px] font-semibold shadow-xl backdrop-blur flex items-center gap-1 whitespace-nowrap transition-all ${
+            isSelected
+              ? 'bg-amber-950/95 border-amber-400 text-amber-300 ring-2 ring-amber-400/50 scale-110 z-10'
+              : 'bg-slate-950/85 border-slate-700/80 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 hover:scale-105'
+          }`}
+          title={`站點: ${waypoint.name} (點擊快速派單)`}
+        >
+          {badgeIcon}
+          <span>{waypoint.name}</span>
+        </div>
+      </Html>
+    </group>
+  );
+};
+
+// -------------------------------------------------------------
+// Component: RobotEntity3D (3D AMR Model + Floating Telemetry Badge)
+// -------------------------------------------------------------
+interface RobotEntity3DProps {
+  robot: Robot;
+  bounds: { cx: number; cy: number };
+  onClick?: () => void;
+}
+
+const RobotEntity3D: React.FC<RobotEntity3DProps> = ({ robot, bounds, onClick }) => {
+  const localX = robot.x - bounds.cx;
+  const localY = robot.y - bounds.cy;
+
+  const isMoving = robot.status === 'moving';
+  const isEstopped = robot.status === 'emergency_stop' || !!robot.emergency_stop;
+  const isOffGraph = Boolean(robot.is_off_graph || robot.status === 'off_graph');
+  const statusColor = isEstopped ? '#ef4444' : isOffGraph ? '#f59e0b' : isMoving ? '#06b6d4' : '#10b981';
+  const statusLabel = isEstopped ? '急停' : isOffGraph ? '偏移' : isMoving ? '移動中' : '待命';
+
+  return (
+    <group position={[localX, localY, 0]}>
+      {/* 3D AMR Chassis oriented by robot.yaw */}
+      <group rotation={[0, 0, robot.yaw]}>
+        {/* Ground Glow Ring */}
+        <mesh position={[0, 0, 0.02]}>
+          <ringGeometry args={[0.32, 0.42, 32]} />
+          <meshBasicMaterial color={statusColor} transparent opacity={0.4} side={THREE.DoubleSide} />
+        </mesh>
+
+        {/* AMR Body Chassis */}
+        <mesh position={[0, 0, 0.12]}>
+          <cylinderGeometry args={[0.35, 0.38, 0.22, 24]} />
+          <meshStandardMaterial
+            color="#0f172a"
+            metalness={0.7}
+            roughness={0.3}
+          />
+          <Edges color={statusColor} threshold={20} />
+        </mesh>
+
+        {/* Top Sensor Turret / Lidar */}
+        <mesh position={[0, 0, 0.26]}>
+          <cylinderGeometry args={[0.14, 0.16, 0.08, 16]} />
+          <meshStandardMaterial color="#1e293b" metalness={0.8} roughness={0.2} />
+        </mesh>
+
+        {/* Directional Headlight Wedge (pointing along +X in local robot frame) */}
+        <mesh position={[0.32, 0, 0.14]} rotation={[0, 0, -Math.PI / 2]}>
+          <coneGeometry args={[0.08, 0.18, 3]} />
+          <meshStandardMaterial
+            color={statusColor}
+            emissive={statusColor}
+            emissiveIntensity={0.8}
+          />
+        </mesh>
+      </group>
+
+      {/* Upright Floating Billboard Status Badge (same style as Elevator) */}
+      <Html position={[0, 0, 0.95]} center distanceFactor={28}>
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            onClick?.();
+          }}
+          className="cursor-pointer select-none px-2.5 py-1 rounded-xl bg-slate-950/90 border border-slate-700/80 hover:border-cyan-400 shadow-2xl backdrop-blur flex items-center gap-1.5 whitespace-nowrap transition-all hover:scale-105"
+        >
+          <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: statusColor }} />
+          <span className="font-bold text-xs text-white">🤖 {robot.name}</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-900 text-cyan-300 font-mono font-bold border border-slate-800">
+            ⚡ {Math.round(robot.battery)}%
+          </span>
+          <span
+            className="text-[9px] px-1.5 py-0.5 rounded font-bold"
+            style={{ backgroundColor: `${statusColor}25`, color: statusColor }}
+          >
+            {statusLabel}
+          </span>
+        </div>
+      </Html>
+    </group>
+  );
+};
 
 // -------------------------------------------------------------
 // Component: FloorLevelPlane (Single Floor Plane in 3D)
@@ -603,6 +705,36 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
           </span>
         </div>
       </Html>
+
+      {/* 3D Waypoints (Floating Billboard Name Badges + 3D Node Stem) */}
+      {waypoints.map((wp) => {
+        const isSelected = Boolean(selectedWaypointIds?.includes(wp.id));
+        const wpGraphIndices = getWaypointGraphIndices(wp, lanes);
+        const primaryGraphIdx = wpGraphIndices[0] ?? (wp.graph_idx ?? 0);
+        const graphDef = graphs?.find((g) => g.id === primaryGraphIdx);
+        const graphColor = graphDef ? graphDef.color : '#38bdf8';
+
+        return (
+          <WaypointNode3D
+            key={wp.id}
+            waypoint={wp}
+            bounds={bounds}
+            isSelected={isSelected}
+            graphColor={graphColor}
+            onSelect={onSelectWaypoint}
+            onClickInMonitor={onWaypointClickInMonitor}
+          />
+        );
+      })}
+
+      {/* 3D AMR Robots (3D Chassis + Floating Billboard Status Badge) */}
+      {robots.map((robot) => (
+        <RobotEntity3D
+          key={robot.id}
+          robot={robot}
+          bounds={bounds}
+        />
+      ))}
     </group>
   );
 };
