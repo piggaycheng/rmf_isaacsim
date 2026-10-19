@@ -16,6 +16,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 .eslintcache
+*.tsbuildinfo
 
 # Python
 __pycache__/

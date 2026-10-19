@@ -39,7 +39,7 @@
 
 | 服務模組 | 主要技術棧 | 職責說明 |
 | :--- | :--- | :--- |
-| **前端 (`frontend/`)** | React 18, Vite, TypeScript, Tailwind CSS, MapLibre GL, Lucide Icons | 整合「路網編輯 (Graph Editor)」與「即時車隊監控 (Fleet Monitor)」二合一介面 |
+| **前端 (`frontend/`)** | React 19, Vite 8, React Three Fiber 9, TypeScript, Tailwind CSS, MapLibre GL, Lucide Icons | 整合「路網編輯 (Graph Editor)」與「即時車隊監控 (Fleet Monitor)」二合一介面 |
 | **後端 (`backend/`)** | Python, FastAPI, WebSocket, `rclpy` (ROS 2 Jazzy) | 提供 REST API、WebSocket 車隊遙測廣播、路網持久化檔案轉換、ROS 2 節點通訊 |
 | **MQTT 與通訊** | EMQX (MQTT Broker) | 提供車載設備、感測器與 Fleet Adapter 雙向通訊匯流排 |
 | **影像串流** | MediaMTX | RTSP / WebRTC 攝影機串流傳輸與轉發 |
