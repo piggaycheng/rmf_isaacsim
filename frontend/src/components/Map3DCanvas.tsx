@@ -1200,7 +1200,7 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
   onFocusFloor,
 }) => {
   // Visual adjustment parameters
-  const [floorSpacing, setFloorSpacing] = useState<number>(12); // meters
+  const [floorSpacing, setFloorSpacing] = useState<number>(24); // meters
   const [focusSignal, setFocusSignal] = useState<string | null>(null);
   const [lockActiveFloor, setLockActiveFloor] = useState<boolean>(true); // default true: avoid misclicking lower floors
   const [hideNonActiveBadges, setHideNonActiveBadges] = useState<boolean>(false);
@@ -1412,7 +1412,7 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
             <input
               type="range"
               min="5"
-              max="30"
+              max="36"
               step="1"
               value={floorSpacing}
               onChange={(e) => setFloorSpacing(Number(e.target.value))}

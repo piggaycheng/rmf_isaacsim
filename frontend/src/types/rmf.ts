@@ -119,7 +119,7 @@ export function parseFloorOrder(levelName: string): number | null {
   return null;
 }
 
-export function resolveLevelElevations(levels: MapLevel[], spacingM = 12): Record<string, number> {
+export function resolveLevelElevations(levels: MapLevel[], spacingM = 24): Record<string, number> {
   const elevations: Record<string, number> = {};
   if (!levels || levels.length === 0) return elevations;
 
