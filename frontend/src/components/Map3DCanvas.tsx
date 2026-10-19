@@ -403,7 +403,7 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
         distanceFactor={26}
         style={{
           pointerEvents: isInteractive ? 'auto' : 'none',
-          zIndex: isFocusedFloor ? 50 : Math.max(1, 10 + elevationOrder),
+          zIndex: isFocusedFloor ? 12 : Math.max(1, 4 + elevationOrder),
         }}
       >
         <div
@@ -524,7 +524,7 @@ const RobotEntity3D: React.FC<RobotEntity3DProps> = ({
           distanceFactor={28}
           style={{
             pointerEvents: isInteractive ? 'auto' : 'none',
-            zIndex: isFocusedFloor ? 60 : Math.max(1, 10 + elevationOrder),
+            zIndex: isFocusedFloor ? 16 : Math.max(1, 6 + elevationOrder),
           }}
         >
           <div
@@ -803,7 +803,7 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
         position={[-bounds.W / 2 + 1.2, bounds.H / 2 - 1.2, 0.15]}
         center={false}
         style={{
-          zIndex: isFocusedFloor ? 70 : Math.max(1, 20 + elevationOrder),
+          zIndex: isFocusedFloor ? 20 : Math.max(1, 8 + elevationOrder),
         }}
       >
         <div
@@ -1081,7 +1081,7 @@ const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
         )}
 
         {/* 4. 3D Floating Status Badge */}
-        <Html position={[0, 0, cabinHeight + 0.6]} center distanceFactor={28} style={{ pointerEvents: 'none' }}>
+        <Html position={[0, 0, cabinHeight + 0.6]} center distanceFactor={28} style={{ pointerEvents: 'none', zIndex: 14 }}>
           <div className="select-none px-2.5 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/60 text-slate-100 shadow-2xl backdrop-blur flex flex-col items-center gap-1 min-w-[130px] pointer-events-none">
             <div className="flex items-center gap-1.5 text-xs font-bold">
               <span className="text-indigo-400">🛗 {lift.name}</span>
@@ -1324,7 +1324,7 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
   }, [lifts, waypoints, lanes, levels]);
 
   return (
-    <div className="relative w-full h-full bg-[#070b14] overflow-hidden select-none">
+    <div className="relative isolate z-0 w-full h-full bg-[#070b14] overflow-hidden select-none">
       {/* 3D WebGL Canvas */}
       <Canvas
         camera={{ position: [0, -34, 28], up: [0, 0, 1], fov: 45 }}
