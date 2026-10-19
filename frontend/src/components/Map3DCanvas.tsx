@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useMemo, useCallback } from 'react';
 import { Canvas, useFrame, useThree, ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Html, Edges } from '@react-three/drei';
 import * as THREE from 'three';
@@ -56,7 +56,6 @@ interface DrawFloorParams {
   slamImage?: HTMLImageElement | null;
   waypoints: Waypoint[];
   lanes: Lane[];
-  robots: Robot[];
   graphs?: NavGraph[];
   selectedWaypointIds?: string[];
   bounds: { minX: number; maxX: number; minY: number; maxY: number; W: number; H: number };
@@ -69,7 +68,6 @@ function renderFloorToCanvas({
   slamImage,
   waypoints,
   lanes,
-  robots,
   graphs,
   selectedWaypointIds = [],
   bounds,
@@ -256,86 +254,114 @@ function renderFloorToCanvas({
     ctx.restore();
   });
 
-  // 6. Robots (Rendered with identical 2D aesthetic directly on floor surface)
-  robots.forEach((robot) => {
-    const rPos = toScreen(robot.x, robot.y);
-
-    ctx.save();
-
-    // Planned path glowing line
-    if (robot.path && robot.path.length > 0) {
-      ctx.beginPath();
-      ctx.moveTo(rPos.x, rPos.y);
-      robot.path.forEach((pt) => {
-        const screenPt = toScreen(pt.x, pt.y);
-        ctx.lineTo(screenPt.x, screenPt.y);
-      });
-      ctx.strokeStyle = '#06b6d4';
-      ctx.lineWidth = 3;
-      ctx.shadowColor = '#06b6d4';
-      ctx.shadowBlur = 8;
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-    }
-
-    // AMR circular footprint + directional pointer
-    ctx.translate(rPos.x, rPos.y);
-    ctx.rotate(-robot.yaw); // Screen Y inversion
-
-    const isMoving = robot.status === 'moving';
-    const isEstopped = robot.status === 'emergency_stop' || !!robot.emergency_stop;
-    const isOffGraph = Boolean(robot.is_off_graph || robot.status === 'off_graph');
-    const statusColor = isEstopped ? '#ef4444' : isOffGraph ? '#f59e0b' : isMoving ? '#06b6d4' : '#10b981';
-    const arrowColor = isEstopped ? '#f87171' : isOffGraph ? '#fbbf24' : isMoving ? '#22d3ee' : '#34d399';
-
-    // Base dark circular pad for high contrast
-    ctx.beginPath();
-    ctx.arc(0, 0, 18, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
-    ctx.fill();
-
-    // Pulsing aura
-    ctx.beginPath();
-    ctx.arc(0, 0, 18, 0, Math.PI * 2);
-    ctx.fillStyle = isEstopped
-      ? 'rgba(239, 68, 68, 0.35)'
-      : isOffGraph
-      ? 'rgba(245, 158, 11, 0.3)'
-      : isMoving
-      ? 'rgba(6, 182, 212, 0.3)'
-      : 'rgba(16, 185, 129, 0.25)';
-    ctx.fill();
-    ctx.strokeStyle = statusColor;
-    ctx.lineWidth = 2.2;
-    ctx.stroke();
-
-    // Directional Arrow Head
-    ctx.beginPath();
-    ctx.moveTo(15, 0);
-    ctx.lineTo(-10, -10);
-    ctx.lineTo(-6, 0);
-    ctx.lineTo(-10, 10);
-    ctx.closePath();
-    ctx.strokeStyle = '#090d16';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-    ctx.fillStyle = arrowColor;
-    ctx.fill();
-
-    ctx.restore();
-
-    // In 3D mode, AMR robot status and names are rendered via upright 3D billboard entities (RobotEntity3D)
-  });
+  // 6. Static floor map rendering completed (dynamic robots are rendered as native 3D entities in RobotEntity3D)
 }
 
+// Pre-allocated arrow shape for AMR directional pointer
+const ROBOT_ARROW_SHAPE = (() => {
+  const s = new THREE.Shape();
+  s.moveTo(0.32, 0);
+  s.lineTo(-0.18, -0.18);
+  s.lineTo(-0.08, 0);
+  s.lineTo(-0.18, 0.18);
+  s.closePath();
+  return s;
+})();
+
 // -------------------------------------------------------------
-// Component: WaypointNode3D (Floating Billboard Badge + 3D Anchor)
+// Component: WaypointsInstanced3D (Batch rendered stems and dots via InstancedMesh)
+// -------------------------------------------------------------
+interface WaypointsInstanced3DProps {
+  waypoints: Waypoint[];
+  lanes: Lane[];
+  graphs?: NavGraph[];
+  selectedWaypointIds?: string[];
+  bounds: { cx: number; cy: number };
+  isFocusedFloor: boolean;
+}
+
+const WaypointsInstanced3D: React.FC<WaypointsInstanced3DProps> = ({
+  waypoints,
+  lanes,
+  graphs,
+  selectedWaypointIds = [],
+  bounds,
+  isFocusedFloor,
+}) => {
+  const stemsRef = useRef<THREE.InstancedMesh | null>(null);
+  const dotsRef = useRef<THREE.InstancedMesh | null>(null);
+
+  const count = waypoints.length;
+
+  useLayoutEffect(() => {
+    if (!stemsRef.current || !dotsRef.current || count === 0) return;
+
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+
+    waypoints.forEach((wp, idx) => {
+      const localX = wp.x - bounds.cx;
+      const localY = wp.y - bounds.cy;
+      const isSelected = selectedWaypointIds.includes(wp.id);
+      const wpGraphIndices = getWaypointGraphIndices(wp, lanes);
+      const primaryGraphIdx = wpGraphIndices[0] ?? (wp.graph_idx ?? 0);
+      const graphDef = graphs?.find((g) => g.id === primaryGraphIdx);
+      const graphColor = graphDef ? graphDef.color : '#38bdf8';
+      const stemColorStr = isSelected ? '#f59e0b' : graphColor;
+      const dotColorStr = isSelected ? '#fbbf24' : graphColor;
+
+      // Stem (cylinder立於地面)
+      dummy.position.set(localX, localY, 0.11);
+      dummy.rotation.set(Math.PI / 2, 0, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      stemsRef.current!.setMatrixAt(idx, dummy.matrix);
+      color.set(stemColorStr);
+      stemsRef.current!.setColorAt(idx, color);
+
+      // Dot (sphere頂部節點)
+      dummy.position.set(localX, localY, 0.22);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      dotsRef.current!.setMatrixAt(idx, dummy.matrix);
+      color.set(dotColorStr);
+      dotsRef.current!.setColorAt(idx, color);
+    });
+
+    stemsRef.current.instanceMatrix.needsUpdate = true;
+    if (stemsRef.current.instanceColor) stemsRef.current.instanceColor.needsUpdate = true;
+    dotsRef.current.instanceMatrix.needsUpdate = true;
+    if (dotsRef.current.instanceColor) dotsRef.current.instanceColor.needsUpdate = true;
+  }, [waypoints, lanes, graphs, selectedWaypointIds, bounds, count, isFocusedFloor]);
+
+  if (count === 0) return null;
+
+  return (
+    <group>
+      <instancedMesh key={`stems_${count}`} ref={stemsRef} args={[undefined, undefined, count]}>
+        <cylinderGeometry args={[0.015, 0.015, 0.22, 8]} />
+        <meshBasicMaterial transparent opacity={isFocusedFloor ? 0.65 : 0.25} />
+      </instancedMesh>
+      <instancedMesh key={`dots_${count}`} ref={dotsRef} args={[undefined, undefined, count]}>
+        <sphereGeometry args={[0.07, 12, 12]} />
+        <meshStandardMaterial
+          emissiveIntensity={isFocusedFloor ? 0.6 : 0.15}
+          transparent
+          opacity={isFocusedFloor ? 1.0 : 0.4}
+        />
+      </instancedMesh>
+    </group>
+  );
+};
+
+// -------------------------------------------------------------
+// Component: WaypointNode3D (Floating Billboard Badge only, meshes moved to InstancedMesh)
 // -------------------------------------------------------------
 interface WaypointNode3DProps {
   waypoint: Waypoint;
   bounds: { cx: number; cy: number };
   isSelected: boolean;
-  graphColor: string;
+  graphColor?: string;
   isFocusedFloor: boolean;
   lockActiveFloor: boolean;
   hideNonActiveBadges: boolean;
@@ -348,7 +374,6 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
   waypoint,
   bounds,
   isSelected,
-  graphColor,
   isFocusedFloor,
   lockActiveFloor,
   hideNonActiveBadges,
@@ -362,6 +387,8 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
   const isInteractive = isFocusedFloor || !lockActiveFloor;
   const showBadge = !hideNonActiveBadges || isFocusedFloor;
 
+  if (!showBadge) return null;
+
   let badgeIcon = null;
   if (waypoint.type === 'charger') badgeIcon = <span className="text-amber-400">⚡</span>;
   else if (waypoint.type === 'parking') badgeIcon = <span className="text-purple-400 font-bold">P</span>;
@@ -370,75 +397,50 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
 
   return (
     <group position={[localX, localY, 0]}>
-      {/* 3D Vertical Marker Stem */}
-      <mesh position={[0, 0, 0.11]}>
-        <cylinderGeometry args={[0.015, 0.015, 0.22, 8]} />
-        <meshBasicMaterial
-          color={isSelected ? '#f59e0b' : graphColor}
-          transparent
-          opacity={isFocusedFloor ? 0.65 : 0.25}
-        />
-      </mesh>
-
-      {/* 3D Anchor Node Dot */}
-      <mesh position={[0, 0, 0.22]}>
-        <sphereGeometry args={[0.07, 16, 16]} />
-        <meshStandardMaterial
-          color={isSelected ? '#fbbf24' : graphColor}
-          emissive={isSelected ? '#f59e0b' : graphColor}
-          emissiveIntensity={isFocusedFloor ? 0.6 : 0.15}
-          transparent
-          opacity={isFocusedFloor ? 1.0 : 0.4}
-        />
-      </mesh>
-
-      {/* Upright Floating Billboard Name Badge */}
-      {showBadge && (
-        <Html
-          position={[0, 0, 0.44]}
-          center
-          distanceFactor={26}
-          style={{
-            pointerEvents: isInteractive ? 'auto' : 'none',
-            zIndex: isFocusedFloor ? 50 : Math.max(1, 10 + elevationOrder),
-          }}
+      <Html
+        position={[0, 0, 0.44]}
+        center
+        distanceFactor={26}
+        style={{
+          pointerEvents: isInteractive ? 'auto' : 'none',
+          zIndex: isFocusedFloor ? 50 : Math.max(1, 10 + elevationOrder),
+        }}
+      >
+        <div
+          onClick={
+            isInteractive
+              ? (e) => {
+                  e.stopPropagation();
+                  onSelect?.(waypoint.id);
+                  onClickInMonitor?.(waypoint);
+                }
+              : undefined
+          }
+          className={`select-none px-2 py-0.5 rounded-lg border text-[11px] font-semibold shadow-xl backdrop-blur flex items-center gap-1 whitespace-nowrap transition-all ${
+            isSelected
+              ? 'bg-amber-950/95 border-amber-400 text-amber-300 ring-2 ring-amber-400/50 scale-110 z-10 cursor-pointer pointer-events-auto'
+              : isFocusedFloor
+              ? 'bg-slate-950/85 border-slate-700/80 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 hover:scale-105 cursor-pointer pointer-events-auto'
+              : 'bg-slate-950/50 border-slate-800/50 text-slate-400 opacity-40 cursor-default pointer-events-none'
+          }`}
+          title={
+            isInteractive
+              ? `站點: ${waypoint.name} (點擊快速派單)`
+              : `站點: ${waypoint.name} (非聚焦樓層)`
+          }
         >
-          <div
-            onClick={
-              isInteractive
-                ? (e) => {
-                    e.stopPropagation();
-                    onSelect?.(waypoint.id);
-                    onClickInMonitor?.(waypoint);
-                  }
-                : undefined
-            }
-            className={`select-none px-2 py-0.5 rounded-lg border text-[11px] font-semibold shadow-xl backdrop-blur flex items-center gap-1 whitespace-nowrap transition-all ${
-              isSelected
-                ? 'bg-amber-950/95 border-amber-400 text-amber-300 ring-2 ring-amber-400/50 scale-110 z-10 cursor-pointer pointer-events-auto'
-                : isFocusedFloor
-                ? 'bg-slate-950/85 border-slate-700/80 text-slate-200 hover:border-cyan-400 hover:text-cyan-300 hover:scale-105 cursor-pointer pointer-events-auto'
-                : 'bg-slate-950/50 border-slate-800/50 text-slate-400 opacity-40 cursor-default pointer-events-none'
-            }`}
-            title={
-              isInteractive
-                ? `站點: ${waypoint.name} (點擊快速派單)`
-                : `站點: ${waypoint.name} (非聚焦樓層)`
-            }
-          >
-            {badgeIcon}
-            <span>{waypoint.name}</span>
-          </div>
-        </Html>
-      )}
+          {badgeIcon}
+          <span>{waypoint.name}</span>
+        </div>
+      </Html>
     </group>
   );
 };
 
 // -------------------------------------------------------------
-// Component: RobotBadge3D (Upright Floating Billboard Status Badge)
+// Component: RobotEntity3D (Native 3D AMR Chassis, Heading Arrow, Path Line & Status Badge)
 // -------------------------------------------------------------
-interface RobotBadge3DProps {
+interface RobotEntity3DProps {
   robot: Robot;
   bounds: { cx: number; cy: number };
   isFocusedFloor: boolean;
@@ -448,7 +450,7 @@ interface RobotBadge3DProps {
   onClick?: () => void;
 }
 
-const RobotBadge3D: React.FC<RobotBadge3DProps> = ({
+const RobotEntity3D: React.FC<RobotEntity3DProps> = ({
   robot,
   bounds,
   isFocusedFloor,
@@ -464,13 +466,57 @@ const RobotBadge3D: React.FC<RobotBadge3DProps> = ({
   const isEstopped = robot.status === 'emergency_stop' || !!robot.emergency_stop;
   const isOffGraph = Boolean(robot.is_off_graph || robot.status === 'off_graph');
   const statusColor = isEstopped ? '#ef4444' : isOffGraph ? '#f59e0b' : isMoving ? '#06b6d4' : '#10b981';
+  const arrowColor = isEstopped ? '#f87171' : isOffGraph ? '#fbbf24' : isMoving ? '#22d3ee' : '#34d399';
   const statusLabel = isEstopped ? '急停' : isOffGraph ? '偏移' : isMoving ? '移動中' : '待命';
 
   const isInteractive = isFocusedFloor || !lockActiveFloor;
   const showBadge = !hideNonActiveBadges || isFocusedFloor;
 
+  // Planned path line object
+  const pathLine = useMemo(() => {
+    if (!robot.path || robot.path.length === 0) return null;
+    const pts = [
+      new THREE.Vector3(0, 0, 0.02),
+      ...robot.path.map((pt) => new THREE.Vector3(pt.x - robot.x, pt.y - robot.y, 0.02)),
+    ];
+    const geom = new THREE.BufferGeometry().setFromPoints(pts);
+    const mat = new THREE.LineBasicMaterial({ color: '#06b6d4', transparent: true, opacity: 0.85 });
+    return new THREE.Line(geom, mat);
+  }, [robot.x, robot.y, robot.path]);
+
+  useEffect(() => {
+    return () => {
+      if (pathLine) {
+        pathLine.geometry.dispose();
+        (pathLine.material as THREE.Material).dispose();
+      }
+    };
+  }, [pathLine]);
+
   return (
     <group position={[localX, localY, 0]}>
+      {/* 1. Planned Path glowing line */}
+      {pathLine && <primitive object={pathLine} />}
+
+      {/* 2. Base Dark Disc (AMR Chassis footprint) */}
+      <mesh position={[0, 0, 0.01]}>
+        <circleGeometry args={[0.38, 24]} />
+        <meshBasicMaterial color="#0f172a" />
+      </mesh>
+
+      {/* 3. Status Glowing Aura Ring */}
+      <mesh position={[0, 0, 0.015]}>
+        <ringGeometry args={[0.34, 0.40, 24]} />
+        <meshBasicMaterial color={statusColor} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* 4. Directional Heading Arrow */}
+      <mesh position={[0, 0, 0.02]} rotation={[0, 0, robot.yaw]}>
+        <shapeGeometry args={[ROBOT_ARROW_SHAPE]} />
+        <meshBasicMaterial color={arrowColor} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* 5. Upright Floating Billboard Status Badge */}
       {showBadge && (
         <Html
           position={[0, 0, 0.95]}
@@ -554,8 +600,7 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textureRef = useRef<THREE.CanvasTexture | null>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
-  const [, setTick] = useState(0);
+  const [slamImage, setSlamImage] = useState<HTMLImageElement | null>(null);
 
   // Compute floor local bounding box
   const bounds = useMemo(() => {
@@ -633,37 +678,49 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
     return { canvas: cvs, texture: tex };
   }, [bounds.W, bounds.H]);
 
-  // Preload SLAM map image
+  // Preload SLAM map image with state tracking
   useEffect(() => {
     if (!slamMap?.image_url) {
-      imgRef.current = null;
+      setSlamImage(null);
       return;
     }
+
+    let active = true;
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.src = slamMap.image_url;
-    img.onload = () => {
-      imgRef.current = img;
-      setTick((t) => t + 1);
+
+    if (img.complete && img.naturalWidth > 0) {
+      setSlamImage(img);
+    } else {
+      img.onload = () => {
+        if (active) setSlamImage(img);
+      };
+      img.onerror = () => {
+        if (active) setSlamImage(null);
+      };
+    }
+
+    return () => {
+      active = false;
     };
   }, [slamMap?.image_url]);
 
-  // Re-render floor canvas whenever inputs update
+  // Re-render floor canvas whenever static floor inputs or SLAM image update
   useEffect(() => {
     renderFloorToCanvas({
       canvas,
       level,
       slamMap,
-      slamImage: imgRef.current,
+      slamImage,
       waypoints,
       lanes,
-      robots,
       graphs,
       selectedWaypointIds,
       bounds,
     });
     texture.needsUpdate = true;
-  }, [canvas, texture, level, slamMap, waypoints, lanes, robots, graphs, selectedWaypointIds, bounds]);
+  }, [canvas, texture, level, slamMap, slamImage, waypoints, lanes, graphs, selectedWaypointIds, bounds]);
 
   // Dispose texture on unmount
   useEffect(() => {
@@ -778,7 +835,17 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
         </div>
       </Html>
 
-      {/* 3D Waypoints (Floating Billboard Name Badges + 3D Node Stem) */}
+      {/* 3D Waypoints Batched Mesh (Only 2 draw calls for all stems + dots) */}
+      <WaypointsInstanced3D
+        waypoints={waypoints}
+        lanes={lanes}
+        graphs={graphs}
+        selectedWaypointIds={selectedWaypointIds}
+        bounds={bounds}
+        isFocusedFloor={isFocusedFloor}
+      />
+
+      {/* 3D Waypoints (Floating Billboard Name Badges) */}
       {waypoints.map((wp) => {
         const isSelected = Boolean(selectedWaypointIds?.includes(wp.id));
         const wpGraphIndices = getWaypointGraphIndices(wp, lanes);
@@ -803,9 +870,9 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
         );
       })}
 
-      {/* 2D AMR Robots with Upright Floating Billboard Status Badges */}
+      {/* 3D AMR Robots: Chassis, Heading, Path & Floating Badges */}
       {robots.map((robot) => (
-        <RobotBadge3D
+        <RobotEntity3D
           key={robot.id}
           robot={robot}
           bounds={bounds}
@@ -1261,8 +1328,16 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
       {/* 3D WebGL Canvas */}
       <Canvas
         camera={{ position: [0, -34, 28], up: [0, 0, 1], fov: 45 }}
-        gl={{ antialias: true, alpha: true, powerPreference: 'high-performance' }}
+        dpr={[1, 1.5]}
+        gl={{
+          antialias: true,
+          alpha: false,
+          powerPreference: 'high-performance',
+          stencil: false,
+          depth: true,
+        }}
       >
+        <color attach="background" args={['#070b14']} />
         {/* Lights */}
         <ambientLight intensity={1.4} />
         <directionalLight position={[10, -20, 30]} intensity={1.2} />
