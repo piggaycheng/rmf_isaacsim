@@ -1367,7 +1367,10 @@ export function App() {
   };
 
   // Apply Map to Fleet Adapters (Save & Reload all Fleet Adapters)
-  const handleApplyMapToFleets = async () => {
+  const handleApplyMapToFleets = async (allowOffline = false) => {
+    if (allowOffline && !window.confirm(
+      '離線不代表車輛已停止。請確認 Isaac Sim 已關閉，或所有離線實體車已確實停止，而非僅網路中斷。\n\n離線套用仍會阻擋未結束任務及尚未停止的在線車輛；不會自動續跑舊任務。離線車輛重新連線並回報閒置前，暫停派遣。\n\n確定要離線套用路網？'
+    )) return;
     setIsApplyingMap(true);
     // Only persist lifts that currently have at least one lift waypoint
     const liftWaypoints = waypoints.filter((w) => w.type === 'lift' || w.lift);
@@ -1400,6 +1403,7 @@ export function App() {
       graphs,
       ...(levels.length > 0 ? { levels, lifts: finalLifts } : {}),
       restart_adapter: true,
+      allow_offline_reload: allowOffline,
     };
     try {
       localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
@@ -1420,7 +1424,7 @@ export function App() {
       setSaveToast('套用失敗 (伺服器離線)');
     } finally {
       setIsApplyingMap(false);
-      setTimeout(() => setSaveToast(null), 3000);
+      setTimeout(() => setSaveToast(null), allowOffline ? 8000 : 3000);
     }
   };
 
@@ -1760,12 +1764,23 @@ export function App() {
                 <Button
                   size="sm"
                   className="bg-cyan-600 hover:bg-cyan-500 text-white font-medium shadow-sm shadow-cyan-950/50 text-xs h-7 px-2.5 flex-shrink-0"
-                  onClick={handleApplyMapToFleets}
+                  onClick={() => handleApplyMapToFleets()}
                   disabled={isApplyingMap || isSaving}
                   title="將當前路網套用至各車隊並重新載入 Fleet Adapter"
                 >
                   <RotateCcw className={`w-3.5 h-3.5 mr-1 ${isApplyingMap ? 'animate-spin' : ''}`} />
                   {isApplyingMap ? '套用中...' : '套用至車隊'}
+                </Button>
+
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-amber-300 border-amber-700 hover:bg-amber-950 text-xs h-7 px-2.5 flex-shrink-0"
+                  onClick={() => handleApplyMapToFleets(true)}
+                  disabled={isApplyingMap || isSaving}
+                  title="模擬器已關閉或已確認離線車輛停止時使用；重新連線並回報閒置前暫停派遣"
+                >
+                  離線套用
                 </Button>
               </div>
             </div>

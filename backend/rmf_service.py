@@ -57,6 +57,11 @@ def guard_task_submission(method):
                 return {"status": "error", "message": "Fleet Adapter 正在重新載入，暫停接收任務，請稍後再試。"}
             if self.adapter_reload_failed:
                 return {"status": "error", "message": "Fleet Adapter 尚未確認載入路網，請先成功重新載入後再派遣任務。"}
+            if self.adapter_reload_waiting_robots:
+                self._reconcile_offline_reload()
+                if self.adapter_reload_waiting_robots:
+                    labels = ", ".join(sorted(self.adapter_reload_waiting_robots))
+                    return {"status": "error", "message": f"路網已離線套用，等待車輛 {labels} 重新連線並回報閒置後才能派遣任務。"}
             return method(self, *args, **kwargs)
     return guarded
 
@@ -85,6 +90,20 @@ class RMFService:
         self.reload_lock = threading.RLock()
         self.adapter_reloading = False
         self.adapter_reload_failed = False
+        self.adapter_reload_waiting_robots: Set[str] = set()
+        self.adapter_reload_waiting_since = 0.0
+        if os.path.exists(state.OFFLINE_RELOAD_FILE):
+            with open(state.OFFLINE_RELOAD_FILE, encoding="utf-8") as f:
+                pending = json.load(f)
+            robots, requested_at = pending["robots"], pending["requested_at"]
+            if (
+                not isinstance(robots, list) or not all(isinstance(key, str) and key for key in robots)
+                or isinstance(requested_at, bool) or not isinstance(requested_at, (int, float))
+                or not math.isfinite(requested_at) or requested_at <= 0
+            ):
+                raise ValueError("Invalid offline_reload_pending.json; refusing to discard the dispatch safety fence")
+            self.adapter_reload_waiting_robots = set(robots)
+            self.adapter_reload_waiting_since = requested_at
 
     def start_background_processes(self):
         """Starts rmf_traffic_schedule, rmf_task_dispatcher, lifts and mqtt_fleet_adapter."""
@@ -178,7 +197,9 @@ class RMFService:
         except Exception as e:
             print(f"[RMF FA ERROR] Failed to start mqtt_fleet_adapter: {e}")
 
-    def restart_fleet_adapter(self, persist: Optional[Callable[[], None]] = None) -> bool:
+    def restart_fleet_adapter(
+        self, persist: Optional[Callable[[], None]] = None, *, allow_offline: bool = False,
+    ) -> bool:
         """Reserve a task-free reload before changing any configuration on disk."""
         with self.reload_lock:
             if self.adapter_reloading:
@@ -200,14 +221,25 @@ class RMFService:
             if not isinstance(robots, dict):
                 raise AdapterReloadBlocked("Fleet Adapter 尚未回報重載安全狀態，請先更新 Adapter。")
             expected_robots = self._configured_robot_keys(state.load_fleet_adapters_data())
-            expected_robots.intersection_update(
-                f"{r.get('fleet')}/{r.get('id')}" for r in state.current_robots.values()
-            )
-            if expected_robots - robots.keys():
+            offline_robots = set()
+            if allow_offline:
+                offline_robots = expected_robots - robots.keys()
+                offline_robots.update(key for key, robot in robots.items() if robot.get("online") is False)
+            else:
+                expected_robots.intersection_update(
+                    f"{r.get('fleet')}/{r.get('id')}" for r in state.current_robots.values()
+                )
+            if expected_robots - robots.keys() - offline_robots:
                 raise AdapterReloadBlocked("部分車輛尚未回報重載安全狀態，請確認所有車隊的車輛連線後再套用。")
             for key, robot in robots.items():
+                if key in offline_robots:
+                    continue
                 if not self._robot_confirmed_stopped(robot):
-                    raise AdapterReloadBlocked(f"車輛 {key} 尚未確認停止或已離線，無法安全重載共用 Fleet Adapter。")
+                    if robot.get("online") is False:
+                        raise AdapterReloadBlocked(
+                            f"車輛 {key} 已離線，無法確認停止。若已關閉模擬器或確認實體車停止，請使用「離線套用」。"
+                        )
+                    raise AdapterReloadBlocked(f"車輛 {key} 尚未確認停止或心跳已過期，無法安全重載共用 Fleet Adapter。")
             # Also covers RMF tasks submitted outside this backend.
             if any(r.get("task_id") for r in state.current_robots.values()):
                 raise AdapterReloadBlocked("仍有車輛回報執行中任務，請確認任務結束後再套用。")
@@ -216,12 +248,54 @@ class RMFService:
             if persist is not None:
                 persist()
             self.adapter_reload_failed = True
-            restarted = self._restart_fleet_adapter_process()
+            self._save_offline_reload_wait(self.adapter_reload_waiting_robots | offline_robots, time.time())
+            if allow_offline:
+                restarted = self._restart_fleet_adapter_process(offline_robots=offline_robots)
+            else:
+                restarted = self._restart_fleet_adapter_process()
+            if restarted and not allow_offline:
+                self._save_offline_reload_wait(set(), self.adapter_reload_waiting_since)
             self.adapter_reload_failed = not restarted
             return restarted
         finally:
             with self.reload_lock:
                 self.adapter_reloading = False
+
+    def _save_offline_reload_wait(self, robots: Set[str], requested_at: float) -> None:
+        if robots:
+            tmp_path = f"{state.OFFLINE_RELOAD_FILE}.{os.getpid()}.tmp"
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump({"robots": sorted(robots), "requested_at": requested_at}, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, state.OFFLINE_RELOAD_FILE)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+        elif os.path.exists(state.OFFLINE_RELOAD_FILE):
+            os.remove(state.OFFLINE_RELOAD_FILE)
+        self.adapter_reload_waiting_robots = set(robots)
+        self.adapter_reload_waiting_since = requested_at
+
+    def _reconcile_offline_reload(self) -> None:
+        if not state.is_fa_mqtt_connected():
+            return
+        started_at = state.fa_state.get("started_at", 0)
+        if started_at < self.adapter_reload_waiting_since:
+            return
+        robots = state.fa_state.get("robots") or {}
+        remaining = set(self.adapter_reload_waiting_robots)
+        for key in self.adapter_reload_waiting_robots:
+            robot = robots.get(key)
+            if (
+                robot and robot.get("last_heartbeat", 0) >= started_at
+                and self._robot_confirmed_stopped(robot)
+            ):
+                remaining.remove(key)
+                append_adapter_log("system", f"離線套用後車輛 {key} 已重新連線並確認閒置。")
+        if remaining != self.adapter_reload_waiting_robots:
+            self._save_offline_reload_wait(remaining, self.adapter_reload_waiting_since)
 
     @staticmethod
     def _configured_robot_keys(adapters: List[Dict[str, Any]]) -> Set[str]:
@@ -331,7 +405,7 @@ class RMFService:
             submitted_at = int(parts[1]) / 1000.0
         return bool(started_at and submitted_at < started_at)
 
-    def _restart_fleet_adapter_process(self) -> bool:
+    def _restart_fleet_adapter_process(self, *, offline_robots: Optional[Set[str]] = None) -> bool:
         """Restart only the owned process and wait for the new adapter's loaded-graph report."""
         env = os.environ.copy()
         try:
@@ -375,9 +449,15 @@ class RMFService:
                         and state.fa_state.get("mqtt_connected")
                         and all(state.adapter_diagnostics(a).get("status") == "ok" for a in adapters)
                         and all(
-                            key in reported_robots
-                            and reported_robots[key].get("last_heartbeat", 0) >= requested_at
-                            and self._robot_confirmed_stopped(reported_robots[key])
+                            (
+                                offline_robots is not None and key in offline_robots
+                                and (key not in reported_robots or reported_robots[key].get("online") is False)
+                            )
+                            or (
+                                key in reported_robots
+                                and reported_robots[key].get("last_heartbeat", 0) >= requested_at
+                                and self._robot_confirmed_stopped(reported_robots[key])
+                            )
                             for key in self._configured_robot_keys(adapters)
                         )
                     ):

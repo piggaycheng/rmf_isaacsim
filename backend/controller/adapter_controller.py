@@ -34,11 +34,16 @@ def get_adapter_logs(adapter_id: str) -> List[str]:
     return logs
 
 
-async def reload_fleet_adapter(persist: Optional[Callable[[], None]] = None) -> None:
+async def reload_fleet_adapter(
+    persist: Optional[Callable[[], None]] = None, *, allow_offline: bool = False,
+) -> None:
     from rmf_service import AdapterReloadBlocked, rmf_service
 
     try:
-        restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter, persist)
+        if allow_offline:
+            restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter, persist, allow_offline=True)
+        else:
+            restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter, persist)
     except AdapterReloadBlocked as e:
         append_adapter_log("system", f"[WARN] {e}")
         raise HTTPException(status_code=409, detail=str(e)) from e

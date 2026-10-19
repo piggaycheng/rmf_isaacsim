@@ -44,6 +44,7 @@ class BackendFixture(unittest.TestCase):
             json.dump({"waypoints": [{"id": "wp_1", "name": "wp_1"}, {"id": "wp_2", "name": "wp_2"},
                                      {"id": "wp_3", "name": "wp_3"}]}, f)
         for attr, value in (("NAV_GRAPHS_DIR", graphs), ("FLEET_ADAPTERS_FILE", adapters_file),
+                            ("OFFLINE_RELOAD_FILE", os.path.join(self.tmp.name, "offline_reload_pending.json")),
                             ("ACTIVE_MAP_FILE", map_file)):
             patcher = patch.object(state, attr, value)
             patcher.start()
@@ -245,6 +246,7 @@ class TestAdapterFallbackWarnings(unittest.TestCase):
             cfg = os.path.join(os.path.dirname(mfa.__file__), "config.yaml")
             self.fa = mfa.MqttFleetAdapter(cfg, cfg, mock_rmf=True)
         self.fa.fa_state_pub = MagicMock()
+        self.fa.robot_sessions = {}
         self.fa.mock_rmf = False
         self.fa.fleet_handles = {"fleet1": MagicMock()}
         self.fa.fleet_waypoint_info = {
@@ -376,6 +378,104 @@ class TestSafeReload(BackendFixture):
         with self.assertRaisesRegex(AdapterReloadBlocked, "部分車輛"):
             self.service.restart_fleet_adapter()
 
+    def test_explicit_offline_reload_allows_disconnected_and_unregistered_robots(self):
+        state.save_fleet_adapters_data([{
+            "id": "a1", "fleet_name": "fleet1", "graph_idx": 0,
+            "robots": [{"name": "carter1"}, {"name": "carter2"}],
+        }])
+        self.robot.update(online=False, status="offline", last_heartbeat=self.now - 60)
+        persist = MagicMock()
+        with self.assertRaisesRegex(AdapterReloadBlocked, "離線套用"):
+            self.service.restart_fleet_adapter(persist)
+        persist.assert_not_called()
+        with patch.object(self.service, "_restart_fleet_adapter_process", return_value=True) as restart:
+            self.assertTrue(self.service.restart_fleet_adapter(persist, allow_offline=True))
+        persist.assert_called_once()
+        restart.assert_called_once_with(offline_robots={"fleet1/carter1", "fleet1/carter2"})
+        self.assertEqual(self.service.adapter_reload_waiting_robots, {"fleet1/carter1", "fleet1/carter2"})
+        restored = RMFService()
+        self.assertEqual(restored.adapter_reload_waiting_robots, self.service.adapter_reload_waiting_robots)
+        self.assertIn("重新連線", restored.dispatch_task("goto", "wp_1")["message"])
+        self.assertFalse(self.robot["online"])
+
+    def test_offline_reload_does_not_bypass_task_or_online_stop_guards(self):
+        for blocker in ("local_task", "external_task", "moving", "busy", "stale_heartbeat", "stale_adapter"):
+            with self.subTest(blocker=blocker):
+                state.current_tasks.clear()
+                state.current_robots.clear()
+                self.robot.update(online=True, status="idle", busy=False, last_heartbeat=self.now)
+                state.fa_state_time = time.time()
+                if blocker == "local_task":
+                    self.task()
+                    self.robot.update(online=False, status="offline")
+                elif blocker == "external_task":
+                    self.robot.update(online=False, status="offline")
+                    state.current_robots["carter1"] = {"task_id": "external"}
+                elif blocker == "moving":
+                    self.robot["status"] = "moving"
+                elif blocker == "busy":
+                    self.robot["busy"] = True
+                elif blocker == "stale_heartbeat":
+                    self.robot["last_heartbeat"] = self.now - 60
+                else:
+                    state.fa_state_time = self.now - 60
+                persist = MagicMock()
+                with patch.object(self.service, "_restart_fleet_adapter_process") as restart:
+                    with self.assertRaises(AdapterReloadBlocked):
+                        self.service.restart_fleet_adapter(persist, allow_offline=True)
+                persist.assert_not_called()
+                restart.assert_not_called()
+
+    def test_failed_normal_reload_preserves_persisted_reconnect_fence(self):
+        self.robot.update(online=False, status="offline")
+        with patch.object(self.service, "_restart_fleet_adapter_process", return_value=True):
+            self.service.restart_fleet_adapter(allow_offline=True)
+        state.fa_state["robots"] = {}
+        with patch.object(self.service, "_restart_fleet_adapter_process", return_value=False):
+            self.assertFalse(self.service.restart_fleet_adapter())
+        self.assertTrue(self.service.adapter_reload_failed)
+        restored = RMFService()
+        self.assertEqual(restored.adapter_reload_waiting_robots, {"fleet1/carter1"})
+        self.assertIn("重新連線", restored.dispatch_task("goto", "wp_1")["message"])
+
+    def test_offline_reload_blocks_all_submissions_until_new_adapter_idle_heartbeat(self):
+        self.robot.update(online=False, status="offline")
+        with patch.object(self.service, "_restart_fleet_adapter_process", return_value=True):
+            self.service.restart_fleet_adapter(allow_offline=True)
+        self.robot.update(online=True, status="idle")
+        # The previous adapter's idle report must not release the reconnect fence.
+        for change in (
+            {},
+            {"started_at": time.time(), "last_heartbeat": self.now - 30},
+            {"last_heartbeat": time.time(), "status": "moving"},
+            {"status": "idle", "busy": True},
+            {"busy": False, "mqtt_connected": False},
+            {"mqtt_connected": True, "stale_report": True},
+        ):
+            with self.subTest(change=change):
+                change = dict(change)
+                for key in ("started_at", "mqtt_connected"):
+                    if key in change:
+                        state.fa_state[key] = change.pop(key)
+                state.fa_state_time = self.now - 60 if change.pop("stale_report", False) else time.time()
+                self.robot.update(change)
+                results = [
+                    self.service.dispatch_task("goto", "wp_1"),
+                    self.service.dispatch_compose_task([]),
+                    self.service.dispatch_multi_step_task("carter1", []),
+                    self.service.proceed_task("carter1"),
+                ]
+                self.assertTrue(all(r["status"] == "error" and "重新連線" in r["message"] for r in results))
+                self.assertEqual(state.current_tasks, [])
+        state.fa_state_time = time.time()
+        self.robot.update(online=True, status="idle", busy=False, last_heartbeat=time.time())
+        with patch("rmf_service.append_adapter_log") as log:
+            result = self.service.dispatch_task("goto", "wp_1")
+        self.assertIn("Publisher", result["message"])
+        self.assertEqual(self.service.adapter_reload_waiting_robots, set())
+        self.assertEqual(RMFService().adapter_reload_waiting_robots, set())
+        log.assert_called_once()
+
     def test_submission_and_concurrent_reload_rejected_during_persist_and_restart(self):
         def assert_blocked():
             results = [
@@ -449,6 +549,43 @@ class TestSafeReload(BackendFixture):
                 patch("rmf_service.time.monotonic", side_effect=[0, 0, 16]), \
                 patch("rmf_service.time.sleep"):
             self.assertFalse(self.service._restart_fleet_adapter_process())
+
+    def test_offline_process_restart_requires_graph_ack_but_not_offline_heartbeat(self):
+        state.save_fleet_adapters_data([{
+            "id": "a1", "fleet_name": "fleet1", "graph_idx": 0, "robots": [{"name": "carter1"}],
+        }])
+        process = MagicMock()
+        process.poll.return_value = None
+        self.service.adapter_process = process
+
+        def ready(_):
+            self.report_loaded()
+            state.fa_state.update(mqtt_connected=True, started_at=time.time(), robots={})
+
+        with patch("rmf_service.os.path.exists", return_value=True), \
+                patch("rmf_service.subprocess.Popen", return_value=process), \
+                patch("rmf_service.open", unittest.mock.mock_open()), \
+                patch("rmf_service.time.monotonic", side_effect=[0, 0, 1]), \
+                patch("rmf_service.time.sleep", side_effect=ready):
+            self.assertTrue(self.service._restart_fleet_adapter_process(offline_robots={"fleet1/carter1"}))
+
+        for report in (
+            {"mqtt_connected": True, "started_at": self.now - 60, "robots": {}},
+            {"mqtt_connected": True, "started_at": time.time(), "robots": {
+                "fleet1/carter1": dict(self.robot, status="moving", busy=True),
+            }},
+            {"mqtt_connected": False, "started_at": time.time(), "robots": {}},
+        ):
+            with self.subTest(report=report):
+                self.report_loaded()
+                state.fa_state.update(report)
+                with patch("rmf_service.os.path.exists", return_value=True), \
+                        patch("rmf_service.subprocess.Popen", return_value=process), \
+                        patch("rmf_service.open", unittest.mock.mock_open()), \
+                        patch("rmf_service.time.time", return_value=self.now), \
+                        patch("rmf_service.time.monotonic", side_effect=[0, 0, 16]), \
+                        patch("rmf_service.time.sleep"):
+                    self.assertFalse(self.service._restart_fleet_adapter_process(offline_robots={"fleet1/carter1"}))
 
     def test_old_tasks_interrupted_only_after_post_restart_idle_heartbeat(self):
         old = self.task(submitted_at=self.now - 30, progress=90, status="active")
@@ -587,6 +724,35 @@ class TestReloadErrors(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["status"], "error")
             with open(map_file) as f:
                 self.assertEqual(json.load(f)["waypoints"][0]["name"], "wp_1")
+
+    async def test_map_offline_apply_forwards_explicit_opt_in_and_reports_reconnect_requirement(self):
+        from controller import map_controller
+
+        request = state.MapSaveRequest(
+            waypoints=[{"id": "wp_1", "name": "wp_1", "x": 0, "y": 0}],
+            lanes=[], levels=[{"name": "L1"}], lifts=[],
+            restart_adapter=True, allow_offline_reload=True,
+        )
+        with patch.object(map_controller, "reload_fleet_adapter", new_callable=AsyncMock) as reload_adapter, \
+                patch.object(map_controller, "broadcast", new_callable=AsyncMock), \
+                patch.object(state, "load_fleet_adapters_data", return_value=[]):
+            result = await map_controller.save_map(request)
+        self.assertEqual(result["status"], "success")
+        self.assertIn("重新連線", result["message"])
+        self.assertIn("不會自動續跑", result["message"])
+        self.assertTrue(reload_adapter.await_args.kwargs["allow_offline"])
+        request.restart_adapter = False
+        with self.assertRaises(HTTPException) as error:
+            await map_controller.save_map(request)
+        self.assertEqual(error.exception.status_code, 400)
+
+    async def test_reload_helper_forwards_offline_opt_in(self):
+        from controller import adapter_controller
+
+        persist = MagicMock()
+        with patch.object(rmf_service, "restart_fleet_adapter", return_value=True) as restart:
+            await adapter_controller.reload_fleet_adapter(persist, allow_offline=True)
+        restart.assert_called_once_with(persist, allow_offline=True)
 
     async def test_busy_map_apply_does_not_overwrite_json_or_yaml(self):
         from controller import map_controller

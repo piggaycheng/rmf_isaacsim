@@ -29,6 +29,7 @@ SLAM_YAML_FILE = os.path.join(UPLOAD_DIR, "current_slam_map.yaml")
 SLAM_PNG_FILE = os.path.join(UPLOAD_DIR, "current_slam_map.png")
 
 FLEET_ADAPTERS_FILE = os.path.join(MAPS_DIR, "fleet_adapters.json")
+OFFLINE_RELOAD_FILE = os.path.join(MAPS_DIR, "offline_reload_pending.json")
 
 # Mirrors OFF_GRAPH_THRESHOLD_M in mqtt_fleet_adapter.py, which decides off-graph; used in messages only.
 OFF_GRAPH_THRESHOLD_M = 5.0
@@ -95,6 +96,7 @@ class MapSaveRequest(BaseModel):
     levels: Optional[List[Dict[str, Any]]] = None
     lifts: Optional[List[Dict[str, Any]]] = None
     restart_adapter: Optional[bool] = False
+    allow_offline_reload: bool = False
 
 class CameraDisableRequest(BaseModel):
     camera_name: str
