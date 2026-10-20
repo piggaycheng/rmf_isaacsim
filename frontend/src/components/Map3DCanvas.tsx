@@ -24,10 +24,12 @@ import {
   Eye,
   Sliders,
   ChevronDown,
+  ChevronUp,
   RotateCcw,
   Sparkles,
   Maximize2,
   Box,
+  Tags,
 } from 'lucide-react';
 
 export interface Map3DCanvasProps {
@@ -366,6 +368,7 @@ interface WaypointNode3DProps {
   lockActiveFloor: boolean;
   hideNonActiveBadges: boolean;
   elevationOrder: number;
+  visible?: boolean;
   onSelect?: (id: string | null) => void;
   onClickInMonitor?: (waypoint: Waypoint) => void;
 }
@@ -374,10 +377,12 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
   waypoint,
   bounds,
   isSelected,
+  graphColor = '#38bdf8',
   isFocusedFloor,
   lockActiveFloor,
   hideNonActiveBadges,
   elevationOrder,
+  visible = true,
   onSelect,
   onClickInMonitor,
 }) => {
@@ -385,7 +390,7 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
   const localY = waypoint.y - bounds.cy;
 
   const isInteractive = isFocusedFloor || !lockActiveFloor;
-  const showBadge = !hideNonActiveBadges || isFocusedFloor;
+  const showBadge = visible && (!hideNonActiveBadges || isFocusedFloor);
 
   if (!showBadge) return null;
 
@@ -397,8 +402,19 @@ const WaypointNode3D: React.FC<WaypointNode3DProps> = ({
 
   return (
     <group position={[localX, localY, 0]}>
+      {/* 1. Subtle vertical guide pin connecting floor node (z=0.22) to elevated badge (z=0.94) */}
+      <mesh position={[0, 0, 0.55]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.008, 0.008, 0.66, 6]} />
+        <meshBasicMaterial
+          color={isSelected ? '#f59e0b' : graphColor}
+          transparent
+          opacity={isFocusedFloor ? 0.5 : 0.2}
+        />
+      </mesh>
+
+      {/* 2. Elevated Floating Billboard Badge (Z raised so it doesn't cover waypoint dot at oblique angles) */}
       <Html
-        position={[0, 0, 0.44]}
+        position={[0, 0, 0.94]}
         center
         distanceFactor={26}
         style={{
@@ -447,6 +463,7 @@ interface RobotEntity3DProps {
   lockActiveFloor: boolean;
   hideNonActiveBadges: boolean;
   elevationOrder: number;
+  showBadge?: boolean;
   onClick?: () => void;
 }
 
@@ -457,6 +474,7 @@ const RobotEntity3D: React.FC<RobotEntity3DProps> = ({
   lockActiveFloor,
   hideNonActiveBadges,
   elevationOrder,
+  showBadge: showBadgeProp = true,
   onClick,
 }) => {
   const localX = robot.x - bounds.cx;
@@ -470,7 +488,7 @@ const RobotEntity3D: React.FC<RobotEntity3DProps> = ({
   const statusLabel = isEstopped ? '急停' : isOffGraph ? '偏移' : isMoving ? '移動中' : '待命';
 
   const isInteractive = isFocusedFloor || !lockActiveFloor;
-  const showBadge = !hideNonActiveBadges || isFocusedFloor;
+  const showBadge = showBadgeProp && (!hideNonActiveBadges || isFocusedFloor);
 
   // Planned path line object
   const pathLine = useMemo(() => {
@@ -570,6 +588,9 @@ interface FloorLevelPlaneProps {
   isFocusedFloor: boolean;
   lockActiveFloor: boolean;
   hideNonActiveBadges: boolean;
+  showWaypointBadges?: boolean;
+  showRobotBadges?: boolean;
+  showFloorBadges?: boolean;
   slamMap?: SlamMap;
   waypoints: Waypoint[];
   lanes: Lane[];
@@ -588,6 +609,9 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
   isFocusedFloor,
   lockActiveFloor,
   hideNonActiveBadges,
+  showWaypointBadges = true,
+  showRobotBadges = true,
+  showFloorBadges = true,
   slamMap,
   waypoints,
   lanes,
@@ -799,41 +823,43 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
       </mesh>
 
       {/* Floating Floor Label Badge in Corner */}
-      <Html
-        position={[-bounds.W / 2 + 1.2, bounds.H / 2 - 1.2, 0.15]}
-        center={false}
-        style={{
-          zIndex: isFocusedFloor ? 20 : Math.max(1, 8 + elevationOrder),
-        }}
-      >
-        <div
-          onClick={(e) => {
-            e.stopPropagation();
-            onFocusFloor?.(level.name);
+      {showFloorBadges && (
+        <Html
+          position={[-bounds.W / 2 + 1.2, bounds.H / 2 - 1.2, 0.15]}
+          center={false}
+          style={{
+            zIndex: isFocusedFloor ? 20 : Math.max(1, 8 + elevationOrder),
           }}
-          className={`cursor-pointer select-none px-2.5 py-1 rounded-lg text-xs font-bold shadow-xl backdrop-blur transition-all flex items-center gap-1.5 whitespace-nowrap pointer-events-auto ${
-            isFocusedFloor
-              ? 'bg-cyan-950/95 border-2 border-cyan-400 text-cyan-200 ring-2 ring-cyan-400/30 scale-105'
-              : 'bg-slate-900/85 border border-slate-700/70 text-slate-400 hover:border-cyan-500/70 hover:text-cyan-300 hover:scale-105'
-          }`}
-          title={`點擊聚焦至 ${level.name} 樓層`}
         >
-          <span className={isFocusedFloor ? 'text-cyan-300 font-extrabold' : 'text-slate-400'}>
-            🏢 {level.name}
-          </span>
-          {isFocusedFloor && (
-            <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-normal">
-              聚焦中
+          <div
+            onClick={(e) => {
+              e.stopPropagation();
+              onFocusFloor?.(level.name);
+            }}
+            className={`cursor-pointer select-none px-2.5 py-1 rounded-lg text-xs font-bold shadow-xl backdrop-blur transition-all flex items-center gap-1.5 whitespace-nowrap pointer-events-auto ${
+              isFocusedFloor
+                ? 'bg-cyan-950/95 border-2 border-cyan-400 text-cyan-200 ring-2 ring-cyan-400/30 scale-105'
+                : 'bg-slate-900/85 border border-slate-700/70 text-slate-400 hover:border-cyan-500/70 hover:text-cyan-300 hover:scale-105'
+            }`}
+            title={`點擊聚焦至 ${level.name} 樓層`}
+          >
+            <span className={isFocusedFloor ? 'text-cyan-300 font-extrabold' : 'text-slate-400'}>
+              🏢 {level.name}
             </span>
-          )}
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-950 text-cyan-300 border border-cyan-800/60 font-mono">
-            {robots.length} 台車
-          </span>
-          <span className="text-[10px] text-slate-400 font-mono">
-            {waypoints.length} 點
-          </span>
-        </div>
-      </Html>
+            {isFocusedFloor && (
+              <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-normal">
+                聚焦中
+              </span>
+            )}
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-950 text-cyan-300 border border-cyan-800/60 font-mono">
+              {robots.length} 台車
+            </span>
+            <span className="text-[10px] text-slate-400 font-mono">
+              {waypoints.length} 點
+            </span>
+          </div>
+        </Html>
+      )}
 
       {/* 3D Waypoints Batched Mesh (Only 2 draw calls for all stems + dots) */}
       <WaypointsInstanced3D
@@ -864,6 +890,7 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
             lockActiveFloor={lockActiveFloor}
             hideNonActiveBadges={hideNonActiveBadges}
             elevationOrder={elevationOrder}
+            visible={showWaypointBadges}
             onSelect={onSelectWaypoint}
             onClickInMonitor={onWaypointClickInMonitor}
           />
@@ -880,8 +907,159 @@ const FloorLevelPlane: React.FC<FloorLevelPlaneProps> = ({
           lockActiveFloor={lockActiveFloor}
           hideNonActiveBadges={hideNonActiveBadges}
           elevationOrder={elevationOrder}
+          showBadge={showRobotBadges}
         />
       ))}
+    </group>
+  );
+};
+
+// -------------------------------------------------------------
+// Lift & Robot Elevation Helpers
+// -------------------------------------------------------------
+function isLevelEqual(l1?: string, l2?: string): boolean {
+  if (!l1 || !l2) return false;
+  if (l1 === l2) return true;
+  if ((l1 === '1F' && l2 === 'L1') || (l1 === 'L1' && l2 === '1F')) return true;
+  return l1.trim().toLowerCase() === l2.trim().toLowerCase();
+}
+
+function getElevationForFloor(floorName: string | undefined, elevations: Record<string, number>): number {
+  if (!floorName) return 0;
+  if (elevations[floorName] !== undefined) return elevations[floorName];
+  if (floorName === 'L1' && elevations['1F'] !== undefined) return elevations['1F'];
+  if (floorName === '1F' && elevations['L1'] !== undefined) return elevations['L1'];
+  const found = Object.keys(elevations).find((k) => k.toLowerCase() === floorName.toLowerCase());
+  if (found && elevations[found] !== undefined) return elevations[found];
+  return 0;
+}
+
+function isRobotInLift(
+  robot: Robot,
+  lift: { name: string; x: number; y: number; width?: number; depth?: number },
+  liftState?: LiftRuntimeState,
+  levels?: MapLevel[]
+): boolean {
+  // 1. Distance check: robot must be within the elevator cabin footprint
+  const maxCabinDist = Math.max(1.15, Math.max(lift.width || 2.0, lift.depth || 2.0) * 0.55);
+  const dist = Math.hypot(robot.x - lift.x, robot.y - lift.y);
+  if (dist > maxCabinDist) return false;
+
+  // 2. Explicit session ID match
+  if (liftState?.session_id && (liftState.session_id === robot.name || liftState.session_id === robot.id)) {
+    return true;
+  }
+
+  const robotFloor = robot.level_name || '1F';
+
+  // 3. If lift is moving between floors (up or down), check if this trip corresponds to the robot
+  if (liftState && (liftState.motion_state === 'up' || liftState.motion_state === 'down')) {
+    if (!liftState.current_floor && !liftState.destination_floor) return true;
+    if (
+      isLevelEqual(robotFloor, liftState.current_floor) ||
+      isLevelEqual(robotFloor, liftState.destination_floor)
+    ) {
+      return true;
+    }
+  }
+
+  // 4. If lift is stationary or waiting at a floor
+  const cabinFloor = liftState?.current_floor || levels?.[0]?.name || '1F';
+  return isLevelEqual(robotFloor, cabinFloor);
+}
+
+// -------------------------------------------------------------
+// Component: CabinPassengerRobot3D (AMR riding inside moving lift cabin)
+// -------------------------------------------------------------
+interface CabinPassengerRobot3DProps {
+  robot: Robot;
+  lift: MapLift;
+  liftState?: LiftRuntimeState;
+  showBadge?: boolean;
+}
+
+const CabinPassengerRobot3D: React.FC<CabinPassengerRobot3DProps> = ({
+  robot,
+  lift,
+  liftState,
+  showBadge = true,
+}) => {
+  // Compute local position within the cabin
+  const liftYaw = lift.yaw || 0;
+  const dx = robot.x - lift.x;
+  const dy = robot.y - lift.y;
+  const cos = Math.cos(liftYaw);
+  const sin = Math.sin(liftYaw);
+  const lx = dx * cos + dy * sin;
+  const ly = -dx * sin + dy * cos;
+
+  // Clamp within cabin bounds so it never clips through elevator glass
+  const maxW = (lift.width || 2.0) * 0.35;
+  const maxD = (lift.depth || 2.0) * 0.35;
+  const localX = Math.max(-maxW, Math.min(maxW, lx));
+  const localY = Math.max(-maxD, Math.min(maxD, ly));
+  const localYaw = robot.yaw - liftYaw;
+
+  const isMoving = robot.status === 'moving' || liftState?.motion_state === 'up' || liftState?.motion_state === 'down';
+  const isEstopped = robot.status === 'emergency_stop' || !!robot.emergency_stop;
+  const statusColor = isEstopped ? '#ef4444' : isMoving ? '#06b6d4' : '#10b981';
+  const arrowColor = isEstopped ? '#f87171' : isMoving ? '#22d3ee' : '#34d399';
+
+  const curF = liftState?.current_floor || '1F';
+  const destF = liftState?.destination_floor || curF;
+  const isTransit = Boolean(destF && destF !== curF);
+
+  const liftStatusText =
+    liftState?.motion_state === 'up'
+      ? `搭乘中 ➔ ${destF}`
+      : liftState?.motion_state === 'down'
+      ? `搭乘中 ➔ ${destF}`
+      : liftState?.door_state === 'open'
+      ? `已抵達 ${curF} · 開門中`
+      : isTransit
+      ? `準備前往 ➔ ${destF}`
+      : '電梯內待命';
+
+  return (
+    <group position={[localX, localY, 0.12]} rotation={[0, 0, localYaw]}>
+      {/* 1. Base Dark Disc (AMR Chassis footprint) */}
+      <mesh position={[0, 0, 0.01]}>
+        <circleGeometry args={[0.38, 24]} />
+        <meshBasicMaterial color="#0f172a" />
+      </mesh>
+
+      {/* 2. Status Glowing Aura Ring */}
+      <mesh position={[0, 0, 0.015]}>
+        <ringGeometry args={[0.34, 0.40, 24]} />
+        <meshBasicMaterial color={statusColor} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* 3. Directional Heading Arrow */}
+      <mesh position={[0, 0, 0.02]}>
+        <shapeGeometry args={[ROBOT_ARROW_SHAPE]} />
+        <meshBasicMaterial color={arrowColor} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* 4. Upright Floating Billboard Status Badge */}
+      {showBadge && (
+        <Html
+          position={[0, 0, 0.85]}
+          center
+          distanceFactor={28}
+          style={{ pointerEvents: 'none', zIndex: 18 }}
+        >
+          <div className="select-none px-2.5 py-1 rounded-xl shadow-2xl backdrop-blur flex items-center gap-1.5 whitespace-nowrap bg-slate-950/95 border border-cyan-400/80 ring-1 ring-cyan-500/40">
+            <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: statusColor }} />
+            <span className="font-bold text-xs text-white">🤖 {robot.name}</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-900 text-cyan-300 font-mono font-bold border border-slate-800">
+              ⚡ {Math.round(robot.battery)}%
+            </span>
+            <span className="text-[9px] px-1.5 py-0.5 rounded font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
+              🛗 {liftStatusText}
+            </span>
+          </div>
+        </Html>
+      )}
     </group>
   );
 };
@@ -895,6 +1073,8 @@ interface LiftStructure3DProps {
   levels: MapLevel[];
   liftState?: LiftRuntimeState;
   robots?: Robot[];
+  showLiftBadge?: boolean;
+  showRobotBadge?: boolean;
 }
 
 const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
@@ -903,6 +1083,8 @@ const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
   levels,
   liftState,
   robots = [],
+  showLiftBadge = true,
+  showRobotBadge = true,
 }) => {
   const cabinRef = useRef<THREE.Group | null>(null);
   const leftDoorRef = useRef<THREE.Mesh | null>(null);
@@ -926,7 +1108,7 @@ const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
   // Initial cabin Z position
   const initialZ = useMemo(() => {
     const curFloor = liftState?.current_floor || levels[0]?.name || '1F';
-    return elevations[curFloor] ?? 0;
+    return getElevationForFloor(curFloor, elevations);
   }, [liftState?.current_floor, levels, elevations]);
 
   // Cabin status colors
@@ -939,13 +1121,9 @@ const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
   }, [liftState]);
 
   // Check if any robot is riding inside this lift
-  const passengerRobot = useMemo(() => {
-    return robots.find((r) => {
-      if (liftState?.session_id && liftState.session_id === r.name) return true;
-      const dist = Math.hypot(r.x - lift.x, r.y - lift.y);
-      return dist < 1.1;
-    });
-  }, [robots, lift.x, lift.y, liftState?.session_id]);
+  const passengerRobots = useMemo(() => {
+    return robots.filter((r) => isRobotInLift(r, lift, liftState, levels));
+  }, [robots, lift, liftState, levels]);
 
   // Animation frame loop: interpolate cabin Z and door slide
   useFrame((_, delta) => {
@@ -954,18 +1132,18 @@ const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
     // 1. Calculate Target Z
     let targetZ = initialZ;
     if (liftState) {
-      const curZ = elevations[liftState.current_floor] ?? 0;
-      const destZ = elevations[liftState.destination_floor] ?? curZ;
+      const curZ = getElevationForFloor(liftState.current_floor, elevations);
+      const destZ = getElevationForFloor(liftState.destination_floor, elevations);
 
       if (liftState.motion_state === 'up' || liftState.motion_state === 'down') {
         targetZ = destZ;
       } else {
         targetZ = curZ;
       }
-    } else if (passengerRobot) {
+    } else if (passengerRobots.length > 0) {
       // Fallback: follow passenger robot's floor
-      const robotFloor = passengerRobot.level_name || '1F';
-      targetZ = elevations[robotFloor] ?? 0;
+      const robotFloor = passengerRobots[0].level_name || '1F';
+      targetZ = getElevationForFloor(robotFloor, elevations);
     }
 
     // Smooth Lerp Z
@@ -1072,66 +1250,91 @@ const LiftStructure3D: React.FC<LiftStructure3DProps> = ({
           <Edges color="#a5b4fc" />
         </mesh>
 
-        {/* Passenger AMR Robot inside cabin if present */}
-        {passengerRobot && (
-          <mesh position={[0, 0, 0.25]} rotation={[0, 0, -passengerRobot.yaw]}>
-            <cylinderGeometry args={[0.35, 0.35, 0.2, 16]} />
-            <meshStandardMaterial color="#06b6d4" emissive="#0891b2" emissiveIntensity={0.5} />
-          </mesh>
-        )}
+        {/* Passenger AMR Robots riding inside cabin (with full heading arrow & status badge) */}
+        {passengerRobots.map((pRobot) => (
+          <CabinPassengerRobot3D
+            key={pRobot.id}
+            robot={pRobot}
+            lift={lift}
+            liftState={liftState}
+            showBadge={showRobotBadge}
+          />
+        ))}
 
         {/* 4. 3D Floating Status Badge */}
-        <Html position={[0, 0, cabinHeight + 0.6]} center distanceFactor={28} style={{ pointerEvents: 'none', zIndex: 14 }}>
-          <div className="select-none px-2.5 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/60 text-slate-100 shadow-2xl backdrop-blur flex flex-col items-center gap-1 min-w-[130px] pointer-events-none">
-            <div className="flex items-center gap-1.5 text-xs font-bold">
-              <span className="text-indigo-400">🛗 {lift.name}</span>
-              <span
-                className={`text-[10px] px-1 py-0.2 rounded font-mono ${
-                  liftState?.motion_state === 'up'
-                    ? 'bg-cyan-950 text-cyan-300 animate-pulse'
+        {showLiftBadge && (
+          <Html position={[0, 0, cabinHeight + 0.6]} center distanceFactor={28} style={{ pointerEvents: 'none', zIndex: 14 }}>
+            <div className="select-none px-2.5 py-1.5 rounded-xl bg-slate-950/90 border border-indigo-500/60 text-slate-100 shadow-2xl backdrop-blur flex flex-col items-center gap-1 min-w-[130px] pointer-events-none">
+              <div className="flex items-center gap-1.5 text-xs font-bold">
+                <span className="text-indigo-400">🛗 {lift.name}</span>
+                <span
+                  className={`text-[10px] px-1 py-0.2 rounded font-mono ${
+                    liftState?.motion_state === 'up'
+                      ? 'bg-cyan-950 text-cyan-300 animate-pulse'
+                      : liftState?.motion_state === 'down'
+                      ? 'bg-amber-950 text-amber-300 animate-pulse'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {liftState?.motion_state === 'up'
+                    ? '▲ 升降中'
                     : liftState?.motion_state === 'down'
-                    ? 'bg-amber-950 text-amber-300 animate-pulse'
-                    : 'bg-slate-800 text-slate-400'
-                }`}
-              >
-                {liftState?.motion_state === 'up'
-                  ? '▲ 升降中'
-                  : liftState?.motion_state === 'down'
-                  ? '▼ 下降中'
-                  : '⏸ 靜止'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-1 text-[11px] font-mono text-slate-300">
-              <span className="font-bold text-cyan-300">
-                {liftState?.current_floor || levels[0]?.name || '1F'}
-              </span>
-              <span className="text-slate-500">➔</span>
-              <span className="font-bold text-emerald-300">
-                {liftState?.destination_floor || liftState?.current_floor || levels[0]?.name || '1F'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-1 text-[9.5px]">
-              <span
-                className={`px-1.5 py-0.2 rounded-full ${
-                  liftState?.door_state === 'open'
-                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-700/60'
-                    : liftState?.door_state === 'moving'
-                    ? 'bg-amber-950 text-amber-300 border border-amber-700/60'
-                    : 'bg-slate-800 text-slate-400'
-                }`}
-              >
-                門：{liftState?.door_state === 'open' ? '開門' : liftState?.door_state === 'moving' ? '動作中' : '關閉'}
-              </span>
-              {passengerRobot && (
-                <span className="px-1.5 py-0.2 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-semibold">
-                  搭乘中
+                    ? '▼ 下降中'
+                    : '⏸ 靜止'}
                 </span>
-              )}
+              </div>
+
+              {/* Destination & Transit Status */}
+              {(() => {
+                const curFloor = liftState?.current_floor || levels[0]?.name || '1F';
+                const destFloor = liftState?.destination_floor || curFloor;
+                const isTransit = Boolean(destFloor && destFloor !== curFloor);
+
+                if (isTransit) {
+                  return (
+                    <div className="flex items-center gap-1 text-[11px] font-mono text-slate-300">
+                      <span className="font-bold text-cyan-300">{curFloor}</span>
+                      <span className="text-slate-500">➔</span>
+                      <span className="font-bold text-emerald-300">{destFloor}</span>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
+                    <span className="font-bold text-cyan-300">{curFloor}</span>
+                    <span className="text-slate-400 text-[10px]">
+                      {passengerRobots.length > 0
+                        ? liftState?.door_state === 'open'
+                          ? '已抵達 · 開門中'
+                          : '已抵達 · 停靠'
+                        : '停靠待命'}
+                    </span>
+                  </div>
+                );
+              })()}
+
+              <div className="flex items-center gap-1 text-[9.5px]">
+                <span
+                  className={`px-1.5 py-0.2 rounded-full ${
+                    liftState?.door_state === 'open'
+                      ? 'bg-emerald-950 text-emerald-300 border border-emerald-700/60'
+                      : liftState?.door_state === 'moving'
+                      ? 'bg-amber-950 text-amber-300 border border-amber-700/60'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  門：{liftState?.door_state === 'open' ? '開門' : liftState?.door_state === 'moving' ? '動作中' : '關閉'}
+                </span>
+                {passengerRobots.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-700/60 font-semibold">
+                    搭乘中 ({passengerRobots.map((r) => r.name).join(', ')})
+                  </span>
+                )}
+              </div>
             </div>
-          </div>
-        </Html>
+          </Html>
+        )}
       </group>
     </group>
   );
@@ -1205,6 +1408,57 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
   const [lockActiveFloor, setLockActiveFloor] = useState<boolean>(true); // default true: avoid misclicking lower floors
   const [hideNonActiveBadges, setHideNonActiveBadges] = useState<boolean>(false);
 
+  // 3D Label visibility controls (persisted in localStorage, default all true)
+  const [labelVisibility, setLabelVisibility] = useState<{
+    waypoints: boolean;
+    robots: boolean;
+    lifts: boolean;
+    floors: boolean;
+  }>(() => {
+    try {
+      const saved = localStorage.getItem('rmf_3d_label_visibility');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          waypoints: parsed.waypoints ?? true,
+          robots: parsed.robots ?? true,
+          lifts: parsed.lifts ?? true,
+          floors: parsed.floors ?? true,
+        };
+      }
+    } catch (e) {}
+    return {
+      waypoints: true,
+      robots: true,
+      lifts: true,
+      floors: true,
+    };
+  });
+
+  const [labelsPanelOpen, setLabelsPanelOpen] = useState<boolean>(true);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('rmf_3d_label_visibility', JSON.stringify(labelVisibility));
+    } catch (e) {}
+  }, [labelVisibility]);
+
+  const allLabelsChecked =
+    labelVisibility.waypoints &&
+    labelVisibility.robots &&
+    labelVisibility.lifts &&
+    labelVisibility.floors;
+
+  const handleToggleAllLabels = () => {
+    const next = !allLabelsChecked;
+    setLabelVisibility({
+      waypoints: next,
+      robots: next,
+      lifts: next,
+      floors: next,
+    });
+  };
+
   // Sync focusSignal with activeLevel prop
   useEffect(() => {
     if (activeLevel) {
@@ -1230,64 +1484,6 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
     });
     return map;
   }, [levels, elevations]);
-
-  // Project robots to each floor's local frame
-  const floorRobotsMap = useMemo(() => {
-    const map: Record<string, Robot[]> = {};
-    levels.forEach((lvl) => {
-      const transform = lvl.transform;
-      const rot = normalizeTransform(transform).rotation;
-
-      map[lvl.name] = robots
-        .filter((r) => {
-          const rLvl = r.level_name || '1F';
-          return (
-            rLvl === lvl.name ||
-            (rLvl === 'L1' && lvl.name === '1F') ||
-            (rLvl === '1F' && lvl.name === 'L1')
-          );
-        })
-        .map((r) => {
-          const localPos = toRobotCoords(transform, r.x, r.y);
-          return {
-            ...r,
-            x: localPos.x,
-            y: localPos.y,
-            yaw: r.yaw + rot,
-            path: r.path
-              ?.filter((pt) => !pt.level_name || pt.level_name === r.level_name || pt.level_name === lvl.name)
-              .map((pt) => {
-                const ptLocal = toRobotCoords(transform, pt.x, pt.y);
-                return { ...pt, x: ptLocal.x, y: ptLocal.y };
-              }),
-          };
-        });
-    });
-    return map;
-  }, [levels, robots]);
-
-  // Group waypoints and lanes by floor
-  const floorWaypointsMap = useMemo(() => {
-    const map: Record<string, Waypoint[]> = {};
-    levels.forEach((lvl) => {
-      map[lvl.name] = waypoints.filter((w) => waypointLevel(w, levels) === lvl.name);
-    });
-    return map;
-  }, [levels, waypoints]);
-
-  const floorLanesMap = useMemo(() => {
-    const map: Record<string, Lane[]> = {};
-    levels.forEach((lvl) => {
-      const wpsOnFloor = new Set((floorWaypointsMap[lvl.name] || []).map((w) => w.id));
-      map[lvl.name] = lanes.filter((l) => wpsOnFloor.has(l.start_id) && wpsOnFloor.has(l.end_id));
-    });
-    return map;
-  }, [levels, lanes, floorWaypointsMap]);
-
-  const handleFocusFloorInternal = (floorName: string) => {
-    setFocusSignal(floorName);
-    onFocusFloor?.(floorName);
-  };
 
   // Only render 3D elevator shafts if at least one 'lift' waypoint references the lift
   const activeLifts = useMemo(() => {
@@ -1322,6 +1518,82 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
       };
     });
   }, [lifts, waypoints, lanes, levels]);
+
+  // Set of robot IDs currently riding in any lift cabin
+  const ridingRobotIds = useMemo(() => {
+    const ids = new Set<string>();
+    activeLifts.forEach((lift) => {
+      const st = liftStates[lift.name];
+      robots.forEach((r) => {
+        if (isRobotInLift(r, lift, st, levels)) {
+          ids.add(r.id);
+        }
+      });
+    });
+    return ids;
+  }, [activeLifts, liftStates, robots, levels]);
+
+  // Project robots to each floor's local frame (excluding robots currently riding in lifts)
+  const floorRobotsMap = useMemo(() => {
+    const map: Record<string, Robot[]> = {};
+    levels.forEach((lvl) => {
+      const transform = lvl.transform;
+      const rot = normalizeTransform(transform).rotation;
+
+      map[lvl.name] = robots
+        .filter((r) => {
+          // If robot is riding inside any elevator, hide it from static floor planes
+          if (ridingRobotIds.has(r.id)) {
+            return false;
+          }
+          const rLvl = r.level_name || '1F';
+          return (
+            rLvl === lvl.name ||
+            (rLvl === 'L1' && lvl.name === '1F') ||
+            (rLvl === '1F' && lvl.name === 'L1')
+          );
+        })
+        .map((r) => {
+          const localPos = toRobotCoords(transform, r.x, r.y);
+          return {
+            ...r,
+            x: localPos.x,
+            y: localPos.y,
+            yaw: r.yaw + rot,
+            path: r.path
+              ?.filter((pt) => !pt.level_name || pt.level_name === r.level_name || pt.level_name === lvl.name)
+              .map((pt) => {
+                const ptLocal = toRobotCoords(transform, pt.x, pt.y);
+                return { ...pt, x: ptLocal.x, y: ptLocal.y };
+              }),
+          };
+        });
+    });
+    return map;
+  }, [levels, robots, ridingRobotIds]);
+
+  // Group waypoints and lanes by floor
+  const floorWaypointsMap = useMemo(() => {
+    const map: Record<string, Waypoint[]> = {};
+    levels.forEach((lvl) => {
+      map[lvl.name] = waypoints.filter((w) => waypointLevel(w, levels) === lvl.name);
+    });
+    return map;
+  }, [levels, waypoints]);
+
+  const floorLanesMap = useMemo(() => {
+    const map: Record<string, Lane[]> = {};
+    levels.forEach((lvl) => {
+      const wpsOnFloor = new Set((floorWaypointsMap[lvl.name] || []).map((w) => w.id));
+      map[lvl.name] = lanes.filter((l) => wpsOnFloor.has(l.start_id) && wpsOnFloor.has(l.end_id));
+    });
+    return map;
+  }, [levels, lanes, floorWaypointsMap]);
+
+  const handleFocusFloorInternal = (floorName: string) => {
+    setFocusSignal(floorName);
+    onFocusFloor?.(floorName);
+  };
 
   return (
     <div className="relative isolate z-0 w-full h-full bg-[#070b14] overflow-hidden select-none">
@@ -1363,6 +1635,9 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
               isFocusedFloor={isFocused}
               lockActiveFloor={lockActiveFloor}
               hideNonActiveBadges={hideNonActiveBadges}
+              showWaypointBadges={labelVisibility.waypoints}
+              showRobotBadges={labelVisibility.robots}
+              showFloorBadges={labelVisibility.floors}
               slamMap={floorSlamMaps[lvl.name]}
               waypoints={floorWaypointsMap[lvl.name] || []}
               lanes={floorLanesMap[lvl.name] || []}
@@ -1385,6 +1660,8 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
             levels={levels}
             liftState={liftStates[lift.name]}
             robots={robots}
+            showLiftBadge={labelVisibility.lifts}
+            showRobotBadge={labelVisibility.robots}
           />
         ))}
       </Canvas>
@@ -1392,7 +1669,7 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
       {/* Floating 3D HUD & Viewport Controls (Top-Right) */}
       <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-2 pointer-events-auto">
         {/* View Controls & Floor Spacing Box */}
-        <div className="bg-[#0b101d]/90 backdrop-blur border border-slate-800 p-2.5 rounded-xl shadow-2xl flex flex-col gap-2 min-w-[210px]">
+        <div className="bg-[#0b101d]/90 backdrop-blur border border-slate-800 p-2.5 rounded-xl shadow-2xl flex flex-col gap-2 min-w-[220px]">
           <div className="flex items-center justify-between text-xs font-bold text-slate-200 border-b border-slate-800/80 pb-1.5">
             <span className="flex items-center gap-1.5 text-cyan-400">
               <Box className="w-3.5 h-3.5" />
@@ -1444,6 +1721,113 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
           </div>
         </div>
 
+        {/* 3D 標籤圖層勾選面板 (Label Visibility Filter Panel) */}
+        <div className="bg-[#0b101d]/90 backdrop-blur border border-slate-800 p-2.5 rounded-xl shadow-2xl flex flex-col gap-2 min-w-[220px]">
+          <div className="flex items-center justify-between text-xs font-bold text-slate-200 border-b border-slate-800/80 pb-1.5">
+            <button
+              onClick={() => setLabelsPanelOpen((prev) => !prev)}
+              className="flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 transition-colors"
+              title="展開 / 折疊標籤顯示設定"
+            >
+              <Tags className="w-3.5 h-3.5" />
+              <span>3D 標籤顯示</span>
+              {labelsPanelOpen ? (
+                <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+              )}
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleToggleAllLabels}
+                className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-cyan-300 hover:bg-slate-700 transition-all font-mono"
+              >
+                {allLabelsChecked ? '全消' : '全選'}
+              </button>
+            </div>
+          </div>
+
+          {labelsPanelOpen && (
+            <div className="flex flex-col gap-1.5 text-[11px]">
+              {/* Waypoint 標籤 */}
+              <label className="flex items-center gap-2 cursor-pointer text-slate-300 hover:text-white select-none">
+                <input
+                  type="checkbox"
+                  checked={labelVisibility.waypoints}
+                  onChange={(e) =>
+                    setLabelVisibility((prev) => ({ ...prev, waypoints: e.target.checked }))
+                  }
+                  className="w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer accent-cyan-500"
+                />
+                <span className="flex items-center gap-1.5 font-medium flex-1">
+                  <span>🚏</span>
+                  <span>站點 (Waypoint)</span>
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {waypoints.length}
+                </span>
+              </label>
+
+              {/* 車輛標籤 */}
+              <label className="flex items-center gap-2 cursor-pointer text-slate-300 hover:text-white select-none">
+                <input
+                  type="checkbox"
+                  checked={labelVisibility.robots}
+                  onChange={(e) =>
+                    setLabelVisibility((prev) => ({ ...prev, robots: e.target.checked }))
+                  }
+                  className="w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer accent-cyan-500"
+                />
+                <span className="flex items-center gap-1.5 font-medium flex-1">
+                  <span>🤖</span>
+                  <span>車輛狀態 (Robot)</span>
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {robots.length}
+                </span>
+              </label>
+
+              {/* 電梯標籤 */}
+              <label className="flex items-center gap-2 cursor-pointer text-slate-300 hover:text-white select-none">
+                <input
+                  type="checkbox"
+                  checked={labelVisibility.lifts}
+                  onChange={(e) =>
+                    setLabelVisibility((prev) => ({ ...prev, lifts: e.target.checked }))
+                  }
+                  className="w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer accent-cyan-500"
+                />
+                <span className="flex items-center gap-1.5 font-medium flex-1">
+                  <span>🛗</span>
+                  <span>電梯動態 (Lift)</span>
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {activeLifts.length}
+                </span>
+              </label>
+
+              {/* 樓層標記 */}
+              <label className="flex items-center gap-2 cursor-pointer text-slate-300 hover:text-white select-none">
+                <input
+                  type="checkbox"
+                  checked={labelVisibility.floors}
+                  onChange={(e) =>
+                    setLabelVisibility((prev) => ({ ...prev, floors: e.target.checked }))
+                  }
+                  className="w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-cyan-500 focus:ring-0 cursor-pointer accent-cyan-500"
+                />
+                <span className="flex items-center gap-1.5 font-medium flex-1">
+                  <span>🏢</span>
+                  <span>樓層資訊 (Floor)</span>
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {levels.length}
+                </span>
+              </label>
+            </div>
+          )}
+        </div>
+
         {/* Lift Telemetry Quick Pills if active lifts exist */}
         {activeLifts.length > 0 && (
           <div className="bg-[#0b101d]/90 backdrop-blur border border-slate-800 p-2 rounded-xl shadow-xl flex flex-col gap-1.5 min-w-[210px]">
@@ -1463,7 +1847,14 @@ export const Map3DCanvas: React.FC<Map3DCanvasProps> = ({
                   >
                     <span className="font-bold text-slate-200">🛗 {l.name}</span>
                     <span className="font-mono text-cyan-300 font-semibold">
-                      {st?.current_floor || '1F'} ➔ {st?.destination_floor || st?.current_floor || '1F'}
+                      {(() => {
+                        const curF = st?.current_floor || '1F';
+                        const destF = st?.destination_floor || curF;
+                        if (destF && destF !== curF) {
+                          return `${curF} ➔ ${destF}`;
+                        }
+                        return `${curF} 停靠`;
+                      })()}
                     </span>
                     <span
                       className={`px-1 py-0.2 rounded text-[9px] ${
