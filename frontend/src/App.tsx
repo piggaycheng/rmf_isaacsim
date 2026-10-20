@@ -62,6 +62,7 @@ import {
   Settings2,
   Sparkles,
   Crosshair,
+  Undo2,
 } from 'lucide-react';
 
 const DEFAULT_GRAPHS: NavGraph[] = [
@@ -435,7 +436,8 @@ export function App() {
   const [actionPendingRobotId, setActionPendingRobotId] = useState<string | null>(null);
   const [isGlobalActionPending, setIsGlobalActionPending] = useState<boolean>(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const isInitialMount = useRef(true);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
+  const isMapLoaded = useRef(false);
 
   // Update mode and persist to localStorage
   const handleSetMode = (newMode: AppMode) => {
@@ -488,83 +490,46 @@ export function App() {
 
   // 2. Fetch initial Saved Navigation Graph from backend on startup
   useEffect(() => {
-    const cached = localStorage.getItem('rmf_active_nav_graph');
     fetch('/api/map')
       .then((res) => res.json())
       .then((data) => {
         if (data && Array.isArray(data.waypoints)) {
-          let cacheHasLevels = false;
+          setWaypoints(data.waypoints);
+          if (Array.isArray(data.lanes)) setLanes(data.lanes);
+          if (Array.isArray(data.graphs) && data.graphs.length > 0) setGraphs(data.graphs);
+          if (Array.isArray(data.levels) && data.levels.length > 0) setLevels(data.levels);
+          if (Array.isArray(data.lifts)) setLifts(data.lifts);
           try {
-            cacheHasLevels = !!cached && Array.isArray(JSON.parse(cached).levels);
+            localStorage.setItem('rmf_active_nav_graph', JSON.stringify(data));
           } catch (e) {}
-          // A cache written before multi-level support would drop other floors on auto-save,
-          // so the server map wins when it has levels and the cache does not.
-          const serverHasLevels = Array.isArray(data.levels) && data.levels.length > 0;
-          if (!cached || (serverHasLevels && !cacheHasLevels)) {
-            setWaypoints(data.waypoints);
-            if (Array.isArray(data.lanes)) setLanes(data.lanes);
-            if (Array.isArray(data.graphs) && data.graphs.length > 0) setGraphs(data.graphs);
-            if (Array.isArray(data.levels)) setLevels(data.levels);
-            if (Array.isArray(data.lifts)) setLifts(data.lifts);
-          } else {
-            if (Array.isArray(data.levels) && data.levels.length > 0) setLevels(data.levels);
-            if (Array.isArray(data.lifts)) setLifts(data.lifts);
-          }
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        setTimeout(() => {
+          isMapLoaded.current = true;
+          setHasUnsavedChanges(false);
+        }, 100);
+      });
   }, []);
 
-  // 3. Auto-Save Effect: Automatically syncs to localStorage (0ms) and backend (debounced 800ms) on any change
+  // 3. Track unsaved map edits (auto-save removed; saving is triggered manually via '儲存路網' or '套用至車隊')
   useEffect(() => {
-    // Skip localStorage overwrite & network POST on initial component load
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-
-    const payload = {
-      name: 'office_map',
-      waypoints,
-      lanes,
-      graphs,
-      ...(levels.length > 0 ? { levels, lifts } : {}),
-    };
-
-    // Immediate local save
-    try {
-      localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
-    } catch (e) {}
-
-    // Debounced server auto-save
-    const timer = setTimeout(async () => {
-      try {
-        const res = await fetch('/api/map', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) {
-          const data = await res.json().catch(() => ({}));
-          const stale: string[] = data.adapter_restart_required || [];
-          setStaleAdapterFleets(stale);
-          setSaveToast(
-            stale.length > 0
-              ? '已自動存檔（尚未套用至 Fleet Adapter，按「套用至車隊」套用）'
-              : '已自動存檔'
-          );
-        } else {
-          const data = await res.json().catch(() => ({}));
-          setSaveToast(`自動存檔失敗：${data.detail || res.status}`);
-        }
-        setTimeout(() => setSaveToast(null), res.ok ? 2000 : 4000);
-      } catch (err) {
-        // Fallback: local storage is already updated
-      }
-    }, 800);
-
-    return () => clearTimeout(timer);
+    if (!isMapLoaded.current) return;
+    setHasUnsavedChanges(true);
   }, [waypoints, lanes, graphs, levels, lifts]);
+
+  // Prompt before leaving if there are unsaved changes
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasUnsavedChanges]);
 
   // WebSocket Connection to Backend
   useEffect(() => {
@@ -1405,6 +1370,7 @@ export function App() {
       if (res.ok) {
         setStaleAdapterFleets(data.adapter_restart_required || []);
         setSaveToast(data.message || '路網已儲存');
+        setHasUnsavedChanges(false);
       } else {
         setSaveToast(`儲存失敗：${data.detail || res.status}`);
       }
@@ -1467,6 +1433,7 @@ export function App() {
       if (res.ok && data.status !== 'error') {
         setStaleAdapterFleets(data.adapter_restart_required || []);
         setSaveToast(data.message || '已套用路網至各車隊');
+        setHasUnsavedChanges(false);
       } else {
         setSaveToast(`套用失敗：${data.detail || data.message || res.status}`);
       }
@@ -1475,6 +1442,36 @@ export function App() {
     } finally {
       setIsApplyingMap(false);
       setTimeout(() => setSaveToast(null), allowOffline ? 8000 : 3000);
+    }
+  };
+
+  // Discard unsaved changes and reload map from backend
+  const handleDiscardChanges = async () => {
+    if (!window.confirm('確定要放棄所有未儲存的路網變更，還原為上次儲存的狀態？')) return;
+    try {
+      const res = await fetch('/api/map');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.waypoints)) {
+          isMapLoaded.current = false;
+          setWaypoints(data.waypoints);
+          setLanes(Array.isArray(data.lanes) ? data.lanes : []);
+          if (Array.isArray(data.graphs) && data.graphs.length > 0) setGraphs(data.graphs);
+          if (Array.isArray(data.levels) && data.levels.length > 0) setLevels(data.levels);
+          if (Array.isArray(data.lifts)) setLifts(data.lifts);
+          setSelectedWaypointIds([]);
+          setSelectedLaneIds([]);
+          setHasUnsavedChanges(false);
+          setSaveToast('已還原為伺服器已儲存路網');
+          setTimeout(() => setSaveToast(null), 3000);
+          setTimeout(() => {
+            isMapLoaded.current = true;
+          }, 100);
+        }
+      }
+    } catch (e) {
+      setSaveToast('還原失敗 (伺服器離線)');
+      setTimeout(() => setSaveToast(null), 3000);
     }
   };
 
@@ -1790,6 +1787,30 @@ export function App() {
                   Graph {activeGraphIdx}.yaml
                 </Button>
 
+                {hasUnsavedChanges && (
+                  <span
+                    className="flex items-center text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/40 rounded px-2 h-7 flex-shrink-0"
+                    title="當前有尚未儲存至伺服器的路網修改，請記得點擊「儲存路網」"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mr-1.5 animate-pulse" />
+                    有未儲存變更
+                  </span>
+                )}
+
+                {hasUnsavedChanges && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-slate-400 hover:text-rose-300 hover:bg-rose-950/30 text-xs h-7 px-2 flex-shrink-0"
+                    onClick={handleDiscardChanges}
+                    disabled={isSaving || isApplyingMap}
+                    title="放棄當前未儲存的變更，還原為伺服器已儲存的路網"
+                  >
+                    <Undo2 className="w-3.5 h-3.5 mr-1" />
+                    放棄變更
+                  </Button>
+                )}
+
                 {staleAdapterFleets.length > 0 && (
                   <span
                     className="flex items-center text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/40 rounded px-2 h-7 flex-shrink-0"
@@ -1802,13 +1823,17 @@ export function App() {
 
                 <Button
                   size="sm"
-                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm shadow-emerald-950/50 text-xs h-7 px-2.5 flex-shrink-0"
+                  className={`font-medium shadow-sm text-xs h-7 px-2.5 flex-shrink-0 transition-all ${
+                    hasUnsavedChanges
+                      ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-950/50 ring-1 ring-amber-400/50'
+                      : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/50'
+                  }`}
                   onClick={handleSaveMap}
                   disabled={isSaving || isApplyingMap}
                   title="單純儲存當前點位與路線至伺服器硬碟 (JSON + Open-RMF YAML)，不重新載入車隊 Adapter"
                 >
                   <Save className="w-3.5 h-3.5 mr-1" />
-                  {isSaving ? '儲存中...' : '儲存路網'}
+                  {isSaving ? '儲存中...' : hasUnsavedChanges ? '儲存路網 (未儲存)' : '儲存路網'}
                 </Button>
 
                 <Button
