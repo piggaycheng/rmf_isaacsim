@@ -547,7 +547,10 @@ export function App() {
 
         ws.onmessage = (event) => {
           try {
-            const data = JSON.parse(event.data);
+            const raw = typeof event.data === 'string'
+              ? event.data.replace(/:\s*Infinity\b/g, ': 999.0').replace(/:\s*NaN\b/g, ': null')
+              : event.data;
+            const data = JSON.parse(raw);
             if (data.type === 'fleet_states' && data.robots) {
               setRobots(data.robots);
             }

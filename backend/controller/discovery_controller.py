@@ -49,6 +49,9 @@ async def discovery_watchdog_loop():
                     if isinstance(cached, dict):
                         for k, v in cached.items():
                             if isinstance(v, dict):
+                                dist = v.get("off_graph_distance")
+                                if isinstance(dist, (int, float)) and (math.isinf(dist) or math.isnan(dist)):
+                                    v["off_graph_distance"] = 999.0
                                 state.discovered_robots[k] = v
                         state.sync_robot_specs_to_adapters(cached)
             except Exception:

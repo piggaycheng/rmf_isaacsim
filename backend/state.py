@@ -448,6 +448,10 @@ def get_discovered_robots_list() -> List[Dict[str, Any]]:
         else:
             item["connection_status"] = "online"
 
+        dist = item.get("off_graph_distance")
+        if isinstance(dist, (int, float)) and (math.isinf(dist) or math.isnan(dist)):
+            item["off_graph_distance"] = 999.0
+
         result.append(item)
     return result
 
