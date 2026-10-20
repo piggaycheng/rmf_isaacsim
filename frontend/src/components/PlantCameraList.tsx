@@ -12,7 +12,6 @@ import {
   Radio,
   ChevronDown,
   ChevronUp,
-  X,
 } from 'lucide-react';
 
 interface PlantCameraListProps {
@@ -20,7 +19,6 @@ interface PlantCameraListProps {
   className?: string;
   defaultExpanded?: boolean;
   compact?: boolean;
-  onClose?: () => void;
 }
 
 export function PlantCameraList({
@@ -28,7 +26,6 @@ export function PlantCameraList({
   className = '',
   defaultExpanded = true,
   compact = false,
-  onClose,
 }: PlantCameraListProps) {
   const {
     connectionStatus,
@@ -134,15 +131,6 @@ export function PlantCameraList({
           >
             {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
           </button>
-          {onClose && (
-            <button
-              onClick={onClose}
-              className="text-slate-400 hover:text-rose-400 p-1 rounded-md hover:bg-slate-800 transition-colors"
-              title="隱藏廠區相機"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
         </div>
       </div>
 

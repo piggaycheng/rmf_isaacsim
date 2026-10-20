@@ -3048,7 +3048,6 @@ export function App() {
                   plant={selectedPlant}
                   compact={true}
                   defaultExpanded={false}
-                  onClose={() => setSelectedPlant(null)}
                 />
               )}
 
