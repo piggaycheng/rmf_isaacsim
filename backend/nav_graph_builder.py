@@ -53,6 +53,21 @@ def normalize_transform(raw: Optional[Dict[str, Any]], label: str) -> Dict[str, 
     }
 
 
+def parse_floor_order(name: str) -> Optional[float]:
+    if not isinstance(name, str):
+        return None
+    s = name.strip()
+    m = re.match(r'^B(\d+)$', s, re.IGNORECASE)
+    if m:
+        return -float(m.group(1))
+    m = re.match(r'^(\d+)F$', s, re.IGNORECASE) or re.match(r'^[LF](\d+)$', s, re.IGNORECASE)
+    if m:
+        return float(m.group(1)) - 1.0
+    if re.match(r'^G(F)?$', s, re.IGNORECASE):
+        return 0.0
+    return None
+
+
 def normalize_levels(levels: Optional[List[Dict[str, Any]]],
                      waypoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Validated levels; maps without levels get one identity level."""
@@ -67,8 +82,17 @@ def normalize_levels(levels: Optional[List[Dict[str, Any]]],
         if name in names:
             raise ValueError(f"樓層名稱重複：{name}")
         names.add(name)
-        result.append({**level, "name": name,
-                       "transform": normalize_transform(level.get("transform"), f"樓層 {name}")})
+        lvl_dict = {**level, "name": name,
+                    "transform": normalize_transform(level.get("transform"), f"樓層 {name}")}
+        elevation = level.get("elevation") if isinstance(level, dict) else None
+        if elevation is None:
+            elevation = parse_floor_order(name)
+        if elevation is not None:
+            try:
+                lvl_dict["elevation"] = float(elevation)
+            except (ValueError, TypeError):
+                pass
+        result.append(lvl_dict)
     return result
 
 
@@ -258,6 +282,7 @@ def build(name: str, waypoints: List[Dict[str, Any]], lanes: List[Dict[str, Any]
                         or (drawing if index == 0 else "")
                     )
                 },
+                "elevation": float(level.get("elevation", 0.0) if level.get("elevation") is not None else 0.0),
                 "transform": level["transform"],
                 "vertices": [
                     [v[0], v[1], 0.0, v[2]["name"],

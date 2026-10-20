@@ -8,9 +8,10 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform, isPreciseArrival, DispatchTaskRequest, LiftRuntimeState, computeLiftYawFromLanes } from '@/types/rmf';
+import { Waypoint, Lane, Robot, Task, FleetAdapter, WaypointType, SlamMap, PlantSite, NavGraph, GRAPH_PALETTE, isWaypointInGraph, getWaypointGraphIndices, MultiStepTaskRequestData, MapLevel, MapLift, DEFAULT_LEVEL, waypointLevel, LevelTransform, toBuildingCoords, toRobotCoords, normalizeTransform, isPreciseArrival, DispatchTaskRequest, LiftRuntimeState, computeLiftYawFromLanes, parseFloorOrder } from '@/types/rmf';
 import { ImportMapModal } from '@/components/ImportMapModal';
 import { MapOverlayAlignModal } from '@/components/MapOverlayAlignModal';
+import { LevelModal } from '@/components/LevelModal';
 import { WorldMap } from '@/components/WorldMap';
 import { IsaacSimStreamModal } from '@/components/IsaacSimStreamModal';
 import { PlantCameraList } from '@/components/PlantCameraList';
@@ -58,6 +59,7 @@ import {
   CheckCircle2,
   ArrowUpDown,
   Sliders,
+  Settings2,
   Sparkles,
   Crosshair,
 } from 'lucide-react';
@@ -259,6 +261,61 @@ export function App() {
   }, [lifts, waypoints, lanes, levels]);
 
   const [overlayAlignModalOpen, setOverlayAlignModalOpen] = useState<boolean>(false);
+  const [levelModalOpen, setLevelModalOpen] = useState<boolean>(false);
+  const [levelModalMode, setLevelModalMode] = useState<'add' | 'edit'>('add');
+  const [editingLevel, setEditingLevel] = useState<MapLevel | null>(null);
+
+  const handleOpenAddLevelModal = () => {
+    setLevelModalMode('add');
+    setEditingLevel(null);
+    setLevelModalOpen(true);
+  };
+
+  const handleOpenEditLevelModal = (lvl: MapLevel) => {
+    setLevelModalMode('edit');
+    setEditingLevel(lvl);
+    setLevelModalOpen(true);
+  };
+
+  const handleSaveLevelDefinition = (data: { name: string; elevation: number }) => {
+    if (levelModalMode === 'add') {
+      const newLvl: MapLevel = {
+        name: data.name,
+        elevation: data.elevation,
+        transform: { rotation: 0, scale: 1, translation: [0, 0] },
+      };
+      setLevels((prev) => [...prev, newLvl]);
+      setActiveLevel(data.name);
+      setSelectedWaypointIds([]);
+      setSelectedLaneIds([]);
+      setSaveToast(`已新增樓層 [${data.name}]（高度層級: ${data.elevation}），可開始繪製該樓層路網或載入專屬底圖`);
+      setTimeout(() => setSaveToast(null), 3500);
+    } else if (levelModalMode === 'edit' && editingLevel) {
+      const oldName = editingLevel.name;
+      const newName = data.name;
+      setLevels((prev) =>
+        prev.map((l) =>
+          l.name === oldName
+            ? { ...l, name: newName, elevation: data.elevation }
+            : l
+        )
+      );
+      if (oldName !== newName) {
+        if (activeLevel === oldName) setActiveLevel(newName);
+        setWaypoints((prev) =>
+          prev.map((w) => (waypointLevel(w, levels) === oldName ? { ...w, level: newName } : w))
+        );
+        setFloorSlamMaps((prev) => {
+          if (!prev[oldName]) return prev;
+          const updated = { ...prev, [newName]: prev[oldName] };
+          delete updated[oldName];
+          return updated;
+        });
+      }
+      setSaveToast(`樓層 [${newName}] 屬性已更新（高度層級: ${data.elevation}）！`);
+      setTimeout(() => setSaveToast(null), 3000);
+    }
+  };
 
   const handleSaveLevelTransform = (levelName: string, transform: LevelTransform) => {
     setLevels((prev) =>
@@ -809,7 +866,7 @@ export function App() {
   };
 
   // Floor / Level Management Actions
-  const handleAddLevel = (name: string) => {
+  const handleAddLevel = (name: string, elevation?: number) => {
     const trimmed = name.trim();
     if (!trimmed) return;
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(trimmed)) {
@@ -822,33 +879,26 @@ export function App() {
       setTimeout(() => setSaveToast(null), 3000);
       return;
     }
+    const finalElevation =
+      typeof elevation === 'number' && Number.isFinite(elevation)
+        ? elevation
+        : parseFloorOrder(trimmed) ?? levels.length;
+
     const newLvl: MapLevel = {
       name: trimmed,
+      elevation: finalElevation,
       transform: { rotation: 0, scale: 1, translation: [0, 0] },
     };
     setLevels((prev) => [...prev, newLvl]);
     setActiveLevel(trimmed);
     setSelectedWaypointIds([]);
     setSelectedLaneIds([]);
-    setSaveToast(`已新增樓層 [${trimmed}]，可開始繪製該樓層路網或載入專屬底圖`);
+    setSaveToast(`已新增樓層 [${trimmed}]（高度層級: ${finalElevation}），可開始繪製該樓層路網或載入專屬底圖`);
     setTimeout(() => setSaveToast(null), 3500);
   };
 
   const handlePromptAddLevel = () => {
-    let suggestion = '2F';
-    const nums = levels
-      .map((l) => {
-        const m = l.name.match(/^(\d+)F$/i);
-        return m ? parseInt(m[1], 10) : 0;
-      })
-      .filter((n) => n > 0);
-    if (nums.length > 0) {
-      suggestion = `${Math.max(...nums) + 1}F`;
-    }
-    const input = window.prompt('請輸入新樓層名稱（例如 2F, 3F, B1）:', suggestion);
-    if (input) {
-      handleAddLevel(input);
-    }
+    handleOpenAddLevelModal();
   };
 
   const handleDeleteLevel = (name: string) => {
@@ -1799,10 +1849,14 @@ export function App() {
                     const isActive = lvl.name === currentLevel;
                     const hasMap = Boolean(floorSlamMaps[lvl.name]);
                     const wpCount = waypoints.filter((w) => waypointLevel(w, levels) === lvl.name).length;
+                    const elev =
+                      typeof lvl.elevation === 'number' && Number.isFinite(lvl.elevation)
+                        ? lvl.elevation
+                        : parseFloorOrder(lvl.name);
                     return (
                       <div
                         key={lvl.name}
-                        className={`flex items-center rounded-lg border text-xs transition-all ${
+                        className={`group flex items-center rounded-lg border text-xs transition-all ${
                           isActive
                             ? 'bg-primary/20 border-primary text-white font-semibold shadow-sm'
                             : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
@@ -1814,10 +1868,22 @@ export function App() {
                             setSelectedWaypointIds([]);
                             setSelectedLaneIds([]);
                           }}
-                          className="flex items-center space-x-1.5 px-2.5 py-1"
-                          title={`切換編輯樓層：${lvl.name}（${wpCount} 站點，${hasMap ? '已載入底圖' : '尚未載入底圖'}）`}
+                          className="flex items-center space-x-1.5 px-2 py-1"
+                          title={`切換編輯樓層：${lvl.name}（${wpCount} 站點，${hasMap ? '已載入底圖' : '尚未載入底圖'}，高度階數: ${elev ?? '未指定'}）`}
                         >
                           <span>{lvl.name}</span>
+                          {elev !== null && (
+                            <span
+                              className={`text-[9px] px-1 py-0.2 rounded font-mono font-medium ${
+                                elev >= 0
+                                  ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/40'
+                                  : 'bg-indigo-950/80 text-indigo-300 border border-indigo-800/40'
+                              }`}
+                              title={`樓層高度層級 (Elevation): ${elev} (${(elev * 24).toFixed(0)}m)`}
+                            >
+                              {elev >= 0 ? `+${elev}` : elev}
+                            </span>
+                          )}
                           {hasMap ? (
                             <span title="此樓層已有雷達底圖">
                               <ImageIcon className="w-3 h-3 text-cyan-400" />
@@ -1829,6 +1895,19 @@ export function App() {
                             ({wpCount}點)
                           </span>
                         </button>
+
+                        {/* Edit floor elevation / properties */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenEditLevelModal(lvl);
+                          }}
+                          className="px-1 text-slate-500 hover:text-cyan-300 opacity-60 group-hover:opacity-100 transition-opacity"
+                          title={`編輯 ${lvl.name} 樓層名稱與 3D 高度層級`}
+                        >
+                          <Settings2 className="w-3 h-3" />
+                        </button>
+
                         {levels.length > 1 && (
                           <button
                             onClick={(e) => {
@@ -1845,9 +1924,9 @@ export function App() {
                     );
                   })}
                   <button
-                    onClick={handlePromptAddLevel}
+                    onClick={handleOpenAddLevelModal}
                     className="flex items-center space-x-1 px-2.5 py-1 rounded-lg border border-dashed border-slate-700 text-xs text-slate-400 hover:text-cyan-300 hover:border-cyan-500 transition-all shrink-0"
-                    title="新增樓層 (例如 2F, 3F, B1)"
+                    title="新增樓層 (自訂名稱與 3D 高度層級)"
                   >
                     <Plus className="w-3 h-3" />
                     <span>新增樓層</span>
@@ -3503,6 +3582,16 @@ export function App() {
         waypoints={waypoints}
         lifts={activeLifts}
         onSaveLevelTransform={handleSaveLevelTransform}
+      />
+
+      {/* Floor / Level Definition Modal */}
+      <LevelModal
+        open={levelModalOpen}
+        onOpenChange={setLevelModalOpen}
+        mode={levelModalMode}
+        initialLevel={editingLevel}
+        existingLevels={levels}
+        onSave={handleSaveLevelDefinition}
       />
 
       {/* Isaac Sim WebRTC Digital Twin Modal */}
