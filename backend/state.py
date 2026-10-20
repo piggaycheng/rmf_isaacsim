@@ -32,7 +32,7 @@ FLEET_ADAPTERS_FILE = os.path.join(MAPS_DIR, "fleet_adapters.json")
 OFFLINE_RELOAD_FILE = os.path.join(MAPS_DIR, "offline_reload_pending.json")
 
 # Mirrors OFF_GRAPH_THRESHOLD_M in mqtt_fleet_adapter.py, which decides off-graph; used in messages only.
-OFF_GRAPH_THRESHOLD_M = 5.0
+OFF_GRAPH_THRESHOLD_M = 3.0
 
 # ==========================================
 # Pydantic Request / Data Models

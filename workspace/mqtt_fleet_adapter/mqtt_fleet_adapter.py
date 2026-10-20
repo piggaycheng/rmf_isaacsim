@@ -135,8 +135,13 @@ def change_floor_payload(robot_id: str, cmd_id: int, floor_name: str, position: 
     }
 
 
-# A robot farther than this from the nav graph is off-graph (no bidding / commands).
-OFF_GRAPH_THRESHOLD_M = 5.0
+# RMF's per-robot lane merge distance (its RobotConfiguration default).
+LANE_MERGE_DISTANCE_M = 0.3
+
+# A robot farther than this from the nav graph is off-graph (no bidding / commands). Matches the
+# farthest RMF searches for a lane (LANE_MERGE_DISTANCE_M x its largest multiplier, 10) before it
+# marks the robot lost.
+OFF_GRAPH_THRESHOLD_M = 3.0
 
 # A navigate to an ordinary waypoint finishes once a heartbeat is this close to the target, so the
 # robot flows through intermediate waypoints instead of fine-aligning its heading at each one.
@@ -976,7 +981,7 @@ class MqttFleetAdapter:
                         # New robots must not start idle navigation before their session is localized.
                         cfg.default_responsive_wait = False
                         cfg.default_max_merge_waypoint_distance = WAYPOINT_MERGE_DISTANCE_M
-                        cfg.default_max_merge_lane_distance = OFF_GRAPH_THRESHOLD_M
+                        cfg.default_max_merge_lane_distance = LANE_MERGE_DISTANCE_M
                         handle = self.adapter.add_easy_fleet(cfg)
                         self.fleet_handles[f_name] = handle
                         self._setup_fleet_consideration(handle, f_name)
