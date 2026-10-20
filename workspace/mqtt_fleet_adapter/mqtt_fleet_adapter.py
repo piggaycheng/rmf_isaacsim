@@ -135,8 +135,7 @@ def change_floor_payload(robot_id: str, cmd_id: int, floor_name: str, position: 
     }
 
 
-# A robot farther than this from the nav graph is off-graph (no bidding / commands). Matches RMF's
-# max merge distance below, beyond which RMF cannot snap the robot onto the graph.
+# A robot farther than this from the nav graph is off-graph (no bidding / commands).
 OFF_GRAPH_THRESHOLD_M = 5.0
 
 # A navigate to an ordinary waypoint finishes once a heartbeat is this close to the target, so the
@@ -145,6 +144,12 @@ OFF_GRAPH_THRESHOLD_M = 5.0
 # the robot's command_result instead.
 ARRIVAL_DISTANCE_M = 0.25
 ARRIVAL_YAW_RAD = 0.20
+
+# A robot within this distance of a waypoint is localized exactly on it. Must exceed
+# ARRIVAL_DISTANCE_M so a robot finished by heartbeat is not treated as sitting on an adjacent lane,
+# where RMF's bidding (which only uses the first start) would estimate from the lane's far end.
+# Kept small because RMF snaps to the lowest-index waypoint within range, not the nearest one.
+WAYPOINT_MERGE_DISTANCE_M = 0.3
 
 
 class ManagedRobot:
@@ -970,7 +975,7 @@ class MqttFleetAdapter:
                         cfg.fleet_name = f_name
                         # New robots must not start idle navigation before their session is localized.
                         cfg.default_responsive_wait = False
-                        cfg.default_max_merge_waypoint_distance = OFF_GRAPH_THRESHOLD_M
+                        cfg.default_max_merge_waypoint_distance = WAYPOINT_MERGE_DISTANCE_M
                         cfg.default_max_merge_lane_distance = OFF_GRAPH_THRESHOLD_M
                         handle = self.adapter.add_easy_fleet(cfg)
                         self.fleet_handles[f_name] = handle
@@ -1756,6 +1761,14 @@ class MqttFleetAdapter:
                         fleet_name=fleet_name,
                     )
                     return
+
+                # The Python RobotConfiguration only takes chargers, so its C++ merge defaults
+                # (0.001 / 0.3, non-null) override FleetConfiguration.default_max_merge_* in
+                # add_robot(). Apply the waypoint merge distance per robot instead.
+                try:
+                    update_handle.set_max_merge_waypoint_distance(WAYPOINT_MERGE_DISTANCE_M)
+                except Exception as e:
+                    print(f"[WARN] Could not set waypoint merge distance for '{robot_id}': {e}")
 
                 print(f"[RMF] Successfully registered '{robot_id}' into Open-RMF fleet [{fleet_name}] handle!")
 
