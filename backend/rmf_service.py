@@ -1234,6 +1234,24 @@ class RMFService:
             timeout_s,
         )
 
+    def clear_offline_unadopted_robots(self) -> None:
+        """Tell Fleet Adapter to purge unadopted offline robots from memory & disk."""
+        if self.robot_control_pub and rclpy.ok():
+            msg = String()
+            msg.data = json.dumps({"action": "clear_offline_unadopted"})
+            self.robot_control_pub.publish(msg)
+
+    def forget_discovered_robot(self, fleet_name: str, robot_id: str) -> None:
+        """Tell Fleet Adapter to forget a specific discovered robot."""
+        if self.robot_control_pub and rclpy.ok():
+            msg = String()
+            msg.data = json.dumps({
+                "action": "forget_discovered",
+                "fleet": fleet_name,
+                "robot": robot_id,
+            })
+            self.robot_control_pub.publish(msg)
+
     def _call_task_api(self, payload_json: Dict[str, Any], timeout_s: float, grace_s: float = 1.0) -> List[Dict[str, Any]]:
         """Publish a Task API request and collect its responses. Blocking; call from a worker thread.
 

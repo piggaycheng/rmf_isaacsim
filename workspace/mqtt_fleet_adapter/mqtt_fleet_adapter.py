@@ -1233,13 +1233,63 @@ class MqttFleetAdapter:
                 print(f"[RMF WARN] Error logging e-stop for '{robot.name}': {e}")
         self._sync_rmf_availability(robot)
 
+    def _clear_offline_unadopted(self):
+        """Clears discovered robots that are both unadopted and offline."""
+        adapters_file = find_backend_path("saved_maps/fleet_adapters.json")
+        adopted_names = set()
+        if os.path.exists(adapters_file):
+            try:
+                with open(adapters_file, "r", encoding="utf-8") as f:
+                    for item in json.load(f):
+                        for r in item.get("robots", []):
+                            name = r.get("name") if isinstance(r, dict) else str(r)
+                            if name:
+                                adopted_names.add(name)
+            except Exception as e:
+                print(f"[DISCOVERY WARN] Failed to read fleet_adapters.json: {e}")
+
+        now = time.time()
+        removed = []
+        with self.lock:
+            for k, rob in list(self.discovered_robots.items()):
+                r_id = rob.get("robot_id")
+                # Never remove adopted robots
+                if r_id in adopted_names:
+                    continue
+                status = rob.get("status")
+                last_seen = rob.get("last_seen", 0)
+                if status == "offline" or (now - last_seen > 15.0):
+                    del self.discovered_robots[k]
+                    removed.append(k)
+
+            if removed:
+                self._save_discovered_robots()
+                print(f"[DISCOVERY] Cleared unadopted offline robots: {removed}")
+        return removed
+
+    def _forget_discovered_robot(self, fleet_name: str, robot_id: str):
+        """Removes a specific unadopted robot from discovered_robots."""
+        robot_key = f"{fleet_name}_{robot_id}"
+        with self.lock:
+            if robot_key in self.discovered_robots:
+                del self.discovered_robots[robot_key]
+                self._save_discovered_robots()
+                print(f"[DISCOVERY] Removed discovered robot '{robot_key}'.")
+
     def _on_ros2_robot_control(self, msg: String):
         try:
             payload = json.loads(msg.data)
+            action = payload.get("action")
+            if action == "clear_offline_unadopted":
+                self._clear_offline_unadopted()
+                return
             fleet_name = payload.get("fleet")
             robot_id = payload.get("robot")
+            if action == "forget_discovered" and fleet_name and robot_id:
+                self._forget_discovered_robot(fleet_name, robot_id)
+                return
             if fleet_name and robot_id:
-                self._handle_robot_control(fleet_name, robot_id, payload.get("action"))
+                self._handle_robot_control(fleet_name, robot_id, action)
         except Exception as e:
             print(f"[FA ERROR] Failed to process ROS 2 robot control: {e}")
 

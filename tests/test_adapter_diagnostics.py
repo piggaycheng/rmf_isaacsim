@@ -822,5 +822,60 @@ class TestReloadErrors(unittest.IsolatedAsyncioTestCase):
         save.assert_not_called()
 
 
+class TestClearOfflineDiscoveredRobots(BackendFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_clear_offline_purges_only_unadopted_offline_robots(self):
+        from controller import discovery_controller
+        state.save_fleet_adapters_data([{
+            "id": "a1", "fleet_name": "fleet1",
+            "robots": [{"name": "carter1"}],
+        }, {
+            "id": "a2", "fleet_name": "fleet2",
+            "robots": [{"name": "carter2"}],
+        }])
+        state.discovered_robots.clear()
+        state.discovered_robots.update({
+            "fleet1_carter1": {"fleet_name": "fleet1", "robot_id": "carter1", "status": "idle", "last_seen": time.time()},
+            "fleet2_carter2": {"fleet_name": "fleet2", "robot_id": "carter2", "status": "offline", "last_seen": 100.0},
+            "fleet1_e2e_bot": {"fleet_name": "fleet1", "robot_id": "e2e_bot", "status": "offline", "last_seen": 100.0},
+            "floor_test_1": {"fleet_name": "floor_test", "robot_id": "floor_test_1", "status": "offline", "last_seen": 100.0},
+            "live_unadopted": {"fleet_name": "live_fleet", "robot_id": "live_bot", "status": "idle", "last_seen": time.time()},
+        })
+
+        with patch("controller.discovery_controller.broadcast"), \
+             patch("rmf_service.rmf_service.clear_offline_unadopted_robots"):
+            res = await discovery_controller.clear_offline_discovered_robots()
+
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["cleared_count"], 2)
+        self.assertIn("fleet1_e2e_bot", res["cleared_keys"])
+        self.assertIn("floor_test_1", res["cleared_keys"])
+
+        # Remaining in state.discovered_robots
+        remaining = set(state.discovered_robots.keys())
+        self.assertEqual(remaining, {"fleet1_carter1", "fleet2_carter2", "live_unadopted"})
+
+    async def test_delete_single_prevents_adopted_robot_deletion(self):
+        from controller import discovery_controller
+        state.save_fleet_adapters_data([{
+            "id": "a1", "fleet_name": "fleet1",
+            "robots": [{"name": "carter1"}],
+        }])
+        state.discovered_robots.clear()
+        state.discovered_robots.update({
+            "fleet1_carter1": {"fleet_name": "fleet1", "robot_id": "carter1", "status": "offline"},
+            "test_ghost": {"fleet_name": "test", "robot_id": "ghost_bot", "status": "offline"},
+        })
+
+        with patch("controller.discovery_controller.broadcast"), \
+             patch("rmf_service.rmf_service.forget_discovered_robot"):
+            err_res = await discovery_controller.delete_single_discovered_robot("fleet1", "carter1")
+            self.assertEqual(err_res["status"], "error")
+            self.assertIn("fleet1_carter1", state.discovered_robots)
+
+            ok_res = await discovery_controller.delete_single_discovered_robot("test", "ghost_bot")
+            self.assertEqual(ok_res["status"], "ok")
+            self.assertNotIn("test_ghost", state.discovered_robots)
+
+
 if __name__ == "__main__":
     unittest.main()

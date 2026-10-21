@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   FleetAdapter,
   NavGraph,
@@ -140,7 +140,22 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
   // Discovered Robots State (Auto-discovered via EMQX MQTT)
   const [discoveredRobots, setDiscoveredRobots] = useState<DiscoveredRobot[]>([]);
   const [isAdopting, setIsAdopting] = useState<boolean>(false);
+  const [isClearingOffline, setIsClearingOffline] = useState<boolean>(false);
+  const [isRefreshingDiscovered, setIsRefreshingDiscovered] = useState<boolean>(false);
   const [mqttScanning, setMqttScanning] = useState<boolean>(true);
+
+  const unadoptedOfflineCount = useMemo(() => {
+    return discoveredRobots.filter((r) => {
+      const isAdopted = r.is_adopted;
+      const isOffline = r.connection_status === 'offline' || r.status === 'offline';
+      return !isAdopted && isOffline;
+    }).length;
+  }, [discoveredRobots]);
+
+  const showToast = (msg: string) => {
+    setActionFeedback(msg);
+    setTimeout(() => setActionFeedback(null), 4000);
+  };
 
   // Fetch adapters from server
   const fetchAdapters = async () => {
@@ -158,16 +173,69 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
   };
 
   // Fetch auto-discovered robots from EMQX MQTT
-  const fetchDiscovered = async () => {
+  const fetchDiscovered = async (manual = false) => {
+    if (manual) setIsRefreshingDiscovered(true);
     try {
       const res = await fetch('/api/discovered-robots');
       if (res.ok) {
         const data = await res.json();
         setDiscoveredRobots(data.discovered || []);
         setMqttScanning(Boolean(data.mqtt_connected));
+        if (manual) {
+          showToast('已重新掃描並更新探索名單');
+        }
       }
     } catch (e) {
       console.warn('Failed to fetch discovered robots:', e);
+      if (manual) {
+        showToast('掃描失敗，請檢查後端連線');
+      }
+    } finally {
+      if (manual) {
+        setTimeout(() => setIsRefreshingDiscovered(false), 500);
+      }
+    }
+  };
+
+  // Clear all unadopted and offline discovered robots
+  const handleClearOffline = async () => {
+    if (isClearingOffline) return;
+    setIsClearingOffline(true);
+    try {
+      const res = await fetch('/api/discovered-robots/clear-offline', {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDiscoveredRobots(data.discovered || []);
+        showToast(data.message || `已成功清除 ${data.cleared_count ?? 0} 台未納管離線車輛`);
+      } else {
+        showToast(data.detail || data.message || '清除離線車輛失敗');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('發送清除離線車輛請求失敗');
+    } finally {
+      setIsClearingOffline(false);
+    }
+  };
+
+  // Delete a single discovered robot record
+  const handleDeleteDiscoveredRobot = async (fleetName: string, robotId: string) => {
+    try {
+      const res = await fetch(`/api/discovered-robots/${encodeURIComponent(fleetName)}/${encodeURIComponent(robotId)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setDiscoveredRobots(data.discovered || []);
+        showToast(data.message || `已移除車輛 ${robotId}`);
+      } else {
+        showToast(data.detail || data.message || '移除車輛記錄失敗');
+      }
+    } catch (e) {
+      console.error(e);
+      showToast('發送移除車輛請求失敗');
     }
   };
 
@@ -243,11 +311,6 @@ export const FleetAdapterManager: React.FC<FleetAdapterManagerProps> = ({
       clearInterval(adapterInterval);
     };
   }, []);
-
-  const showToast = (msg: string) => {
-    setActionFeedback(msg);
-    setTimeout(() => setActionFeedback(null), 4000);
-  };
 
   // Open Edit Modal
   const handleOpenEdit = (adapter: FleetAdapter) => {
@@ -721,12 +784,28 @@ ${
               type="button"
               variant="outline"
               size="sm"
-              onClick={fetchDiscovered}
+              disabled={isRefreshingDiscovered}
+              onClick={() => fetchDiscovered(true)}
               className="h-8 text-xs bg-slate-950 border-slate-800 text-slate-300 hover:text-white"
             >
-              <RefreshCw className="w-3.5 h-3.5 mr-1" />
-              重新掃描
+              <RefreshCw className={`w-3.5 h-3.5 mr-1 ${isRefreshingDiscovered ? 'animate-spin text-cyan-400' : ''}`} />
+              {isRefreshingDiscovered ? '掃描中...' : '重新掃描'}
             </Button>
+
+            {unadoptedOfflineCount > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isClearingOffline}
+                onClick={handleClearOffline}
+                className="h-8 text-xs bg-rose-950/40 border-rose-800/60 text-rose-300 hover:bg-rose-900/60 hover:text-white hover:border-rose-500 transition-all shadow-sm shadow-rose-950/30"
+                title="清除所有未納管且已離線的 AMR 測試/歷史記錄"
+              >
+                <Trash2 className={`w-3.5 h-3.5 mr-1.5 ${isClearingOffline ? 'animate-spin' : ''}`} />
+                {isClearingOffline ? '正在清除...' : `清除未納管離線車 (${unadoptedOfflineCount})`}
+              </Button>
+            )}
 
             {discoveredRobots.filter((r) => !r.is_adopted).length > 0 && (
               <Button
@@ -791,10 +870,22 @@ ${
                         <span>已納管</span>
                       </Badge>
                     ) : (
-                      <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[10px] flex items-center space-x-1 animate-pulse shrink-0">
-                        <Zap className="w-3 h-3 mr-0.5" />
-                        <span>待納管</span>
-                      </Badge>
+                      <div className="flex items-center space-x-1.5 shrink-0">
+                        <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/40 text-[10px] flex items-center space-x-1 animate-pulse">
+                          <Zap className="w-3 h-3 mr-0.5" />
+                          <span>待納管</span>
+                        </Badge>
+                        {(robot.connection_status === 'offline' || robot.status === 'offline') && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteDiscoveredRobot(robot.fleet_name, robot.robot_id)}
+                            className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-950/50 rounded transition-colors"
+                            title="移除此離線車輛記錄"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
 

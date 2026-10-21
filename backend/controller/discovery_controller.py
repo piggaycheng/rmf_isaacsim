@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import threading
 import time
@@ -82,6 +83,106 @@ def get_discovered_robots():
         "mqtt_connected": state.is_fa_mqtt_connected(),
         "count": len(discovered_robots),
         "discovered": get_discovered_robots_list(),
+    }
+
+@router.post("/api/discovered-robots/clear-offline")
+@router.delete("/api/discovered-robots/offline")
+async def clear_offline_discovered_robots():
+    """Clears all unadopted and offline discovered AMR robots."""
+    adapters = load_fleet_adapters_data()
+    adopted_names = set()
+    for a in adapters:
+        for r in a.get("robots", []):
+            name = r.get("name") if isinstance(r, dict) else str(r)
+            if name:
+                adopted_names.add(name)
+
+    now = time.time()
+    removed_keys = []
+    for k, rob in list(discovered_robots.items()):
+        r_id = rob.get("robot_id")
+        if r_id in adopted_names:
+            continue
+        status = rob.get("status")
+        last_seen = rob.get("last_seen", 0)
+        if status == "offline" or (now - last_seen > 15.0):
+            removed_keys.append(k)
+            discovered_robots.pop(k, None)
+
+    # Persist in backend saved_maps
+    disc_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "../saved_maps/discovered_robots.json"))
+    try:
+        os.makedirs(os.path.dirname(disc_file), exist_ok=True)
+        with open(disc_file + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(discovered_robots, f, indent=2, ensure_ascii=False)
+        os.replace(disc_file + ".tmp", disc_file)
+    except Exception as e:
+        print(f"[DISCOVERY WARN] Failed to save discovered_robots.json: {e}")
+
+    # Notify running Fleet Adapter via ROS 2
+    try:
+        from rmf_service import rmf_service
+        rmf_service.clear_offline_unadopted_robots()
+    except Exception as e:
+        print(f"[DISCOVERY WARN] Could not signal FA via ROS 2: {e}")
+
+    # Broadcast updated list
+    discovered_list = get_discovered_robots_list()
+    await broadcast({
+        "type": "discovered_robots",
+        "discovered": discovered_list,
+    })
+
+    return {
+        "status": "ok",
+        "cleared_count": len(removed_keys),
+        "cleared_keys": removed_keys,
+        "discovered": discovered_list,
+        "message": f"成功清除 {len(removed_keys)} 台未納管離線車輛",
+    }
+
+@router.delete("/api/discovered-robots/{fleet_name}/{robot_id}")
+async def delete_single_discovered_robot(fleet_name: str, robot_id: str):
+    """Deletes a specific unadopted discovered robot record."""
+    adapters = load_fleet_adapters_data()
+    adopted_names = {
+        r.get("name") if isinstance(r, dict) else str(r)
+        for a in adapters for r in a.get("robots", [])
+    }
+    if robot_id in adopted_names:
+        return {"status": "error", "message": f"車輛 '{robot_id}' 已在正式車隊中納管，無法直接從探索名單刪除"}
+
+    keys_to_delete = [
+        k for k, v in list(discovered_robots.items())
+        if (k == f"{fleet_name}_{robot_id}") or (v.get("fleet_name") == fleet_name and v.get("robot_id") == robot_id)
+    ]
+    if keys_to_delete:
+        for k in keys_to_delete:
+            discovered_robots.pop(k, None)
+        disc_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "../saved_maps/discovered_robots.json"))
+        try:
+            with open(disc_file + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(discovered_robots, f, indent=2, ensure_ascii=False)
+            os.replace(disc_file + ".tmp", disc_file)
+        except Exception:
+            pass
+
+    try:
+        from rmf_service import rmf_service
+        rmf_service.forget_discovered_robot(fleet_name, robot_id)
+    except Exception:
+        pass
+
+    discovered_list = get_discovered_robots_list()
+    await broadcast({
+        "type": "discovered_robots",
+        "discovered": discovered_list,
+    })
+
+    return {
+        "status": "ok",
+        "message": f"已移除車輛 '{robot_id}' 探索記錄",
+        "discovered": discovered_list,
     }
 
 @router.post("/api/discovered-robots/adopt")
