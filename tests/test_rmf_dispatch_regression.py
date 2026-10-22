@@ -54,7 +54,8 @@ class TestRMFDispatchRegression(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         real_find = mfa.find_backend_path
         isolated = {"saved_maps/paused_fleets.json", "saved_maps/discovered_robots.json",
-                    "saved_maps/estopped_robots.json", "saved_maps/robot_sessions.json"}
+                    "saved_maps/estopped_robots.json", "saved_maps/robot_sessions.json",
+                    "saved_maps/adapter_reload.json"}
 
         def isolated_find(subpath):
             if subpath in isolated:

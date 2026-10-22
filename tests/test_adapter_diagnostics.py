@@ -242,6 +242,9 @@ class TestDispatchPrecheck(BackendFixture):
 
 class TestAdapterFallbackWarnings(unittest.TestCase):
     def setUp(self):
+        patcher = patch.object(mfa, "find_backend_path", return_value="/nonexistent/fleet_adapters.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         with patch.object(mfa.MqttFleetAdapter, "_init_rmf"):
             cfg = os.path.join(os.path.dirname(mfa.__file__), "config.yaml")
             self.fa = mfa.MqttFleetAdapter(cfg, cfg, mock_rmf=True)
@@ -252,9 +255,6 @@ class TestAdapterFallbackWarnings(unittest.TestCase):
         self.fa.fleet_waypoint_info = {
             "fleet1": {"all": ["wp_1", "wp_2"], "chargers": [], "parkings": [], "graph_idx": 0, "graph_sha": "abc"}
         }
-        patcher = patch.object(mfa, "find_backend_path", return_value="/nonexistent/fleet_adapters.json")
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def published(self):
         return json.loads(self.fa.fa_state_pub.publish.call_args[0][0].data)
@@ -507,6 +507,134 @@ class TestSafeReload(BackendFixture):
         self.assertFalse(self.service.adapter_reloading)
         self.assertFalse(self.service.adapter_reload_failed)
 
+    def interrupt_control(self, action, request_id, phase, timeout_s):
+        self.assertTrue(self.service.adapter_reloading)
+        self.assertIn("重新載入", self.service.dispatch_task("goto", "wp_1")["message"])
+        state.fa_state["reload"] = {"request_id": request_id, "phase": phase}
+        if action == "stop_for_reload":
+            self.robot.update(busy=False, status="idle", last_heartbeat=time.time(), reload_stopped=True)
+        if action == "finish_reload":
+            state.fa_state["reload"]["phase"] = "released"
+
+    def test_interrupt_reload_cancels_all_fleets_then_stops_persists_restarts_and_releases(self):
+        first = self.task(booking_id="patrol-1", status="active")
+        second = self.task(id="other", fleet_name="fleet2", booking_id="delivery-2")
+        self.service.adapter_process = MagicMock()
+        self.robot.update(busy=True, status="moving")
+        events = []
+
+        def control(*args):
+            events.append(args[0])
+            self.interrupt_control(*args)
+
+        def cancel(identifier):
+            events.append(identifier)
+            task = first if identifier == "patrol-1" else second
+            task["status"] = "canceled"
+            return {"status": "success"}
+
+        with patch.object(self.service, "_reload_control", side_effect=control), \
+                patch.object(self.service, "cancel_task", side_effect=cancel), \
+                patch.object(self.service, "_restart_fleet_adapter_process",
+                             side_effect=lambda **kw: events.append("restart") or True):
+            self.assertTrue(self.service.restart_fleet_adapter(
+                lambda: events.append("persist"), interrupt_tasks=True,
+            ))
+        self.assertEqual(events, [
+            "prepare_reload", "patrol-1", "delivery-2", "stop_for_reload", "persist", "restart", "finish_reload",
+        ])
+        self.assertFalse(self.service.adapter_reloading)
+        self.assertFalse(self.service.adapter_reload_failed)
+
+    def test_interrupt_reload_rejects_unconfirmed_stop_cancel_and_prepare_errors_before_persist(self):
+        self.service.adapter_process = MagicMock()
+        for blocker in ("prepare", "cancel", "heartbeat", "busy", "pending", "offline"):
+            with self.subTest(blocker=blocker):
+                state.current_tasks.clear()
+                self.robot.update(
+                    online=True, status="idle", busy=False, last_heartbeat=time.time(), reload_stopped=False,
+                )
+                state.fa_state.pop("reload", None)
+                task = self.task(booking_id="active")
+                persist = MagicMock()
+
+                def cancel(identifier):
+                    if blocker == "cancel":
+                        return {"status": "error", "message": "cancel refused"}
+                    task["status"] = "canceling" if blocker == "pending" else "canceled"
+                    return {"status": "success"}
+
+                def control(action, request_id, phase, timeout_s):
+                    if blocker == "prepare":
+                        raise AdapterReloadBlocked("prepare failed")
+                    state.fa_state["reload"] = {"request_id": request_id, "phase": phase}
+                    if action == "stop_for_reload":
+                        self.robot.update(
+                            busy=blocker == "busy", online=blocker != "offline",
+                            reload_stopped=blocker != "heartbeat",
+                        )
+
+                with patch.object(self.service, "_reload_control", side_effect=control), \
+                        patch.object(self.service, "cancel_task", side_effect=cancel), \
+                        patch.object(self.service, "_restart_fleet_adapter_process") as restart, \
+                        patch("rmf_service.time.monotonic", side_effect=[0, 20]):
+                    with self.assertRaises(AdapterReloadBlocked):
+                        self.service.restart_fleet_adapter(persist, interrupt_tasks=True)
+                persist.assert_not_called()
+                restart.assert_not_called()
+                self.assertFalse(self.service.adapter_reloading)
+                self.assertTrue(self.service.adapter_reload_failed)
+
+    def test_interrupt_reload_failure_keeps_fence_and_does_not_release_idle_behavior(self):
+        self.service.adapter_process = MagicMock()
+        with patch.object(self.service, "_reload_control", side_effect=self.interrupt_control) as control, \
+                patch.object(self.service, "_restart_fleet_adapter_process", return_value=False):
+            self.assertFalse(self.service.restart_fleet_adapter(interrupt_tasks=True))
+        self.assertEqual([c.args[0] for c in control.call_args_list], ["prepare_reload", "stop_for_reload"])
+        self.assertTrue(self.service.adapter_reload_failed)
+        self.assertEqual(self.service.dispatch_task("goto", "wp_1")["status"], "error")
+        # A fresh backend also honors the FA's persistent reload fence.
+        self.assertEqual(RMFService().dispatch_task("goto", "wp_1")["status"], "error")
+
+    def test_responsive_wait_navigation_can_be_stopped_and_reloaded_without_business_tasks(self):
+        self.service.adapter_process = MagicMock()
+        self.robot.update(busy=True, status="moving")
+        state.current_robots["carter1"] = {"fleet": "fleet1", "task_id": "wait.carter1"}
+        with patch.object(self.service, "_reload_control", side_effect=self.interrupt_control) as control, \
+                patch.object(self.service, "_restart_fleet_adapter_process", return_value=True):
+            self.assertTrue(self.service.restart_fleet_adapter(interrupt_tasks=True))
+        self.assertEqual([c.args[0] for c in control.call_args_list], [
+            "prepare_reload", "stop_for_reload", "finish_reload",
+        ])
+        self.assertEqual(state.current_tasks, [])
+
+    def test_interrupt_offline_reload_skips_only_offline_robots_and_keeps_reconnect_fence(self):
+        self.service.adapter_process = MagicMock()
+        state.save_fleet_adapters_data([{
+            "fleet_name": "fleet1", "robots": [{"name": "carter1"}, {"name": "offline"}],
+        }])
+        with patch.object(self.service, "_reload_control", side_effect=self.interrupt_control), \
+                patch.object(self.service, "_restart_fleet_adapter_process", return_value=True) as restart:
+            self.assertTrue(self.service.restart_fleet_adapter(interrupt_tasks=True, allow_offline=True))
+        restart.assert_called_once_with(offline_robots={"fleet1/offline"})
+        self.assertEqual(self.service.adapter_reload_waiting_robots, {"fleet1/offline"})
+
+    def test_reload_control_requires_matching_request_and_surfaces_adapter_error(self):
+        self.service.fleet_control_pub = MagicMock()
+        state.fa_state["reload"] = {"request_id": "stale", "phase": "held"}
+
+        def publish(pub, topic, payload, confirmed, timeout_s):
+            self.assertFalse(confirmed())
+            state.fa_state["reload"] = {
+                "request_id": payload["request_id"], "phase": "held", "error": "noninterruptible action",
+            }
+            self.assertTrue(confirmed())
+            return True
+
+        with patch.object(self.service, "_publish_until_confirmed", side_effect=publish):
+            with self.assertRaisesRegex(AdapterReloadBlocked, "noninterruptible action"):
+                self.service._reload_control("prepare_reload", "new", "held", 5)
+
     def test_owned_process_restart_waits_for_fresh_loaded_graph(self):
         state.save_fleet_adapters_data([{
             "id": "a1", "fleet_name": "fleet1", "graph_idx": 0, "robots": [{"name": "carter1"}],
@@ -753,6 +881,28 @@ class TestReloadErrors(unittest.IsolatedAsyncioTestCase):
         with patch.object(rmf_service, "restart_fleet_adapter", return_value=True) as restart:
             await adapter_controller.reload_fleet_adapter(persist, allow_offline=True)
         restart.assert_called_once_with(persist, allow_offline=True)
+
+    async def test_map_apply_forwards_task_interruption_only_with_reload(self):
+        from controller import map_controller, adapter_controller
+
+        request = state.MapSaveRequest(
+            waypoints=[{"id": "wp_1", "name": "wp_1", "x": 0, "y": 0}],
+            lanes=[], levels=[{"name": "L1"}], lifts=[],
+            restart_adapter=True, interrupt_tasks=True,
+        )
+        with patch.object(map_controller, "reload_fleet_adapter", new_callable=AsyncMock) as reload_adapter, \
+                patch.object(map_controller, "broadcast", new_callable=AsyncMock), \
+                patch.object(state, "load_fleet_adapters_data", return_value=[]):
+            result = await map_controller.save_map(request)
+        self.assertTrue(reload_adapter.await_args.kwargs["interrupt_tasks"])
+        self.assertIn("不會自動續跑", result["message"])
+        with patch.object(rmf_service, "restart_fleet_adapter", return_value=True) as restart:
+            await adapter_controller.reload_fleet_adapter(interrupt_tasks=True)
+        restart.assert_called_once_with(None, allow_offline=False, interrupt_tasks=True)
+        request.restart_adapter = False
+        with self.assertRaises(HTTPException) as error:
+            await map_controller.save_map(request)
+        self.assertEqual(error.exception.status_code, 400)
 
     async def test_busy_map_apply_does_not_overwrite_json_or_yaml(self):
         from controller import map_controller

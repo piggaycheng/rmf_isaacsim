@@ -55,6 +55,9 @@ def guard_task_submission(method):
         with self.reload_lock:
             if self.adapter_reloading:
                 return {"status": "error", "message": "Fleet Adapter 正在重新載入，暫停接收任務，請稍後再試。"}
+            reload_report = state.fa_state.get("reload") or {}
+            if reload_report.get("request_id") and reload_report.get("phase") != "released":
+                return {"status": "error", "message": "Fleet Adapter 已暫停接單及待命以準備重載，請重新套用路網完成流程。"}
             if self.adapter_reload_failed:
                 return {"status": "error", "message": "Fleet Adapter 尚未確認載入路網，請先成功重新載入後再派遣任務。"}
             if self.adapter_reload_waiting_robots:
@@ -199,11 +202,17 @@ class RMFService:
 
     def restart_fleet_adapter(
         self, persist: Optional[Callable[[], None]] = None, *, allow_offline: bool = False,
+        interrupt_tasks: bool = False,
     ) -> bool:
         """Reserve a task-free reload before changing any configuration on disk."""
+        if interrupt_tasks:
+            return self._interrupt_and_reload(persist, allow_offline=allow_offline)
         with self.reload_lock:
             if self.adapter_reloading:
                 raise AdapterReloadBlocked("Fleet Adapter 正在重新載入，請稍後再試。")
+            reload_report = state.fa_state.get("reload") or {}
+            if reload_report.get("request_id") and reload_report.get("phase") != "released":
+                raise AdapterReloadBlocked("Fleet Adapter 正處於路網重載待命，請使用「套用至車隊」完成安全重載。")
             self.reconcile_interrupted_tasks()
             pending = [t for t in state.current_tasks if t.get("status") not in state.TERMINAL_STATES]
             if pending:
@@ -257,6 +266,102 @@ class RMFService:
                 self._save_offline_reload_wait(set(), self.adapter_reload_waiting_since)
             self.adapter_reload_failed = not restarted
             return restarted
+        finally:
+            with self.reload_lock:
+                self.adapter_reloading = False
+
+    def _reload_control(self, action: str, request_id: str, phase: str, timeout_s: float) -> None:
+        def confirmed():
+            report = state.fa_state.get("reload") or {}
+            return (
+                report.get("request_id") == request_id
+                and (report.get("phase") == phase or bool(report.get("error")))
+            )
+
+        if not self._publish_until_confirmed(
+            self.fleet_control_pub, "/rmf/fleet_control",
+            {"action": action, "request_id": request_id}, confirmed, timeout_s,
+        ):
+            raise AdapterReloadBlocked("Fleet Adapter 未確認重載準備，未套用路網；請檢查連線並重新套用。")
+        report = state.fa_state.get("reload") or {}
+        if report.get("error"):
+            raise AdapterReloadBlocked(f"無法安全中止車隊：{report['error']}。未套用路網，請排除原因後重新套用。")
+
+    def _interrupt_and_reload(self, persist: Optional[Callable[[], None]], *, allow_offline: bool) -> bool:
+        with self.reload_lock:
+            if self.adapter_reloading:
+                raise AdapterReloadBlocked("Fleet Adapter 正在重新載入，請稍後再試。")
+            if not state.is_fa_mqtt_connected():
+                raise AdapterReloadBlocked("無法確認 Fleet Adapter 與車輛狀態，請恢復連線後再套用。")
+            if not isinstance(state.fa_state.get("robots"), dict):
+                raise AdapterReloadBlocked("Fleet Adapter 尚未回報重載安全狀態，請先更新 Adapter。")
+            if self.adapter_process is None:
+                raise AdapterReloadBlocked("無法確認 Fleet Adapter 程序擁有權，未中止任務或變更路網。")
+            self.adapter_reloading = True
+        request_id = uuid.uuid4().hex
+        self.adapter_reload_failed = True
+        try:
+            self._reload_control("prepare_reload", request_id, "held", 5.0)
+            self.reconcile_interrupted_tasks()
+            for task in list(state.current_tasks):
+                if task.get("status") in state.TERMINAL_STATES:
+                    continue
+                result = self.cancel_task(task.get("booking_id") or task["id"])
+                if result["status"] != "success" and task.get("status") not in state.TERMINAL_STATES:
+                    raise AdapterReloadBlocked(
+                        f"無法中止任務 {task.get('fleet_name', '?')}/{task['id']}：{result['message']}。"
+                        "未套用路網；車隊維持重載待命，請排除原因後重新套用。"
+                    )
+            self._reload_control("stop_for_reload", request_id, "stopping", 60.0)
+            deadline = time.monotonic() + 15.0
+            offline_robots: Set[str] = set()
+            while True:
+                if not state.is_fa_mqtt_connected():
+                    raise AdapterReloadBlocked("等待停止時 Fleet Adapter 連線中斷，未套用路網；請重新套用。")
+                robots = state.fa_state.get("robots") or {}
+                report = state.fa_state.get("reload") or {}
+                if report.get("request_id") != request_id or report.get("error"):
+                    raise AdapterReloadBlocked(
+                        f"重載停止確認失敗：{report.get('error') or 'Adapter 重載狀態已變更'}。"
+                        "未套用路網，請檢查服務及車輛後重新套用。"
+                    )
+                expected = self._configured_robot_keys(state.load_fleet_adapters_data()) | set(robots)
+                offline_robots = (
+                    {key for key in expected if key not in robots or robots[key].get("online") is False}
+                    if allow_offline else set()
+                )
+                stopped = all(
+                    key in offline_robots or (
+                        key in robots and self._robot_confirmed_stopped(robots[key])
+                        and robots[key].get("reload_stopped") is True
+                    )
+                    for key in expected
+                )
+                pending = [t for t in state.current_tasks if t.get("status") not in state.TERMINAL_STATES]
+                if stopped and not pending:
+                    break
+                if time.monotonic() >= deadline:
+                    raise AdapterReloadBlocked(
+                        "取消任務後仍未收到所有車輛的新停止確認，未套用路網。"
+                        "車隊維持重載待命；請檢查車輛、心跳及取消狀態後重新套用。"
+                        "僅在確認離線車輛實際停止後，才可使用離線套用。"
+                    )
+                time.sleep(0.1)
+            if persist is not None:
+                persist()
+            self._save_offline_reload_wait(self.adapter_reload_waiting_robots | offline_robots, time.time())
+            if not self._restart_fleet_adapter_process(offline_robots=offline_robots):
+                return False
+            try:
+                self._reload_control("finish_reload", request_id, "released", 5.0)
+            except AdapterReloadBlocked as e:
+                append_adapter_log("system", f"新路網已儲存，但未確認恢復車隊待命：{e}")
+                return False
+            self.adapter_reload_failed = False
+            if not allow_offline:
+                self._save_offline_reload_wait(set(), self.adapter_reload_waiting_since)
+            append_adapter_log("system", "已中止受影響任務並安全套用路網，恢復原有待命設定；舊任務不會續跑。")
+            return True
         finally:
             with self.reload_lock:
                 self.adapter_reloading = False

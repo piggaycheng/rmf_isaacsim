@@ -59,6 +59,8 @@ def get_available_graphs():
 async def save_map(req: MapSaveRequest):
     if req.allow_offline_reload and not req.restart_adapter:
         raise HTTPException(status_code=400, detail="離線套用必須同時重新載入 Fleet Adapter。")
+    if req.interrupt_tasks and not req.restart_adapter:
+        raise HTTPException(status_code=400, detail="中止任務套用必須同時重新載入 Fleet Adapter。")
     # Open-RMF refuses to load a nav graph with duplicated waypoint names, which drops the adapter into mock mode.
     name_counts = Counter(w.get("name", f"wp_{idx}") for idx, w in enumerate(req.waypoints))
     duplicated = sorted(n for n, c in name_counts.items() if c > 1)
@@ -121,7 +123,11 @@ async def save_map(req: MapSaveRequest):
     restart_error = None
     if getattr(req, "restart_adapter", False):
         try:
-            if req.allow_offline_reload:
+            if req.interrupt_tasks:
+                await reload_fleet_adapter(
+                    persist_map, allow_offline=req.allow_offline_reload, interrupt_tasks=True,
+                )
+            elif req.allow_offline_reload:
                 await reload_fleet_adapter(persist_map, allow_offline=True)
             else:
                 await reload_fleet_adapter(persist_map)
@@ -139,6 +145,8 @@ async def save_map(req: MapSaveRequest):
 
     if getattr(req, "restart_adapter", False) and not restart_error:
         message = f"已將最新路網套用至各車隊 ({len(req.waypoints)} 個站點，{len(req.lanes)} 條路線，共 {len(graph_indices)} 組路網)"
+        if req.interrupt_tasks:
+            message += "；受影響任務已中止，不會自動續跑；已恢復原有待命設定"
         if req.allow_offline_reload:
             message += "；離線車輛重新連線並回報閒置前，暫停派遣任務；不會自動續跑舊任務"
     else:

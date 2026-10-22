@@ -322,6 +322,20 @@ class MqttFleetAdapter:
         # "{fleet}_{robot}" -> messages about configured charger/parking waypoints missing from the graph
         self.waypoint_warnings: Dict[str, List[str]] = {}
         self.started_at = time.time()
+        self.reload_path = find_backend_path("saved_maps/adapter_reload.json")
+        self.reload_request_id = None
+        if os.path.exists(self.reload_path):
+            with open(self.reload_path, encoding="utf-8") as f:
+                self.reload_request_id = json.load(f)["request_id"]
+            if not isinstance(self.reload_request_id, str) or not self.reload_request_id:
+                raise ValueError("Invalid adapter_reload.json; refusing to discard reload safety fence")
+        self.reload_report_id = self.reload_request_id
+        self.reload_phase = "held" if self.reload_request_id else "released"
+        self.reload_error = None
+        self.reload_stop_sent: Dict[Tuple[str, str], float] = {}
+        self.reload_stop_commands: Dict[Tuple[str, str], int] = {}
+        self.reload_stop_acked: Set[Tuple[str, str]] = set()
+        self.reload_stopped: Set[Tuple[str, str]] = set()
         self.session_api_requests: Dict[str, Dict[str, Any]] = {}
         self.sessions_path = find_backend_path("saved_maps/robot_sessions.json")
         self.robot_sessions: Dict[str, Dict[str, Any]] = {}
@@ -415,6 +429,9 @@ class MqttFleetAdapter:
         return self.robots.get((target_fleet, robot_id))
 
     def _publish_command(self, robot: ManagedRobot, payload: Dict[str, Any]):
+        if getattr(self, "reload_request_id", None) and payload.get("action") != "stop":
+            print(f"[RELOAD WARN] Command blocked during reload for '{robot.fleet_name}/{robot.name}'")
+            return
         if robot.session_reset_pending and payload.get("action") != "stop":
             print(f"[SESSION WARN] Command blocked during reset for '{robot.fleet_name}/{robot.name}'")
             return
@@ -451,15 +468,17 @@ class MqttFleetAdapter:
             )
         return limits[0], limits[1]
 
-    def _sync_rmf_availability(self, robot: ManagedRobot):
-        """Single source of truth for RMF status/commission: offline > e-stop > paused > available."""
+    def _sync_rmf_availability(self, robot: ManagedRobot, *, strict: bool = False):
+        """Keep reload/session fences above normal offline, e-stop and pause commissioning."""
         if not robot.update_handle:
             return
         try:
             more = robot.update_handle.more()
             if more is None:
+                if strict:
+                    raise RuntimeError(f"RMF handle not ready for {robot.fleet_name}/{robot.name}")
                 return
-            if robot.session_reset_pending:
+            if getattr(self, "reload_request_id", None) or robot.session_reset_pending:
                 commission = more.commission()
                 commission.accept_dispatched_tasks = False
                 commission.accept_direct_tasks = False
@@ -489,6 +508,8 @@ class MqttFleetAdapter:
                 more.unstable_recommission()
         except Exception as e:
             print(f"[RMF WARN] Error syncing RMF availability for '{robot.name}' ({robot.fleet_name}): {e}")
+            if strict:
+                raise
 
     def _defer_command(self, robot: ManagedRobot, execution: Any, cmd_payload: Dict[str, Any], err_msg: str):
         """Hold an RMF command for an offline/e-stopped robot instead of rejecting/replanning (avoids replan loops)."""
@@ -518,6 +539,7 @@ class MqttFleetAdapter:
         payload = robot.last_cmd_payload
         if (
             robot.current_execution is None
+            or getattr(self, "reload_request_id", None)
             or robot.session_reset_pending
             or payload is None
             or robot.deferred_cmd_payload is not None
@@ -535,6 +557,8 @@ class MqttFleetAdapter:
         print(f"[RMF -> AMR] Robot '{robot.name}' does not report cmd_id {robot.cmd_id} (reports {reported_cmd_id}); resent {payload.get('action')} via {cmd_topic}")
 
     def _dispatch_deferred_command(self, robot: ManagedRobot):
+        if getattr(self, "reload_request_id", None):
+            return
         payload = robot.deferred_cmd_payload
         if payload is None or robot.is_estopped or not robot.is_online or robot.session_reset_pending:
             return
@@ -592,12 +616,12 @@ class MqttFleetAdapter:
         with self.lock:
             pending = self.session_api_requests.get(msg.request_id)
             if pending is not None:
-                pending["response"] = response
+                pending["responses"].append(response)
                 pending["event"].set()
 
     def _call_session_api(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         request_id = f"session_{uuid.uuid4().hex}"
-        pending = {"event": threading.Event()}
+        pending = {"event": threading.Event(), "responses": []}
         with self.lock:
             self.session_api_requests[request_id] = pending
         try:
@@ -605,19 +629,29 @@ class MqttFleetAdapter:
             msg.request_id = request_id
             msg.json_msg = json.dumps(payload)
             self.session_api_pub.publish(msg)
-            if not pending["event"].wait(10.0):
-                raise RuntimeError(f"RMF did not confirm {payload['type']}")
-            response = pending["response"]
-            if payload["type"] == "robot_commission_request":
-                confirmed = all(
-                    response.get(key, {}).get("success") is True
-                    for key in ("commission", "pending_dispatch_tasks_policy", "pending_direct_tasks_policy")
-                )
-            else:
-                confirmed = response.get("success") is True
-            if not confirmed:
-                raise RuntimeError(f"RMF rejected session cleanup: {response}")
-            return response
+            deadline = time.monotonic() + 10.0
+            responses = []
+            while time.monotonic() < deadline:
+                pending["event"].wait(max(0.0, deadline - time.monotonic()))
+                pending["event"].clear()
+                with self.lock:
+                    responses = list(pending["responses"])
+                for response in responses:
+                    if payload["type"] == "robot_commission_request":
+                        confirmed = all(
+                            response.get(key, {}).get("success") is True
+                            for key in ("commission", "pending_dispatch_tasks_policy", "pending_direct_tasks_policy")
+                        )
+                    else:
+                        confirmed = response.get("success") is True
+                    if confirmed:
+                        return response
+                if responses:
+                    # Another fleet can reject a task ID before its owning fleet answers.
+                    deadline = min(deadline, time.monotonic() + 1.0)
+            if responses:
+                raise RuntimeError(f"RMF rejected {payload['type']}: {responses}")
+            raise RuntimeError(f"RMF did not confirm {payload['type']}")
         finally:
             with self.lock:
                 self.session_api_requests.pop(request_id, None)
@@ -1153,6 +1187,112 @@ class MqttFleetAdapter:
         self._persist_set("saved_maps/paused_fleets.json", self.paused_fleets)
         self._publish_fa_state()
 
+    def _handle_reload_control(self, payload: Dict[str, Any]):
+        request_id = payload.get("request_id")
+        action = payload.get("action")
+        if not isinstance(request_id, str) or not request_id:
+            print("[RELOAD ERROR] Missing reload request_id")
+            return
+        with self.lock:
+            try:
+                if action == "prepare_reload":
+                    if self.reload_phase == "draining":
+                        return
+                    if request_id == self.reload_report_id and self.reload_phase != "error":
+                        return
+                    for robot in self.robots.values():
+                        command = robot.last_cmd_payload or {}
+                        if (
+                            robot.nav_suspended or robot.pending_suspend_lift
+                            or command.get("action") in ("dock", "prepare_floor_change", "change_floor", "action")
+                        ):
+                            raise RuntimeError(
+                                f"{robot.fleet_name}/{robot.name} 正在對接、換樓層或執行未確認可中斷的動作，請先安全完成"
+                            )
+                    tmp_path = f"{self.reload_path}.{os.getpid()}.tmp"
+                    os.makedirs(os.path.dirname(self.reload_path), exist_ok=True)
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump({"request_id": request_id}, f)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_path, self.reload_path)
+                    self.reload_request_id = self.reload_report_id = request_id
+                    self.reload_phase = "held"
+                    self.reload_error = None
+                    self.reload_stop_sent.clear()
+                    self.reload_stop_commands.clear()
+                    self.reload_stop_acked.clear()
+                    self.reload_stopped.clear()
+                    for robot in self.robots.values():
+                        if robot.active_task:
+                            self._cancel_proceed_timer(robot.active_task)
+                        self._sync_rmf_availability(robot, strict=True)
+                elif request_id == self.reload_request_id:
+                    if action == "stop_for_reload" and self.reload_phase == "held":
+                        self.reload_phase = "draining"
+                        threading.Thread(target=self._stop_for_reload, daemon=True).start()
+                    elif action == "finish_reload" and self.reload_phase != "draining":
+                        self.reload_request_id = None
+                        try:
+                            for robot in self.robots.values():
+                                self._sync_rmf_availability(robot, strict=True)
+                            os.remove(self.reload_path)
+                        except Exception:
+                            self.reload_request_id = request_id
+                            self.reload_phase = "error"
+                            for robot in self.robots.values():
+                                self._sync_rmf_availability(robot)
+                            raise
+                        self.reload_phase = "released"
+                        self.reload_error = None
+            except Exception as e:
+                self.reload_report_id = request_id
+                self.reload_error = str(e)
+                print(f"[RELOAD ERROR] {e}")
+        self._publish_fa_state()
+
+    def _stop_for_reload(self):
+        """Drain RMF queues without force-killing actions; physical stop still needs a new heartbeat."""
+        try:
+            with self.lock:
+                robots = list(self.robots.values())
+            for robot in robots:
+                if not self.mock_rmf:
+                    commission_request = {
+                        "type": "robot_commission_request",
+                        "fleet": robot.fleet_name, "robot": robot.name,
+                        "commission": {"dispatch_tasks": False, "direct_tasks": False, "idle_behavior": False},
+                        "pending_dispatch_tasks_policy": "cancel",
+                        "pending_direct_tasks_policy": "cancel",
+                    }
+                    self._call_session_api(commission_request)
+                    task_id = robot.update_handle.more().current_task_id()
+                    if task_id and not task_id.startswith("wait."):
+                        try:
+                            self._call_session_api({
+                                "type": "cancel_task_request", "task_id": task_id,
+                                "labels": ["Applying navigation graph"],
+                            })
+                        except RuntimeError:
+                            if robot.update_handle.more().current_task_id() == task_id:
+                                raise
+                    self._call_session_api(commission_request)
+                with self.lock:
+                    if robot.is_online:
+                        key = (robot.fleet_name, robot.name)
+                        self.reload_stop_sent[key] = time.time()
+                        self.reload_stopped.discard(key)
+                        self._send_stop_locked(robot)
+                        self.reload_stop_commands[key] = robot.stop_cmd_id
+            with self.lock:
+                self.reload_phase = "stopping"
+        except Exception as e:
+            with self.lock:
+                self.reload_error = str(e)
+                self.reload_phase = "error"
+            print(f"[RELOAD ERROR] Cannot safely drain fleet: {e}")
+        self._publish_fa_state()
+
     @staticmethod
     def _persist_set(subpath: str, values: Set[str]):
         """Atomically persist FA-owned state (the FA is the sole writer of these files)."""
@@ -1376,6 +1516,11 @@ class MqttFleetAdapter:
                 "paused_fleets": sorted(self.paused_fleets),
                 "estopped_robots": sorted(self.estopped_robots),
                 "started_at": self.started_at,
+                "reload": {
+                    "request_id": getattr(self, "reload_report_id", None),
+                    "phase": getattr(self, "reload_phase", "released"),
+                    "error": getattr(self, "reload_error", None),
+                },
                 "robots": {
                     f"{r.fleet_name}/{r.name}": {
                         "online": r.is_online,
@@ -1392,6 +1537,7 @@ class MqttFleetAdapter:
                         "session_reset_pending": r.session_reset_pending,
                         "session_reset_error": r.session_reset_error,
                         "session_cleanup_at": r.session_cleanup_at,
+                        "reload_stopped": (r.fleet_name, r.name) in getattr(self, "reload_stopped", set()),
                     }
                     for r in list(self.robots.values())
                 },
@@ -1427,6 +1573,9 @@ class MqttFleetAdapter:
     def _on_ros2_fleet_control(self, msg: String):
         try:
             payload = json.loads(msg.data)
+            if payload.get("action") in ("prepare_reload", "stop_for_reload", "finish_reload"):
+                self._handle_reload_control(payload)
+                return
             fleet_name = payload.get("fleet")
             if fleet_name:
                 self._handle_fleet_control(fleet_name, payload)
@@ -1988,6 +2137,17 @@ class MqttFleetAdapter:
             robot.is_online = True
             robot.is_off_graph = is_off_graph
             robot.off_graph_distance = round(dist_to_graph, 2)
+            reload_key = (fleet_name, robot_id)
+            if getattr(self, "reload_request_id", None):
+                if (
+                    reload_key in self.reload_stop_acked
+                    and robot.last_heartbeat > self.reload_stop_sent.get(reload_key, float("inf"))
+                    and status in ("idle", "charging")
+                    and "current_cmd_id" in payload and payload["current_cmd_id"] is None
+                ):
+                    self.reload_stopped.add(reload_key)
+                else:
+                    self.reload_stopped.discard(reload_key)
 
             if was_offline:
                 print(f"[HEARTBEAT] Robot '{robot_id}' came back online via heartbeat. Restoring RMF availability.")
@@ -2119,6 +2279,19 @@ class MqttFleetAdapter:
             # Explicit check for STOP command confirmation (never complete previous navigation)
             if cmd_id is not None and cmd_id == robot.stop_cmd_id:
                 print(f"[CMD_RESULT] Robot '{robot_id}' confirmed STOP execution (cmd_id: {cmd_id}, status: {status}).")
+                reload_key = (fleet_name, robot_id)
+                if (
+                    getattr(self, "reload_request_id", None)
+                    and self.reload_stop_commands.get(reload_key) == cmd_id
+                ):
+                    if status not in ("completed", "success", "succeeded"):
+                        self.reload_error = f"{fleet_name}/{robot_id} 未成功執行停止指令 {cmd_id}：{status}"
+                        self.reload_phase = "error"
+                        print(f"[RELOAD ERROR] {self.reload_error}")
+                        return
+                    self.reload_stop_acked.add(reload_key)
+                    self.reload_stop_sent[reload_key] = time.time()
+                    self.reload_stopped.discard(reload_key)
                 robot.status = "idle"
                 robot.stop_cmd_id = None
                 return
@@ -2420,6 +2593,8 @@ class MqttFleetAdapter:
         all_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         fleet_name, robot_id = robot.fleet_name, robot.name
+        if getattr(self, "reload_request_id", None):
+            return {"status": "error", "message": "Fleet Adapter is preparing to reload; new tasks are blocked"}
         if robot.session_reset_pending:
             return {"status": "error", "message": "Vehicle session is awaiting cleanup and valid localization"}
         if not robot.is_online or robot.is_estopped:
@@ -2524,6 +2699,9 @@ class MqttFleetAdapter:
 
     def _send_proceed_locked(self, robot: ManagedRobot, cmd_id: Optional[int] = None) -> bool:
         """Release the gate of the active task. Only valid while the robot reports 'waiting'."""
+        if getattr(self, "reload_request_id", None):
+            print(f"[RELOAD WARN] Proceed blocked during reload for '{robot.name}'")
+            return False
         task = robot.active_task
         if not task:
             print(f"[PROCEED WARN] '{robot.name}' has no active multi-step task. Ignoring proceed.")
@@ -2658,6 +2836,7 @@ class MqttFleetAdapter:
         payload = robot.last_cmd_payload or {}
         if (
             robot.current_execution is None
+            or getattr(self, "reload_request_id", None)
             or robot.precise_arrival
             or robot.is_holding
             or robot.nav_suspended
@@ -2761,7 +2940,7 @@ class MqttFleetAdapter:
             if not robot:
                 print(f"[RMF -> AMR WARN] Cannot execute NAVIGATE: robot '{robot_id}' in fleet '{fleet_name}' not found.")
                 return
-            if robot.session_reset_pending or not execution.okay():
+            if getattr(self, "reload_request_id", None) or robot.session_reset_pending or not execution.okay():
                 print(f"[SESSION] Suppressed stale or reset NAVIGATE for '{fleet_name}/{robot_id}'")
                 return
             self._detach_active_task_locked(robot, "superseded by RMF navigate")
@@ -2859,7 +3038,7 @@ class MqttFleetAdapter:
         recorded at prepare_floor_change mapped onto that floor (see _lift_exit_pose_locked)."""
         with self.lock:
             robot = self._get_robot(fleet_name, robot_id)
-            if robot and (robot.session_reset_pending or not execution.okay()):
+            if robot and (getattr(self, "reload_request_id", None) or robot.session_reset_pending or not execution.okay()):
                 print(f"[SESSION] Suppressed stale or reset LOCALIZE for '{fleet_name}/{robot_id}'")
                 return
             if not robot:
@@ -2954,7 +3133,7 @@ class MqttFleetAdapter:
             if not robot:
                 print(f"[RMF -> AMR WARN] Cannot execute ACTION '{category}': robot '{robot_id}' in fleet '{fleet_name}' not found.")
                 return
-            if robot.session_reset_pending or not execution.okay():
+            if getattr(self, "reload_request_id", None) or robot.session_reset_pending or not execution.okay():
                 print(f"[SESSION] Suppressed ACTION during reset for '{fleet_name}/{robot_id}'")
                 return
 

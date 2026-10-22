@@ -348,6 +348,177 @@ class SessionTest(unittest.TestCase):
         robot.handle_command({"session_id": robot.session_id, "action": "navigate", "target": {"x": 10}})
         self.assertEqual(robot.status, "moving")
 
+    def test_reload_fence_survives_restart_and_blocks_late_navigation_and_proceed(self):
+        robot = self.ready()
+        robot.update_handle = MagicMock()
+        commission = SimpleNamespace(
+            accept_dispatched_tasks=True, accept_direct_tasks=True, perform_idle_behavior=True,
+        )
+        robot.update_handle.more().commission.return_value = commission
+        self.adapter._handle_reload_control({"action": "prepare_reload", "request_id": "reload-1"})
+        self.assertFalse(commission.accept_dispatched_tasks)
+        self.assertFalse(commission.accept_direct_tasks)
+        self.assertFalse(commission.perform_idle_behavior)
+        self.adapter.mqtt_client.reset_mock()
+        destination = SimpleNamespace(position=[10.0, 0.0, 0.0], map="1F")
+        self.adapter._on_rmf_navigate("fleet1", "r1", destination, MagicMock())
+        self.adapter._on_rmf_localize("fleet1", "r1", destination, MagicMock())
+        self.adapter._on_rmf_action("fleet1", "r1", "gimbal_move", {}, MagicMock())
+        self.assertFalse(self.adapter._send_proceed_locked(robot))
+        result = self.adapter.dispatch_multi_step_task("fleet1", "r1", [{"type": "gimbal_move"}])
+        self.assertEqual(result["status"], "error")
+        self.adapter.mqtt_client.publish.assert_not_called()
+        restarted = self.make_adapter()
+        self.assertEqual(restarted.reload_request_id, "reload-1")
+        restarted._publish_command(robot, {"action": "navigate"})
+        restarted.mqtt_client.publish.assert_not_called()
+        restarted._handle_reload_control({"action": "finish_reload", "request_id": "wrong"})
+        self.assertEqual(restarted.reload_request_id, "reload-1")
+        restarted._handle_reload_control({"action": "finish_reload", "request_id": "reload-1"})
+        self.assertIsNone(restarted.reload_request_id)
+        self.assertFalse(os.path.exists(restarted.reload_path))
+        # A delayed duplicate must not start another reload after release.
+        restarted._handle_reload_control({"action": "prepare_reload", "request_id": "reload-1"})
+        self.assertIsNone(restarted.reload_request_id)
+
+    def test_reload_cancels_wait_and_requires_new_idle_heartbeat_not_just_stop_result(self):
+        robot = self.ready()
+        robot.update_handle = MagicMock()
+        robot.update_handle.more().current_task_id.return_value = "wait.r1"
+        robot.current_execution = MagicMock()
+        self.adapter._handle_reload_control({"action": "prepare_reload", "request_id": "reload-1"})
+        self.adapter.mock_rmf = False
+
+        def commission(request):
+            self.adapter._on_rmf_stop("fleet1", "r1", None)
+            return {}
+
+        with patch.object(self.adapter, "_call_session_api", side_effect=commission) as call:
+            self.adapter._stop_for_reload()
+        self.assertEqual([c.args[0]["type"] for c in call.call_args_list], [
+            "robot_commission_request", "robot_commission_request",
+        ])
+        self.assertIsNone(robot.current_execution)
+        self.assertEqual(self.adapter.reload_phase, "stopping")
+        key = ("fleet1", "r1")
+        self.assertNotIn(key, self.adapter.reload_stopped)
+        self.heartbeat()
+        self.assertNotIn(key, self.adapter.reload_stopped)
+        self.adapter._handle_command_result("r1", "fleet1", {
+            "session_id": robot.session_id, "cmd_id": robot.stop_cmd_id, "status": "completed",
+        })
+        self.assertNotIn(key, self.adapter.reload_stopped)
+        self.heartbeat(status="moving", current_cmd_id=12)
+        self.assertNotIn(key, self.adapter.reload_stopped)
+        self.heartbeat(status="idle", current_cmd_id=12)
+        self.assertNotIn(key, self.adapter.reload_stopped)
+        self.heartbeat()
+        self.assertIn(key, self.adapter.reload_stopped)
+        # Repeated prepare/stop messages do not reset the fresh confirmation or launch another worker.
+        with patch.object(fa.threading, "Thread") as worker:
+            self.adapter._handle_reload_control({"action": "prepare_reload", "request_id": "reload-1"})
+            self.adapter._handle_reload_control({"action": "stop_for_reload", "request_id": "reload-1"})
+        worker.assert_not_called()
+        self.assertIn(key, self.adapter.reload_stopped)
+
+    def test_reload_stop_failure_and_stale_ack_cannot_confirm_physical_stop(self):
+        robot = self.ready()
+        self.adapter._handle_reload_control({"action": "prepare_reload", "request_id": "reload-1"})
+        self.adapter._stop_for_reload()
+        stop_id = robot.stop_cmd_id
+        self.adapter._handle_command_result("r1", "fleet1", {
+            "session_id": robot.session_id, "cmd_id": stop_id - 1, "status": "completed",
+        })
+        self.heartbeat()
+        self.assertNotIn(("fleet1", "r1"), self.adapter.reload_stopped)
+        self.adapter._handle_command_result("r1", "fleet1", {
+            "session_id": robot.session_id, "cmd_id": stop_id, "status": "failed",
+        })
+        self.assertIn("未成功執行停止指令", self.adapter.reload_error)
+        self.heartbeat()
+        self.assertNotIn(("fleet1", "r1"), self.adapter.reload_stopped)
+
+    def test_reload_cancellation_waits_for_owning_fleet_after_another_fleet_rejects(self):
+        self.adapter.session_api_pub = MagicMock()
+        timers = []
+
+        def publish(msg):
+            def respond(success):
+                self.adapter._on_session_api_response(SimpleNamespace(
+                    request_id=msg.request_id, json_msg=json.dumps({"success": success}),
+                ))
+            respond(False)
+            timer = fa.threading.Timer(0.01, respond, args=(True,))
+            timers.append(timer)
+            timer.start()
+
+        self.adapter.session_api_pub.publish.side_effect = publish
+        try:
+            response = self.adapter._call_session_api({
+                "type": "cancel_task_request", "task_id": "another-fleet-task",
+            })
+            self.assertTrue(response["success"])
+            self.assertEqual(self.adapter.session_api_requests, {})
+        finally:
+            for timer in timers:
+                timer.join()
+
+    def test_reload_rejects_unsafe_actions_and_surfaces_cancellation_failure(self):
+        robot = self.ready()
+        for action in ("dock", "prepare_floor_change", "change_floor", "action"):
+            with self.subTest(action=action):
+                robot.last_cmd_payload = {"action": action}
+                self.adapter._handle_reload_control({"action": "prepare_reload", "request_id": action})
+                self.assertIn("安全完成", self.adapter.reload_error)
+                self.assertIsNone(self.adapter.reload_request_id)
+                self.assertFalse(os.path.exists(self.adapter.reload_path))
+        robot.last_cmd_payload = None
+        robot.update_handle = MagicMock()
+        robot.update_handle.more().current_task_id.return_value = "external-task"
+        self.adapter._handle_reload_control({"action": "prepare_reload", "request_id": "reload-1"})
+        self.adapter.mock_rmf = False
+
+        def cancel(request):
+            if request["type"] == "cancel_task_request":
+                raise RuntimeError("task cannot cancel")
+            return {}
+
+        with patch.object(self.adapter, "_call_session_api", side_effect=cancel) as call:
+            self.adapter._stop_for_reload()
+        self.assertIn("task cannot cancel", self.adapter.reload_error)
+        self.assertEqual(self.adapter.reload_phase, "error")
+        self.assertTrue(os.path.exists(self.adapter.reload_path))
+        self.assertNotIn("kill_task_request", [c.args[0]["type"] for c in call.call_args_list])
+
+    def test_reload_release_preserves_operator_pause_and_estop_and_handles_restore_failure(self):
+        robot = self.ready()
+        robot.is_paused = True
+        robot.is_estopped = True
+        self.adapter.paused_fleets.add("fleet1")
+        self.adapter.estopped_robots.add("fleet1/r1")
+        self.adapter._handle_reload_control({"action": "prepare_reload", "request_id": "reload-1"})
+        with patch.object(self.adapter, "_sync_rmf_availability", side_effect=RuntimeError("restore failed")):
+            self.adapter._handle_reload_control({"action": "finish_reload", "request_id": "reload-1"})
+        self.assertEqual(self.adapter.reload_request_id, "reload-1")
+        self.assertTrue(os.path.exists(self.adapter.reload_path))
+        self.adapter._handle_reload_control({"action": "finish_reload", "request_id": "reload-1"})
+        self.assertIsNone(self.adapter.reload_request_id)
+        self.assertTrue(robot.is_paused)
+        self.assertTrue(robot.is_estopped)
+        self.assertEqual(self.adapter.paused_fleets, {"fleet1"})
+        self.assertEqual(self.adapter.estopped_robots, {"fleet1/r1"})
+
+    def test_mock_stop_clears_navigation_command_for_fresh_stop_heartbeat(self):
+        robot = mock_robot.MockRobot()
+        robot.is_registered = True
+        robot.handle_command({
+            "session_id": robot.session_id, "cmd_id": 10, "action": "navigate", "target": {"x": 10},
+        })
+        self.assertEqual(robot.current_cmd_id, 10)
+        robot.handle_command({"session_id": robot.session_id, "cmd_id": 11, "action": "stop"})
+        self.assertEqual(robot.status, "idle")
+        self.assertIsNone(robot.current_cmd_id)
+
 
 class BackendSessionTest(unittest.TestCase):
     def test_only_old_nonterminal_tasks_of_rebooted_robot_are_canceled(self):

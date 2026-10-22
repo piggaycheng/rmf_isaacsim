@@ -36,11 +36,17 @@ def get_adapter_logs(adapter_id: str) -> List[str]:
 
 async def reload_fleet_adapter(
     persist: Optional[Callable[[], None]] = None, *, allow_offline: bool = False,
+    interrupt_tasks: bool = False,
 ) -> None:
     from rmf_service import AdapterReloadBlocked, rmf_service
 
     try:
-        if allow_offline:
+        if interrupt_tasks:
+            restarted = await asyncio.to_thread(
+                rmf_service.restart_fleet_adapter, persist,
+                allow_offline=allow_offline, interrupt_tasks=True,
+            )
+        elif allow_offline:
             restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter, persist, allow_offline=True)
         else:
             restarted = await asyncio.to_thread(rmf_service.restart_fleet_adapter, persist)

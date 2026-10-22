@@ -1387,10 +1387,35 @@ export function App() {
 
   // Apply Map to Fleet Adapters (Save & Reload all Fleet Adapters)
   const handleApplyMapToFleets = async (allowOffline = false) => {
-    if (allowOffline && !window.confirm(
-      '離線不代表車輛已停止。請確認 Isaac Sim 已關閉，或所有離線實體車已確實停止，而非僅網路中斷。\n\n離線套用仍會阻擋未結束任務及尚未停止的在線車輛；不會自動續跑舊任務。離線車輛重新連線並回報閒置前，暫停派遣。\n\n確定要離線套用路網？'
-    )) return;
     setIsApplyingMap(true);
+    try {
+      const [taskResponse, fleetResponse] = await Promise.all([
+        fetch('/api/tasks'), fetch('/api/fleet-adapters'),
+      ]);
+      if (!taskResponse.ok || !fleetResponse.ok) throw new Error('無法取得最新任務與車隊清單');
+      const currentTasks: Task[] = await taskResponse.json();
+      const adapters: FleetAdapter[] = await fleetResponse.json();
+      const affectedTasks = currentTasks.filter(
+        (task) => !['completed', 'failed', 'canceled', 'cancelled', 'rejected'].includes(task.status)
+      );
+      const taskList = affectedTasks.length > 0
+        ? affectedTasks.map((task) => `${task.fleet_name || '未指定車隊'}/${task.booking_id || task.id} [${task.status}]`).join('\n')
+        : '目前沒有未結束的業務任務；仍會停止待命導航。';
+      const offlineWarning = allowOffline
+        ? '\n\n離線不代表已停止。請確認 Isaac Sim 已關閉，或離線實體車已確實停止，而非僅網路中斷。離線車輛重新連線並回報閒置前，暫停派遣。'
+        : '';
+      if (!window.confirm(
+        `此操作會中止所有共用 Fleet Adapter 車隊的任務與待命導航。\n受影響車隊：${adapters.map((adapter) => adapter.fleet_name).join('、') || '所有已註冊車隊'}\n\n未結束任務（${affectedTasks.length} 筆）：\n${taskList}\n\n確認後將停止接單、取消任務，等待車輛停止後才儲存並重載路網。清單外由其他來源派發的任務也會中止。重載後恢復原有待命設定，但不會續跑已取消任務。\n若取消或停止確認失敗，不會套用路網，請排除原因後重新套用。${offlineWarning}\n\n確定要中止任務並${allowOffline ? '離線' : ''}套用路網？`
+      )) {
+        setIsApplyingMap(false);
+        return;
+      }
+    } catch (error) {
+      setSaveToast(`套用失敗：${error instanceof Error ? error.message : '無法取得最新狀態'}`);
+      setIsApplyingMap(false);
+      setTimeout(() => setSaveToast(null), 8000);
+      return;
+    }
     // Only persist lifts that currently have at least one lift waypoint
     const liftWaypoints = waypoints.filter((w) => w.type === 'lift' || w.lift);
     const liftNamesWithWps = new Set(
@@ -1423,10 +1448,9 @@ export function App() {
       ...(levels.length > 0 ? { levels, lifts: finalLifts } : {}),
       restart_adapter: true,
       allow_offline_reload: allowOffline,
+      interrupt_tasks: true,
     };
     try {
-      localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
-
       const res = await fetch('/api/map', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1434,6 +1458,7 @@ export function App() {
       });
       const data = await res.json();
       if (res.ok && data.status !== 'error') {
+        localStorage.setItem('rmf_active_nav_graph', JSON.stringify(payload));
         setStaleAdapterFleets(data.adapter_restart_required || []);
         setSaveToast(data.message || '已套用路網至各車隊');
         setHasUnsavedChanges(false);
@@ -1444,7 +1469,7 @@ export function App() {
       setSaveToast('套用失敗 (伺服器離線)');
     } finally {
       setIsApplyingMap(false);
-      setTimeout(() => setSaveToast(null), allowOffline ? 8000 : 3000);
+      setTimeout(() => setSaveToast(null), 8000);
     }
   };
 
@@ -1844,7 +1869,7 @@ export function App() {
                   className="bg-cyan-600 hover:bg-cyan-500 text-white font-medium shadow-sm shadow-cyan-950/50 text-xs h-7 px-2.5 flex-shrink-0"
                   onClick={() => handleApplyMapToFleets()}
                   disabled={isApplyingMap || isSaving}
-                  title="將當前路網套用至各車隊並重新載入 Fleet Adapter"
+                  title="確認後中止所有共用車隊任務與待命導航，等待車輛停止，再儲存並重載路網；舊任務不會續跑"
                 >
                   <RotateCcw className={`w-3.5 h-3.5 mr-1 ${isApplyingMap ? 'animate-spin' : ''}`} />
                   {isApplyingMap ? '套用中...' : '套用至車隊'}

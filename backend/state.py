@@ -97,6 +97,7 @@ class MapSaveRequest(BaseModel):
     lifts: Optional[List[Dict[str, Any]]] = None
     restart_adapter: Optional[bool] = False
     allow_offline_reload: bool = False
+    interrupt_tasks: bool = False
 
 class CameraDisableRequest(BaseModel):
     camera_name: str

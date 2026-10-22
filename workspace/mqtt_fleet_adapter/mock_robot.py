@@ -201,6 +201,15 @@ class MockRobot:
             self.status = "idle"
             self.target_x = None
             self.target_y = None
+            self.current_cmd_id = None
+            self.client.publish(self.topic_cmd_result, json.dumps({
+                "robot_id": self.robot_id,
+                "session_id": self.session_id,
+                "cmd_id": cmd_id,
+                "status": "completed",
+                "message": "Stopped",
+                "timestamp": time.time(),
+            }), qos=1)
 
     def motion_loop(self):
         """Simulates vehicle physics / movement towards target."""
